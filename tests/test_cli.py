@@ -38,6 +38,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     captured = capsys.readouterr()
     assert "Subcommand Details:" in captured.out
     assert "--batch-size BATCH_SIZE" in captured.out
+    assert "--furigana-mask" in captured.out
+    assert "--srt-policy {safe,overlap}" in captured.out
     assert "--force" in captured.out
 
 
@@ -92,8 +94,62 @@ def test_run_convert_uses_local_model_and_offline(monkeypatch, tmp_path: Path) -
     assert rc == 0
     assert captured["model_id"] == str(model_dir)
     assert captured["local_files_only"] is True
+    assert captured["enable_furigana_mask"] is False
+    assert captured["srt_policy"] == "safe"
     assert captured["input_sup"] == input_sup.resolve()
     assert captured["output_srt"] == output_srt.resolve()
+
+
+def test_run_convert_passes_furigana_mask_flag(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    model_dir = tmp_path / "cached_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_convert_sup_to_srt(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=tmp_path / "output.srt",
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: model_dir)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    output_srt = tmp_path / "output.srt"
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--furigana-mask"])
+    assert rc == 0
+    assert captured["enable_furigana_mask"] is True
+
+
+def test_run_convert_passes_srt_policy(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    model_dir = tmp_path / "cached_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_convert_sup_to_srt(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=tmp_path / "output.srt",
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: model_dir)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    output_srt = tmp_path / "output.srt"
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--srt-policy", "overlap"])
+    assert rc == 0
+    assert captured["srt_policy"] == "overlap"
 
 
 def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:

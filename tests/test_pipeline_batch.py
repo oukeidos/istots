@@ -48,7 +48,7 @@ def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: P
         def close(self) -> None:
             self.closed = True
 
-    def fake_iter_sup_frames(*args, **kwargs):
+    def fake_iter_sup_window_frames(*args, **kwargs):
         if kwargs.get("on_total") is not None:
             kwargs["on_total"](0)
         return iter([])
@@ -58,7 +58,7 @@ def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
-    monkeypatch.setattr(pipeline, "iter_sup_frames", fake_iter_sup_frames)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
 
     result = pipeline.convert_sup_to_srt(
@@ -77,6 +77,11 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
     input_sup.write_bytes(b"")
 
     frame = SimpleNamespace(
+        window_id=0,
+        left=0,
+        top=0,
+        right=1,
+        bottom=1,
         start=timedelta(milliseconds=0),
         end=timedelta(milliseconds=10),
         image=Image.new("RGB", (2, 2), "white"),
@@ -98,14 +103,14 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
         def close(self) -> None:
             self.closed = True
 
-    def fake_iter_sup_frames(*args, **kwargs):
+    def fake_iter_sup_window_frames(*args, **kwargs):
         if kwargs.get("on_total") is not None:
             kwargs["on_total"](1)
         return iter([frame])
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
-    monkeypatch.setattr(pipeline, "iter_sup_frames", fake_iter_sup_frames)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -117,3 +122,213 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
         )
 
     assert FakeBackend.instances[0].closed
+
+
+def test_convert_sup_to_srt_applies_furigana_mask_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    original = Image.new("RGB", (2, 2), "white")
+    masked = Image.new("RGB", (2, 2), "black")
+    frame = SimpleNamespace(
+        window_id=0,
+        left=0,
+        top=0,
+        right=1,
+        bottom=1,
+        start=timedelta(milliseconds=0),
+        end=timedelta(milliseconds=10),
+        image=original,
+    )
+
+    class FakeBackend:
+        captured: list[Image.Image] = []
+
+        def __init__(self, **kwargs) -> None:
+            return None
+
+        def recognize_batch(self, images):
+            FakeBackend.captured.extend(images)
+            return [""]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](1)
+        return iter([frame])
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
+    monkeypatch.setattr(
+        pipeline,
+        "build_furigana_masks",
+        lambda images: [SimpleNamespace(image=masked) for _ in images],
+    )
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        enable_furigana_mask=True,
+        verbose=False,
+    )
+
+    assert FakeBackend.captured[0] is masked
+
+
+def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    original = Image.new("RGB", (2, 2), "white")
+    frame = SimpleNamespace(
+        window_id=0,
+        left=0,
+        top=0,
+        right=1,
+        bottom=1,
+        start=timedelta(milliseconds=0),
+        end=timedelta(milliseconds=10),
+        image=original,
+    )
+
+    class FakeBackend:
+        captured: list[Image.Image] = []
+
+        def __init__(self, **kwargs) -> None:
+            return None
+
+        def recognize_batch(self, images):
+            FakeBackend.captured.extend(images)
+            return [""]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](1)
+        return iter([frame])
+
+    calls = {"count": 0}
+
+    def fake_build(images):
+        calls["count"] += 1
+        return [SimpleNamespace(image=image) for image in images]
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
+    monkeypatch.setattr(pipeline, "build_furigana_masks", fake_build)
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        enable_furigana_mask=False,
+        verbose=False,
+    )
+
+    assert calls["count"] == 0
+    assert FakeBackend.captured[0] is original
+
+
+def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:
+    segments = [
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=20),
+            text="VERT",
+            window_id=1,
+            left=100,
+            top=0,
+            right=110,
+            bottom=50,
+        ),
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            text="TOP",
+            window_id=0,
+            left=0,
+            top=100,
+            right=50,
+            bottom=120,
+        ),
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            text="BOTTOM",
+            window_id=0,
+            left=0,
+            top=100,
+            right=50,
+            bottom=120,
+        ),
+    ]
+
+    entries = pipeline._merge_window_segments(segments)  # noqa: SLF001
+
+    assert [(entry.start, entry.end, entry.text) for entry in entries] == [
+        (timedelta(milliseconds=0), timedelta(milliseconds=10), "VERT\nTOP"),
+        (timedelta(milliseconds=10), timedelta(milliseconds=20), "VERT\nBOTTOM"),
+    ]
+
+
+def test_overlap_window_segments_keeps_overlapping_cues_separate() -> None:
+    segments = [
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=20),
+            text="VERT",
+            window_id=1,
+            left=100,
+            top=0,
+            right=110,
+            bottom=50,
+        ),
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            text="TOP",
+            window_id=0,
+            left=0,
+            top=100,
+            right=50,
+            bottom=120,
+        ),
+        pipeline._WindowTextSegment(
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            text="BOTTOM",
+            window_id=0,
+            left=0,
+            top=100,
+            right=50,
+            bottom=120,
+        ),
+    ]
+
+    entries = pipeline._build_subtitle_entries(segments, srt_policy="overlap")  # noqa: SLF001
+
+    assert [(entry.start, entry.end, entry.text) for entry in entries] == [
+        (timedelta(milliseconds=0), timedelta(milliseconds=20), "VERT"),
+        (timedelta(milliseconds=0), timedelta(milliseconds=10), "TOP"),
+        (timedelta(milliseconds=10), timedelta(milliseconds=20), "BOTTOM"),
+    ]
+
+
+def test_build_subtitle_entries_rejects_unknown_policy() -> None:
+    with pytest.raises(ValueError, match="unsupported srt policy"):
+        pipeline._build_subtitle_entries([], srt_policy="bad-mode")  # noqa: SLF001

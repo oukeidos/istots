@@ -7,9 +7,10 @@ from pathlib import Path
 import time
 
 from istots.device import resolve_device
+from istots.furigana_mask import build_furigana_masks
 from istots.ocr.hf_backend import HFPaddleOCRVLBackend
 from istots.srt_writer import SubtitleEntry, write_srt
-from istots.sup_reader import iter_sup_frames
+from istots.sup_reader import iter_sup_window_frames
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,18 @@ class ConversionResult:
     device_used: str
 
 
+@dataclass
+class _WindowTextSegment:
+    start: timedelta
+    end: timedelta
+    text: str
+    window_id: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
 def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
@@ -31,6 +44,8 @@ def convert_sup_to_srt(
     batch_size: int = 1,
     max_new_tokens: int = 256,
     local_files_only: bool = True,
+    enable_furigana_mask: bool = False,
+    srt_policy: str = "safe",
     verbose: bool = True,
 ) -> ConversionResult:
     if not input_sup.exists():
@@ -66,19 +81,22 @@ def convert_sup_to_srt(
     if verbose:
         logger.info("using device: %s", device)
         logger.info("requested OCR batch size: %d", batch_size)
+        logger.info("furigana masking: %s", "enabled" if enable_furigana_mask else "disabled")
+        logger.info("srt policy: %s", srt_policy)
 
     try:
-        entries: list[SubtitleEntry] = []
+        segments: list[_WindowTextSegment] = []
         processed = 0
         total = 0
         effective_batch_size = max(1, batch_size)
         frame_buffer = []
+        prepared_images = None
 
         def on_total(count: int) -> None:
             nonlocal total
             total = count
             if verbose:
-                logger.info("parsed SUP frames: total=%d", total)
+                logger.info("parsed SUP OCR inputs: total=%d", total)
 
         def flush_buffer() -> None:
             nonlocal processed, effective_batch_size, frame_buffer
@@ -100,7 +118,12 @@ def convert_sup_to_srt(
 
                 ocr_started = time.monotonic()
                 try:
-                    texts = backend.recognize_batch([frame.image for frame in chunk])
+                    if prepared_images is not None:
+                        start_offset = start_index - 1
+                        images = prepared_images[start_offset : start_offset + len(chunk)]
+                    else:
+                        images = [frame.image for frame in chunk]
+                    texts = backend.recognize_batch(images)
                 except Exception as exc:
                     if _is_oom_error(exc) and chunk_size > 1:
                         reduced = max(1, chunk_size // 2)
@@ -132,12 +155,16 @@ def convert_sup_to_srt(
                     if end <= frame.start:
                         end = frame.start + timedelta(milliseconds=1)
 
-                    entries.append(
-                        SubtitleEntry(
-                            index=len(entries) + 1,
+                    segments.append(
+                        _WindowTextSegment(
                             start=frame.start,
                             end=end,
                             text=text,
+                            window_id=frame.window_id,
+                            left=frame.left,
+                            top=frame.top,
+                            right=frame.right,
+                            bottom=frame.bottom,
                         )
                     )
 
@@ -153,7 +180,16 @@ def convert_sup_to_srt(
                     )
                 pending = pending[chunk_size:]
 
-        for frame in iter_sup_frames(input_sup, max_items=max_items, on_total=on_total):
+        if enable_furigana_mask:
+            frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
+            if verbose:
+                logger.info("building furigana mask statistics by orientation")
+            prepared_images = [result.image for result in build_furigana_masks([frame.image for frame in frames])]
+            frame_iterable = frames
+        else:
+            frame_iterable = iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total)
+
+        for frame in frame_iterable:
             frame_buffer.append(frame)
             if len(frame_buffer) >= effective_batch_size:
                 flush_buffer()
@@ -161,6 +197,7 @@ def convert_sup_to_srt(
         if frame_buffer:
             flush_buffer()
 
+        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
         write_srt(entries, output_srt)
         if verbose:
             logger.info(
@@ -183,6 +220,109 @@ def convert_sup_to_srt(
                     logger.info("OCR backend released from device memory")
             except Exception as exc:
                 logger.warning("failed to release OCR backend cleanly: %s", exc)
+
+
+def _build_subtitle_entries(
+    segments: list[_WindowTextSegment],
+    srt_policy: str,
+) -> list[SubtitleEntry]:
+    if srt_policy == "safe":
+        return _merge_window_segments(segments)
+    if srt_policy == "overlap":
+        return _overlap_window_segments(segments)
+    raise ValueError(f"unsupported srt policy: {srt_policy}")
+
+
+def _clean_window_segments(segments: list[_WindowTextSegment]) -> list[_WindowTextSegment]:
+    return [
+        _WindowTextSegment(
+            start=segment.start,
+            end=segment.end,
+            text=segment.text.strip(),
+            window_id=segment.window_id,
+            left=segment.left,
+            top=segment.top,
+            right=segment.right,
+            bottom=segment.bottom,
+        )
+        for segment in segments
+        if segment.text.strip() and segment.end > segment.start
+    ]
+
+
+def _merge_window_segments(segments: list[_WindowTextSegment]) -> list[SubtitleEntry]:
+    cleaned = _clean_window_segments(segments)
+    if not cleaned:
+        return []
+
+    boundaries = sorted({segment.start for segment in cleaned} | {segment.end for segment in cleaned})
+    entries: list[SubtitleEntry] = []
+
+    for index in range(len(boundaries) - 1):
+        start = boundaries[index]
+        end = boundaries[index + 1]
+        if end <= start:
+            continue
+
+        active = [
+            segment
+            for segment in cleaned
+            if segment.start < end and segment.end > start
+        ]
+        if not active:
+            continue
+
+        active.sort(key=lambda segment: (segment.top, segment.left, segment.right, segment.window_id))
+        lines: list[str] = []
+        seen: set[str] = set()
+        for segment in active:
+            if segment.text in seen:
+                continue
+            lines.append(segment.text)
+            seen.add(segment.text)
+        if not lines:
+            continue
+
+        text = "\n".join(lines)
+        if entries and entries[-1].end == start and entries[-1].text == text:
+            entries[-1].end = end
+            continue
+
+        entries.append(
+            SubtitleEntry(
+                index=len(entries) + 1,
+                start=start,
+                end=end,
+                text=text,
+            )
+        )
+
+    for index, entry in enumerate(entries, start=1):
+        entry.index = index
+    return entries
+
+
+def _overlap_window_segments(segments: list[_WindowTextSegment]) -> list[SubtitleEntry]:
+    cleaned = _clean_window_segments(segments)
+    cleaned.sort(
+        key=lambda segment: (
+            segment.start,
+            segment.top,
+            segment.left,
+            segment.right,
+            segment.window_id,
+            segment.end,
+        )
+    )
+    return [
+        SubtitleEntry(
+            index=index,
+            start=segment.start,
+            end=segment.end,
+            text=segment.text,
+        )
+        for index, segment in enumerate(cleaned, start=1)
+    ]
 
 
 def _percent(current: int, total: int) -> float:

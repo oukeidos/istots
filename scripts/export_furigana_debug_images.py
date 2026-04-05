@@ -6,16 +6,23 @@ import logging
 import shutil
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
+from istots.furigana_mask import build_furigana_masks
 from istots.sup_reader import iter_sup_window_frames
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+LINE_COLORS = {
+    "main": "#0000ff",
+    "furigana": "#ff0000",
+    "other": "#fbbc04",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Export deduplicated subtitle window images from SUP. "
-            "Uses istots Python parser/policy path (same OCR-input basis as conversion)."
+            "Export original subtitle window images together with furigana-mask debug outputs."
         ),
     )
     parser.add_argument("input_sup", type=Path, help="Input .sup file")
@@ -51,11 +58,26 @@ def ensure_output_dir(output_dir: Path, force: bool) -> None:
                 "(use --force to overwrite)"
             )
         shutil.rmtree(output_dir)
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "images").mkdir(parents=True, exist_ok=True)
+    for name in ("original", "masked", "mask", "lines"):
+        (output_dir / name).mkdir(parents=True, exist_ok=True)
 
 
-def export_images(input_sup: Path, output_dir: Path, max_items: int | None) -> int:
+def draw_line_overlay(image: Image.Image, lines) -> Image.Image:
+    overlay = image.convert("RGB").copy()
+    draw = ImageDraw.Draw(overlay)
+    for line in lines:
+        color = LINE_COLORS.get(line.role, LINE_COLORS["other"])
+        draw.rectangle(
+            (line.left, line.top, line.right, line.bottom),
+            outline=color,
+            width=3,
+        )
+    return overlay
+
+
+def export_debug_images(input_sup: Path, output_dir: Path, max_items: int | None) -> int:
     total_hint = 0
 
     def on_total(count: int) -> None:
@@ -63,22 +85,23 @@ def export_images(input_sup: Path, output_dir: Path, max_items: int | None) -> i
         total_hint = count
         logging.info("deduplicated subtitle windows detected: %d", count)
 
-    image_dir = output_dir / "images"
     manifest_path = output_dir / "manifest.jsonl"
-
     written = 0
     frame_index = 0
     segment_index = 0
     current_group: tuple[int, int] | None = None
+
+    frames = list(
+        iter_sup_window_frames(
+            input_sup=input_sup,
+            max_items=max_items,
+            on_total=on_total,
+        )
+    )
+    results = build_furigana_masks([frame.image for frame in frames])
+
     with manifest_path.open("w", encoding="utf-8") as manifest:
-        for index, frame in enumerate(
-            iter_sup_window_frames(
-                input_sup=input_sup,
-                max_items=max_items,
-                on_total=on_total,
-            ),
-            start=1,
-        ):
+        for index, (frame, result) in enumerate(zip(frames, results, strict=True), start=1):
             start_ms = timedelta_to_ms(frame.start)
             end_ms = timedelta_to_ms(frame.end)
             if end_ms <= start_ms:
@@ -92,8 +115,16 @@ def export_images(input_sup: Path, output_dir: Path, max_items: int | None) -> i
             segment_index += 1
 
             filename = f"{frame_index:06d}_w{frame.window_id}.png"
-            image_path = image_dir / filename
-            frame.image.save(image_path, format="PNG")
+
+            original_path = output_dir / "original" / filename
+            masked_path = output_dir / "masked" / filename
+            mask_path = output_dir / "mask" / filename
+            lines_path = output_dir / "lines" / filename
+
+            frame.image.save(original_path, format="PNG")
+            result.image.save(masked_path, format="PNG")
+            result.mask.save(mask_path, format="PNG")
+            draw_line_overlay(frame.image, result.lines).save(lines_path, format="PNG")
 
             row = {
                 "index": index,
@@ -104,7 +135,16 @@ def export_images(input_sup: Path, output_dir: Path, max_items: int | None) -> i
                 "bbox": [frame.left, frame.top, frame.right, frame.bottom],
                 "start_ms": start_ms,
                 "end_ms": end_ms,
-                "image": f"images/{filename}",
+                "original": f"original/{filename}",
+                "masked": f"masked/{filename}",
+                "mask": f"mask/{filename}",
+                "lines": f"lines/{filename}",
+                "orientation": result.orientation,
+                "component_count": result.component_count,
+                "selected_count": result.selected_count,
+                "masked_pixel_count": result.masked_pixel_count,
+                "main_line_count": sum(1 for line in result.lines if line.role == "main"),
+                "furigana_line_count": sum(1 for line in result.lines if line.role == "furigana"),
             }
             manifest.write(json.dumps(row, ensure_ascii=True) + "\n")
             written = index
@@ -139,15 +179,13 @@ def main() -> int:
     logging.info("output: %s", output_dir)
 
     try:
-        written = export_images(
+        written = export_debug_images(
             input_sup=input_sup,
             output_dir=output_dir,
             max_items=args.max_items,
         )
     except Exception as exc:
-        raise RuntimeError(
-            "failed to export deduplicated SUP images."
-        ) from exc
+        raise RuntimeError("failed to export furigana debug images") from exc
 
     logging.info("done: exported %d images", written)
     logging.info("manifest: %s", output_dir / "manifest.jsonl")

@@ -103,6 +103,24 @@ class ParsedDisplaySet:
     pcs: PcsSegment | None
     complete: bool
     decoded_pixels: list[list[int]] | None
+    decoded_windows: tuple["DecodedWindow", ...] = ()
+
+
+@dataclass(frozen=True)
+class DecodedWindow:
+    window_id: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+    object_ids: tuple[int, ...]
+    pixels: list[list[int]]
+
+    @property
+    def size(self) -> tuple[int, int]:
+        if not self.pixels:
+            return (0, 0)
+        return (len(self.pixels[0]), len(self.pixels))
 
 
 @dataclass
@@ -153,6 +171,15 @@ class _Packet:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class _DecodedRaster:
+    pixels: list[list[int]]
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
 class PgsEngine:
     def __init__(self, input_sup: Path) -> None:
         self.input_sup = input_sup.expanduser().resolve()
@@ -160,7 +187,7 @@ class PgsEngine:
         self._palette_versions: dict[int, int] = {}
         self._objects: dict[int, ObjectBuffer] = {}
         self._windows: dict[int, WindowInfo] = {}
-        self._display_decode_cache: OrderedDict[tuple, list[list[int]]] = OrderedDict()
+        self._display_decode_cache: OrderedDict[tuple, tuple[DecodedWindow, ...]] = OrderedDict()
         self._predecoded_object_cache: dict[tuple[int, int, bytes], object] = {}
 
     def parse_display_sets(
@@ -252,12 +279,22 @@ class PgsEngine:
                 _update_windows(self._windows, packet.payload)
 
         if pcs is None:
-            return ParsedDisplaySet(raw_index=raw_index, pcs=None, complete=False, decoded_pixels=None)
+            return ParsedDisplaySet(
+                raw_index=raw_index,
+                pcs=None,
+                complete=False,
+                decoded_pixels=None,
+            )
 
         if pcs.composition_state not in START_STATES:
-            return ParsedDisplaySet(raw_index=raw_index, pcs=pcs, complete=False, decoded_pixels=None)
+            return ParsedDisplaySet(
+                raw_index=raw_index,
+                pcs=pcs,
+                complete=False,
+                decoded_pixels=None,
+            )
 
-        decoded = _decode_display_set_cached(
+        decoded_windows = _decode_display_set_windows_cached(
             pcs=pcs,
             palettes=self._palettes,
             palette_versions=self._palette_versions,
@@ -266,11 +303,13 @@ class PgsEngine:
             cache=self._display_decode_cache,
             max_cache_items=DISPLAY_CACHE_MAX_ITEMS,
         )
+        decoded = decoded_windows[-1].pixels if decoded_windows else None
         return ParsedDisplaySet(
             raw_index=raw_index,
             pcs=pcs,
             complete=decoded is not None,
             decoded_pixels=decoded,
+            decoded_windows=decoded_windows,
         )
 
     def _build_predecoded_object_cache(
@@ -667,23 +706,70 @@ def _decode_display_set(
     objects: dict[int, ObjectBuffer],
     predecoded_objects: dict[tuple[int, int, bytes], object] | None = None,
 ) -> list[list[int]] | None:
-    if not pcs.objects:
+    decoded_windows = _decode_display_set_windows(
+        pcs=pcs,
+        palettes=palettes,
+        palette_versions=palette_versions,
+        objects=objects,
+        predecoded_objects=predecoded_objects,
+    )
+    if not decoded_windows:
         return None
+    return decoded_windows[-1].pixels
+
+
+def _decode_display_set_windows(
+    pcs: PcsSegment,
+    palettes: dict[int, dict[int, PaletteEntry]],
+    palette_versions: dict[int, int],
+    objects: dict[int, ObjectBuffer],
+    predecoded_objects: dict[tuple[int, int, bytes], object] | None = None,
+) -> tuple[DecodedWindow, ...]:
+    if not pcs.objects:
+        return ()
 
     palette = palettes.get(pcs.palette_id)
     if not palette:
-        return None
+        return ()
     gray_lut, alpha_lut = _build_palette_lut(palette)
 
-    object_refs = pcs.objects
-    if len(object_refs) > 1:
-        # pgs-parse `get_decoded_image(true)` behavior aligns with selecting one
-        # eye/window track on dual-window compositions.
-        selected_window = max(ref.window_id for ref in object_refs)
-        object_refs = [ref for ref in object_refs if ref.window_id == selected_window]
+    refs_by_window: dict[int, list[CompositionObject]] = {}
+    for ref in pcs.objects:
+        refs_by_window.setdefault(ref.window_id, []).append(ref)
 
+    decoded_windows: list[DecodedWindow] = []
+    for window_id in sorted(refs_by_window):
+        decoded = _decode_object_refs(
+            object_refs=refs_by_window[window_id],
+            gray_lut=gray_lut,
+            alpha_lut=alpha_lut,
+            objects=objects,
+            predecoded_objects=predecoded_objects,
+        )
+        if decoded is None:
+            continue
+        decoded_windows.append(
+            DecodedWindow(
+                window_id=window_id,
+                left=decoded.left,
+                top=decoded.top,
+                right=decoded.right,
+                bottom=decoded.bottom,
+                object_ids=tuple(ref.object_id for ref in refs_by_window[window_id]),
+                pixels=decoded.pixels,
+            )
+        )
+    return tuple(decoded_windows)
+
+
+def _decode_object_refs(
+    object_refs: list[CompositionObject],
+    gray_lut: list[int],
+    alpha_lut: list[int],
+    objects: dict[int, ObjectBuffer],
+    predecoded_objects: dict[tuple[int, int, bytes], object] | None = None,
+) -> _DecodedRaster | None:
     prepared: list[tuple[int, int, list[list[int]], int, int, int, int]] = []
-
     for ref in object_refs:
         obj = objects.get(ref.object_id)
         if obj is None or not obj.complete:
@@ -792,18 +878,24 @@ def _decode_display_set(
     for y in range(trim_top, trim_bottom + 1):
         row = output[y][trim_left : trim_right + 1]
         cropped.append(row)
-    return cropped
+    return _DecodedRaster(
+        pixels=cropped,
+        left=min_x + trim_left,
+        top=min_y + trim_top,
+        right=min_x + trim_right,
+        bottom=min_y + trim_bottom,
+    )
 
 
-def _decode_display_set_cached(
+def _decode_display_set_windows_cached(
     pcs: PcsSegment,
     palettes: dict[int, dict[int, PaletteEntry]],
     palette_versions: dict[int, int],
     objects: dict[int, ObjectBuffer],
     predecoded_objects: dict[tuple[int, int, bytes], object],
-    cache: OrderedDict[tuple, list[list[int]]],
+    cache: OrderedDict[tuple, tuple[DecodedWindow, ...]],
     max_cache_items: int,
-) -> list[list[int]] | None:
+) -> tuple[DecodedWindow, ...]:
     key = _make_display_signature_key(
         pcs=pcs,
         palettes=palettes,
@@ -816,14 +908,14 @@ def _decode_display_set_cached(
             cache.move_to_end(key)
             return cached
 
-    decoded = _decode_display_set(
+    decoded = _decode_display_set_windows(
         pcs=pcs,
         palettes=palettes,
         palette_versions=palette_versions,
         objects=objects,
         predecoded_objects=predecoded_objects,
     )
-    if key is not None and decoded is not None:
+    if key is not None and decoded:
         cache[key] = decoded
         cache.move_to_end(key)
         while len(cache) > max_cache_items:
@@ -844,17 +936,10 @@ def _make_display_signature_key(
     if not palette:
         return None
 
-    object_refs = pcs.objects
-    if len(object_refs) > 1:
-        selected_window = max(ref.window_id for ref in object_refs)
-        object_refs = [ref for ref in object_refs if ref.window_id == selected_window]
-    if not object_refs:
-        return None
-
     palette_version = int(palette_versions.get(pcs.palette_id, 0))
 
     object_part: list[tuple] = []
-    for ref in object_refs:
+    for ref in pcs.objects:
         obj = objects.get(ref.object_id)
         if obj is None or not obj.complete or obj.width <= 0 or obj.height <= 0:
             return None
@@ -1061,7 +1146,7 @@ def _decode_display_set_numpy(
     min_y: int,
     gray_lut: list[int],
     alpha_lut: list[int],
-) -> list[list[int]] | None:
+) -> _DecodedRaster | None:
     if np is None:
         return None
 
@@ -1113,7 +1198,13 @@ def _decode_display_set_numpy(
     trim_right = int(len(cols_non_white) - 1 - cols_non_white[::-1].argmax())
 
     cropped = output[trim_top : trim_bottom + 1, trim_left : trim_right + 1].astype(np.uint8)
-    return [bytearray(row.tobytes()) for row in cropped]
+    return _DecodedRaster(
+        pixels=[bytearray(row.tobytes()) for row in cropped],
+        left=min_x + trim_left,
+        top=min_y + trim_top,
+        right=min_x + trim_right,
+        bottom=min_y + trim_bottom,
+    )
 
 
 def _build_palette_lut(palette: dict[int, PaletteEntry]) -> tuple[list[int], list[int]]:

@@ -18,6 +18,10 @@ Important scope notes:
 - The exact resolved dependency set can vary by Python version, operating
   system, architecture, and whether PyTorch is installed in CPU-only or
   CUDA-enabled form.
+- The optional image comparison GUI in `tools/image_compare_gui/compare_images.py`
+  uses Python's standard-library `tkinter` module. That does not introduce a
+  new PyPI dependency, but it does rely on the Tcl/Tk runtime bundled with or
+  linked by the host Python distribution.
 - `pyproject.toml` declares `uv_build` as the build backend. It is a build-time
   dependency, not part of the main runtime dependency set, so it is not
   enumerated below.
@@ -36,6 +40,15 @@ Important scope notes:
 | Component | Source | License | Notes |
 | --- | --- | --- | --- |
 | `PaddlePaddle/PaddleOCR-VL-1.5` | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5> | `apache-2.0` | Referenced by `src/istots/model_store.py` as `DEFAULT_MODEL_ID`. Model files are downloaded by `istots setup` into a local cache and are not vendored in this repository. |
+
+## Host-Provided GUI Runtime
+
+The repository now includes an optional local image-comparison GUI for
+debugging furigana masking results:
+
+| Component | Source | License | Notes |
+| --- | --- | --- | --- |
+| `tkinter` / Tcl-Tk runtime | Host Python distribution | Tcl/Tk license terms as bundled by the Python runtime | Used only by `tools/image_compare_gui/compare_images.py`. This is not declared in `pyproject.toml`, is not required for the CLI conversion pipeline, and may be absent from minimal Python installations. |
 
 ## Direct Runtime Dependencies
 
@@ -136,10 +149,17 @@ of the main runtime path of `istots`.
   their installed wheel metadata. If you redistribute those wheels, or a binary
   image containing them, include the corresponding upstream license directories
   and notices from the installed distributions.
+- If you redistribute a Python runtime that includes `tkinter`, also review and
+  include the Tcl/Tk license material bundled with that Python distribution.
 - In particular, check the `licenses/` material bundled in the installed
   distributions for `numpy`, `pillow`, and `torch`.
 - `torch` distributions may also ship an additional upstream `NOTICE` file.
 - NVIDIA CUDA wheels are not covered by the project's MIT license. Review each
   bundled `License.txt` before mirroring or redistributing those artifacts.
-- If `pyproject.toml`, `uv.lock`, the Python version, the platform, or the
-  default OCR model changes, regenerate this file.
+- Recent multi-window pipeline, furigana-masking, exporter/GUI, line-detection,
+  and SRT policy updates added new first-party code and tests only. They did
+  not add new PyPI package dependencies, vendored source code, or additional
+  model artifacts beyond the optional `tkinter` GUI note above.
+- If `pyproject.toml`, `uv.lock`, the Python version, the platform, the host
+  Python GUI/runtime packaging, or the default OCR model changes, regenerate
+  this file.

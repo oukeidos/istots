@@ -30,8 +30,35 @@ class SubtitleFrame:
 
 
 @dataclass
+class SubtitleWindowFrame:
+    raw_index: int
+    window_id: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+    start: timedelta
+    end: timedelta
+    image: Image.Image
+
+
+@dataclass
 class _CandidateFrame:
     raw_index: int
+    start_pts: int
+    end_pts: int
+    image_hash: int
+    pixels: list[list[int]]
+
+
+@dataclass
+class _WindowCandidateFrame:
+    raw_index: int
+    window_id: int
+    left: int
+    top: int
+    right: int
+    bottom: int
     start_pts: int
     end_pts: int
     image_hash: int
@@ -70,6 +97,49 @@ def iter_sup_frames(
             end_ms = start_ms + 1
         yield SubtitleFrame(
             raw_index=frame.raw_index,
+            start=timedelta(milliseconds=start_ms),
+            end=timedelta(milliseconds=end_ms),
+            image=_pixels_to_image(frame.pixels),
+        )
+
+
+def iter_sup_window_frames(
+    input_sup: Path,
+    max_items: int | None = None,
+    on_total: Callable[[int], None] | None = None,
+) -> Iterator[SubtitleWindowFrame]:
+    if not input_sup.exists():
+        raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
+
+    logger.info("python parser started: %s", input_sup)
+    heartbeat_stop, started_at = _start_heartbeat("Python parser")
+    try:
+        engine = PgsEngine(input_sup)
+        display_sets = engine.parse_display_sets(predecode_workers=-1)
+        candidates = _build_window_candidates(display_sets)
+        finalized = _finalize_window_candidates(candidates, max_items=max_items)
+        frames = _dedupe_window_candidates(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
+    finally:
+        heartbeat_stop.set()
+
+    elapsed = time.monotonic() - started_at
+    logger.info("python parser finished: items=%d elapsed=%.1fs", len(frames), elapsed)
+
+    if on_total is not None:
+        on_total(len(frames))
+
+    for frame in frames:
+        start_ms = _pts_to_ms(frame.start_pts)
+        end_ms = _pts_to_ms(frame.end_pts)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1
+        yield SubtitleWindowFrame(
+            raw_index=frame.raw_index,
+            window_id=frame.window_id,
+            left=frame.left,
+            top=frame.top,
+            right=frame.right,
+            bottom=frame.bottom,
             start=timedelta(milliseconds=start_ms),
             end=timedelta(milliseconds=end_ms),
             image=_pixels_to_image(frame.pixels),
@@ -147,6 +217,64 @@ def _build_candidates(display_sets: list[ParsedDisplaySet]) -> list[_CandidateFr
     return candidates
 
 
+def _build_window_candidates(display_sets: list[ParsedDisplaySet]) -> list[_WindowCandidateFrame]:
+    if not display_sets:
+        return []
+
+    ranges: list[tuple[int, int]] = []
+    range_start = 0
+    for idx in range(1, len(display_sets)):
+        if _is_start(display_sets[idx]):
+            ranges.append((range_start, idx))
+            range_start = idx
+    ranges.append((range_start, len(display_sets)))
+
+    candidates: list[_WindowCandidateFrame] = []
+    for begin, end in ranges:
+        group = display_sets[begin:end]
+        has_pts = False
+        start_pts = 2**32 - 1
+        end_pts = 0
+        for row in group:
+            if row.pcs is None:
+                continue
+            pts = row.pcs.presentation_timestamp
+            start_pts = min(start_pts, pts)
+            end_pts = max(end_pts, pts)
+            has_pts = True
+        if not has_pts:
+            continue
+
+        decoded_windows = ()
+        for row in group:
+            if not _is_start(row):
+                continue
+            if not row.complete or not row.decoded_windows:
+                continue
+            decoded_windows = row.decoded_windows
+            break
+        if not decoded_windows:
+            continue
+
+        for window in decoded_windows:
+            candidates.append(
+                _WindowCandidateFrame(
+                    raw_index=begin,
+                    window_id=window.window_id,
+                    left=window.left,
+                    top=window.top,
+                    right=window.right,
+                    bottom=window.bottom,
+                    start_pts=start_pts,
+                    end_pts=end_pts,
+                    image_hash=_hash_pixels(window.pixels),
+                    pixels=window.pixels,
+                )
+            )
+
+    return candidates
+
+
 def _finalize_candidates(
     candidates: list[_CandidateFrame],
     max_items: int | None,
@@ -184,6 +312,48 @@ def _finalize_candidates(
     return finalized
 
 
+def _finalize_window_candidates(
+    candidates: list[_WindowCandidateFrame],
+    max_items: int | None,
+) -> list[_WindowCandidateFrame]:
+    finalized: list[_WindowCandidateFrame] = []
+    for idx in range(len(candidates)):
+        item = candidates[idx]
+        start_pts = item.start_pts
+        end_pts = item.end_pts
+
+        if end_pts <= start_pts:
+            if idx + 1 >= len(candidates):
+                continue
+            next_item = candidates[idx + 1]
+            if start_pts + TEN_SECONDS_PTS < next_item.start_pts:
+                continue
+
+            min_end = start_pts + ONE_MS_PTS
+            next_adjusted = max(0, next_item.start_pts - ONE_MS_PTS)
+            end_pts = max(min_end, next_adjusted)
+
+        finalized.append(
+            _WindowCandidateFrame(
+                raw_index=item.raw_index,
+                window_id=item.window_id,
+                left=item.left,
+                top=item.top,
+                right=item.right,
+                bottom=item.bottom,
+                start_pts=start_pts,
+                end_pts=end_pts,
+                image_hash=item.image_hash,
+                pixels=item.pixels,
+            )
+        )
+
+        if max_items is not None and len(finalized) >= max_items:
+            break
+
+    return finalized
+
+
 def _dedupe_consecutive_identical(
     candidates: list[_CandidateFrame],
     max_gap_pts: int,
@@ -200,6 +370,35 @@ def _dedupe_consecutive_identical(
             prev.end_pts = max(prev.end_pts, candidate.end_pts)
         else:
             deduped.append(candidate)
+    return deduped
+
+
+def _dedupe_window_candidates(
+    candidates: list[_WindowCandidateFrame],
+    max_gap_pts: int,
+) -> list[_WindowCandidateFrame]:
+    deduped: list[_WindowCandidateFrame] = []
+    last_index_by_track: dict[tuple[int, int, int, int, int], int] = {}
+
+    for candidate in candidates:
+        track_key = (
+            candidate.window_id,
+            candidate.left,
+            candidate.top,
+            candidate.right,
+            candidate.bottom,
+        )
+        prev_index = last_index_by_track.get(track_key)
+        if prev_index is not None:
+            prev = deduped[prev_index]
+            gap = max(0, candidate.start_pts - prev.end_pts)
+            if prev.image_hash == candidate.image_hash and gap <= max_gap_pts:
+                prev.end_pts = max(prev.end_pts, candidate.end_pts)
+                continue
+
+        deduped.append(candidate)
+        last_index_by_track[track_key] = len(deduped) - 1
+
     return deduped
 
 

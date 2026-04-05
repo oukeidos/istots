@@ -110,6 +110,17 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Suppress progress logs",
     )
     parser.add_argument(
+        "--furigana-mask",
+        action="store_true",
+        help="Enable optional furigana masking before OCR (default: disabled)",
+    )
+    parser.add_argument(
+        "--srt-policy",
+        choices=("safe", "overlap"),
+        default="safe",
+        help="SRT output policy: merge simultaneous windows safely or keep overlapping cues",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite output file without prompting",
@@ -247,6 +258,8 @@ def run_convert(args: argparse.Namespace) -> int:
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
             local_files_only=True,
+            enable_furigana_mask=args.furigana_mask,
+            srt_policy=args.srt_policy,
             verbose=not args.quiet,
         )
     except Exception as exc:
