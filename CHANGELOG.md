@@ -35,6 +35,8 @@
 - Added regression coverage for Gemini inline-image request construction and verified retained Qwen local and Gemini correction smoke flows on experiment-backed SUP input slices.
 - Post-plan runtime-manager fix: moved `llama-server` launch ownership behind a single cross-role manager that serializes runtime residency, records managed process state, cleans stale managed runtimes, and rejects unexpected reserved-port conflicts before launch.
 - Added regression coverage for managed stale-runtime cleanup, managed state teardown, and reserved-port conflict detection, and verified the real Qwen local correction slice leaves no `llama-server` process behind after completion.
+- Post-plan credential/setup expansion: added opt-in `setup --with-qwen-corrector` provisioning for the retained default Qwen corrector asset pair from `unsloth/Qwen3.5-35B-A3B-GGUF`.
+- Added `auth gemini` key management with hidden-input keyring storage, configured `.env` fallback paths, keyring-first credential resolution, and regression coverage for the new setup/auth surfaces.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

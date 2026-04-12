@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import logging
 import sys
 import tempfile
@@ -8,7 +9,13 @@ from pathlib import Path
 from typing import Sequence
 
 from istots import __version__
-from istots.model_store import DEFAULT_GGUF_MODEL_ID, DEFAULT_MODEL_ID
+from istots.model_store import (
+    DEFAULT_GGUF_MODEL_ID,
+    DEFAULT_MODEL_ID,
+    DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+    DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+    DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+)
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -78,6 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.register_subcommand_parser(smoke)
     _add_smoke_arguments(smoke)
+
+    auth = subparsers.add_parser(
+        "auth",
+        help="Manage Gemini API credentials and fallback configuration",
+    )
+    parser.register_subcommand_parser(auth)
+    _add_auth_arguments(auth)
 
     return parser
 
@@ -496,6 +510,35 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--with-qwen-corrector",
+        action="store_true",
+        help="Also download the retained local Qwen corrector assets.",
+    )
+    parser.add_argument(
+        "--qwen-corrector-model-id",
+        default=DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+        help=(
+            "Qwen GGUF model ID to download for the optional local corrector path "
+            f"(default: {DEFAULT_QWEN_CORRECTOR_MODEL_ID})"
+        ),
+    )
+    parser.add_argument(
+        "--qwen-corrector-model-filename",
+        default=DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+        help=(
+            "GGUF filename to download from the Qwen corrector repository "
+            f"(default: {DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME})"
+        ),
+    )
+    parser.add_argument(
+        "--qwen-corrector-mmproj-filename",
+        default=DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+        help=(
+            "mmproj filename to download from the Qwen corrector repository "
+            f"(default: {DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME})"
+        ),
+    )
+    parser.add_argument(
         "--models-dir",
         type=Path,
         default=None,
@@ -545,6 +588,43 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         "--quiet",
         action="store_true",
         help="Suppress progress logs",
+    )
+
+
+def _add_auth_arguments(parser: argparse.ArgumentParser) -> None:
+    auth_subparsers = parser.add_subparsers(dest="auth_provider", required=True)
+
+    gemini = auth_subparsers.add_parser(
+        "gemini",
+        help="Manage Gemini API credentials",
+    )
+    gemini_subparsers = gemini.add_subparsers(dest="auth_action", required=True)
+    gemini_subparsers.add_parser(
+        "set",
+        help="Store the Gemini API key in the local keyring",
+    )
+    gemini_subparsers.add_parser(
+        "delete",
+        help="Delete the Gemini API key from the local keyring",
+    )
+    gemini_subparsers.add_parser(
+        "status",
+        help="Show whether Gemini credentials are available",
+    )
+
+    env_file = gemini_subparsers.add_parser(
+        "env-file",
+        help="Manage the fallback Gemini .env file path",
+    )
+    env_file_subparsers = env_file.add_subparsers(dest="auth_env_file_action", required=True)
+    env_file_set = env_file_subparsers.add_parser(
+        "set",
+        help="Configure the fallback Gemini .env file path",
+    )
+    env_file_set.add_argument("path", type=Path, help="Path to a Gemini .env file")
+    env_file_subparsers.add_parser(
+        "clear",
+        help="Clear the configured Gemini .env file path",
     )
 
 
@@ -698,7 +778,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return argv
 
-    known_commands = {"convert", "setup", "materialize-mmproj", "doctor", "smoke"}
+    known_commands = {"convert", "setup", "materialize-mmproj", "doctor", "smoke", "auth"}
     first = argv[0]
     if first in known_commands or first.startswith("-"):
         return argv
@@ -721,6 +801,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return run_doctor(args)
     if args.command == "smoke":
         return run_smoke(args)
+    if args.command == "auth":
+        return run_auth(args)
     if args.command == "convert":
         return run_convert(args)
 
@@ -737,6 +819,10 @@ def run_setup(args: argparse.Namespace) -> int:
         artifacts = setup_default_runtime_assets(
             hf_model_id=args.model_id,
             gguf_model_id=args.gguf_model_id,
+            with_qwen_corrector=args.with_qwen_corrector,
+            qwen_corrector_model_id=args.qwen_corrector_model_id,
+            qwen_corrector_model_filename=args.qwen_corrector_model_filename,
+            qwen_corrector_mmproj_filename=args.qwen_corrector_mmproj_filename,
             models_dir=args.models_dir,
             force=args.force,
             support_dir=args.support_dir,
@@ -757,7 +843,87 @@ def run_setup(args: argparse.Namespace) -> int:
             "GGUF derived mmproj path: %s",
             artifacts.gguf_mmproj_minpix32768_path,
         )
+        if artifacts.qwen_corrector_dir is not None:
+            logging.getLogger(__name__).info(
+                "Qwen corrector assets downloaded to: %s",
+                artifacts.qwen_corrector_dir,
+            )
+            logging.getLogger(__name__).info(
+                "Qwen corrector model path: %s",
+                artifacts.qwen_corrector_model_path,
+            )
+            logging.getLogger(__name__).info(
+                "Qwen corrector mmproj path: %s",
+                artifacts.qwen_corrector_mmproj_path,
+            )
     return 0
+
+
+def run_auth(args: argparse.Namespace) -> int:
+    configure_logging(verbose=False)
+
+    if args.auth_provider != "gemini":
+        logging.getLogger(__name__).error("unsupported auth provider: %s", args.auth_provider)
+        return 1
+
+    from istots.gemini_auth import (
+        clear_configured_gemini_env_file,
+        delete_gemini_api_key,
+        get_gemini_auth_status,
+        set_configured_gemini_env_file,
+        set_gemini_api_key,
+    )
+
+    try:
+        if args.auth_action == "set":
+            api_key = getpass.getpass("Gemini API key: ")
+            backend_name = set_gemini_api_key(api_key)
+            print(f"Gemini API key stored in keyring backend: {backend_name}")
+            return 0
+        if args.auth_action == "delete":
+            backend_name = delete_gemini_api_key()
+            if backend_name is not None:
+                print(f"Gemini API key deleted from keyring backend: {backend_name}")
+            else:
+                print("Gemini API key deleted.")
+            return 0
+        if args.auth_action == "status":
+            status = get_gemini_auth_status()
+            print(
+                "keyring: "
+                + ("configured" if status.keyring_configured else "missing")
+                + (
+                    f" ({status.keyring_backend})"
+                    if status.keyring_backend is not None
+                    else " (unavailable)"
+                )
+            )
+            if status.env_file_configured:
+                print(f".env path: configured ({status.env_file_path})")
+                print(".env key presence: " + ("configured" if status.env_file_contains_key else "missing"))
+            else:
+                print(".env path: missing")
+            if status.process_env_configured:
+                print(f"process env: configured ({status.process_env_name})")
+            else:
+                print("process env: missing")
+            print(f"effective source: {status.effective_source or 'missing'}")
+            return 0
+        if args.auth_action == "env-file":
+            if args.auth_env_file_action == "set":
+                resolved = set_configured_gemini_env_file(args.path)
+                print(f"Configured Gemini .env file: {resolved}")
+                return 0
+            if args.auth_env_file_action == "clear":
+                clear_configured_gemini_env_file()
+                print("Cleared the configured Gemini .env file path.")
+                return 0
+    except Exception as exc:
+        logging.getLogger(__name__).error("auth command failed: %s", exc)
+        return 1
+
+    logging.getLogger(__name__).error("unsupported auth action")
+    return 1
 
 
 def run_materialize_mmproj(args: argparse.Namespace) -> int:
@@ -866,8 +1032,13 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
     if args.corrector == "off" and args.corrector_output is not None:
         parser.error("--corrector-output requires --corrector")
     if args.corrector == "qwen-local":
-        if args.corrector_model_path is None or args.corrector_mmproj_path is None:
-            parser.error("--corrector qwen-local requires --corrector-model-path and --corrector-mmproj-path")
+        has_model_path = args.corrector_model_path is not None
+        has_mmproj_path = args.corrector_mmproj_path is not None
+        if has_model_path != has_mmproj_path:
+            parser.error(
+                "--corrector qwen-local requires both --corrector-model-path and "
+                "--corrector-mmproj-path when either is provided"
+            )
     if args.corrector == "gemini":
         if args.corrector_model_path is not None or args.corrector_mmproj_path is not None:
             parser.error("--corrector-model-path and --corrector-mmproj-path are only valid with --corrector qwen-local")
@@ -979,26 +1150,33 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             )
             return 1
 
-    from istots.model_store import ensure_local_model
+    from istots.model_store import ensure_local_model, ensure_local_qwen_corrector_assets
     from istots.pipeline import convert_sup_to_srt
 
     corrector_config = None
     if args.corrector != "off":
         from istots.corrector import CorrectorConfig, CorrectorMode
 
+        resolved_corrector_model_path = None
+        resolved_corrector_mmproj_path = None
+        if args.corrector == "qwen-local":
+            if args.corrector_model_path is not None and args.corrector_mmproj_path is not None:
+                resolved_corrector_model_path = args.corrector_model_path.expanduser().resolve()
+                resolved_corrector_mmproj_path = args.corrector_mmproj_path.expanduser().resolve()
+            else:
+                try:
+                    (
+                        resolved_corrector_model_path,
+                        resolved_corrector_mmproj_path,
+                    ) = ensure_local_qwen_corrector_assets(models_dir=args.models_dir)
+                except Exception as exc:
+                    logging.getLogger(__name__).error("corrector asset check failed: %s", exc)
+                    return 1
         corrector_config = CorrectorConfig(
             mode=CorrectorMode(args.corrector),
             output_path=corrector_output,
-            local_model_path=(
-                args.corrector_model_path.expanduser().resolve()
-                if args.corrector_model_path is not None
-                else None
-            ),
-            local_mmproj_path=(
-                args.corrector_mmproj_path.expanduser().resolve()
-                if args.corrector_mmproj_path is not None
-                else None
-            ),
+            local_model_path=resolved_corrector_model_path,
+            local_mmproj_path=resolved_corrector_mmproj_path,
             port=args.corrector_port,
             startup_timeout_sec=args.corrector_startup_timeout_sec,
             api_key_env=args.corrector_api_key_env,
@@ -1034,6 +1212,12 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
         )
         if corrector_config is not None:
             logging.getLogger(__name__).info("using conservative corrector: %s", corrector_config.mode)
+            if corrector_config.mode is CorrectorMode.QWEN_LOCAL:
+                logging.getLogger(__name__).info(
+                    "using local Qwen corrector assets: model=%s mmproj=%s",
+                    corrector_config.local_model_path,
+                    corrector_config.local_mmproj_path,
+                )
 
     try:
         result = convert_sup_to_srt(

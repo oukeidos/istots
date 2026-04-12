@@ -395,7 +395,6 @@ def _convert_sup_to_srt_default_with_detector(
         enable_furigana_mask=enable_furigana_mask,
         verbose=verbose,
     )
-    device = backend_config.device
     with _managed_ocr_backend(
         backend_config,
         preferred_device=preferred_device,

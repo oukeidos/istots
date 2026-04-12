@@ -829,7 +829,6 @@ def _make_line_cluster_from_band(
     if not representative_indices:
         representative_indices = all_indices
 
-    line_components = [components[index] for index in all_indices]
     representative_components = [components[index] for index in representative_indices]
     height, width = mask_shape
     content_left = min(component.left for component in representative_components)

@@ -24,6 +24,7 @@ Download retained runtime assets once:
 
 ```bash
 uv run istots setup
+uv run istots setup --with-qwen-corrector
 ```
 
 This prepares the retained local setup assets:
@@ -32,10 +33,11 @@ This prepares the retained local setup assets:
 - the GGUF OCR runtime model
 - the base GGUF mmproj
 - the derived `min_pixels=32768` GGUF mmproj
+- optionally, the retained local Qwen corrector GGUF and mmproj assets
 
 `uv sync` prepares the retained primary `llama-server` path. The `hf` engine remains available as an explicit optional fallback and requires `uv sync --extra hf`.
 
-`uv run istots setup` covers the retained primary OCR path, the optional faster OCR path, the default detector path, and the explicit HF fallback assets. It does not provision local Qwen corrector assets or Gemini credentials.
+`uv run istots setup` covers the retained primary OCR path, the optional faster OCR path, the default detector path, and the explicit HF fallback assets. Add `--with-qwen-corrector` to also provision the retained local Qwen corrector assets from `unsloth/Qwen3.5-35B-A3B-GGUF` using `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` and `mmproj-BF16.gguf`. Gemini credentials are managed separately through `istots auth gemini ...`.
 
 ## Quick Start
 
@@ -55,7 +57,10 @@ Quick validation on the retained default sample:
 uv run istots smoke
 uv run istots smoke --output-dir ./artifacts/smoke
 uv run istots smoke --ocr-mode fast
+uv run istots smoke --corrector qwen-local
 uv run istots smoke --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
+uv run istots auth gemini set
+uv run istots smoke --corrector gemini
 ```
 
 Common convert examples:
@@ -65,6 +70,7 @@ uv run istots input.sup output.srt --furigana-mask
 uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
 uv run istots input.sup output.srt --detector-output detector.jsonl
+uv run istots input.sup output.srt --corrector qwen-local
 uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
@@ -99,12 +105,12 @@ Global flags:
 - `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--corrector {off,qwen-local,gemini}`: attach the retained conservative anchor-only corrector to `convert`. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--corrector-output CORRECTOR_OUTPUT`: optional JSONL path for conservative correction records.
-- `--corrector-model-path CORRECTOR_MODEL_PATH`: explicit local GGUF corrector model path for `--corrector qwen-local`.
-- `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: explicit local GGUF corrector mmproj path for `--corrector qwen-local`.
+- `--corrector-model-path CORRECTOR_MODEL_PATH`: optional explicit local GGUF corrector model path override for `--corrector qwen-local`.
+- `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: optional explicit local GGUF corrector mmproj path override for `--corrector qwen-local`.
 - `--corrector-port PORT`: override the retained corrector port for `--corrector qwen-local`.
 - `--corrector-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
 - `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
-- `--corrector-api-key-env ENV`: environment variable name holding the Gemini API key.
+- `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current process environment.
 - `--corrector-thinking-level LEVEL`: optional Gemini thinking level for `--corrector gemini`.
 - `--corrector-media-resolution LEVEL`: optional Gemini media resolution level for `--corrector gemini`.
 - `--corrector-cache-dir PATH`: optional cache directory for `--corrector gemini`.
@@ -116,6 +122,10 @@ Global flags:
 
 - `--model-id MODEL_ID`: HF fallback model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5`.
 - `--gguf-model-id GGUF_MODEL_ID`: GGUF model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5-GGUF`.
+- `--with-qwen-corrector`: also download the retained local Qwen corrector assets.
+- `--qwen-corrector-model-id MODEL_ID`: Qwen corrector model repository. Default is `unsloth/Qwen3.5-35B-A3B-GGUF`.
+- `--qwen-corrector-model-filename FILENAME`: Qwen GGUF filename to download. Default is `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`.
+- `--qwen-corrector-mmproj-filename FILENAME`: Qwen mmproj filename to download. Default is `mmproj-BF16.gguf`.
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
 - `--support-dir SUPPORT_DIR`: local support cache root for pinned gguf snapshot fallback. Default is `~/.cache/istots/support` or `ISTOTS_SUPPORT_DIR`.
 - `--gguf-py-base-url GGUF_PY_BASE_URL`: override source root for the pinned gguf snapshot fallback.
@@ -132,7 +142,36 @@ export ISTOTS_MODELS_DIR="$HOME/.cache/istots/models"
 
 # Override support cache root for pinned gguf snapshot fallback
 export ISTOTS_SUPPORT_DIR="$HOME/.cache/istots/support"
+
+# Override the local auth config path that stores the configured Gemini .env file path
+export ISTOTS_AUTH_CONFIG_PATH="$HOME/.config/istots/auth.json"
 ```
+
+## Gemini Auth
+
+Use `auth gemini` to manage Gemini credentials without printing the API key in the terminal.
+
+```bash
+uv run istots auth gemini set
+uv run istots auth gemini delete
+uv run istots auth gemini status
+uv run istots auth gemini env-file set /path/to/.env
+uv run istots auth gemini env-file clear
+```
+
+Credential resolution order for `--corrector gemini` is:
+
+1. local keyring
+2. the configured `.env` file path
+3. the current process environment
+
+Recommended `.env` template:
+
+```dotenv
+GEMINI_API_KEY=your-gemini-api-key-here
+```
+
+`GEMINI_API_KEY` is the standard key name. `GOOGLE_API_KEY` remains accepted as a compatibility alias when the default key name is in use.
 
 ## Quick Validation
 
@@ -208,8 +247,9 @@ Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke`
 - Correction remains convert-attached, opt-in, and conservative anchor-only.
 - The retained hybrid detector disagreement surface is the default correction trigger surface.
 - `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
+- If the retained local Qwen corrector assets were provisioned with `uv run istots setup --with-qwen-corrector`, `--corrector qwen-local` can run without explicit model or mmproj path overrides.
 - `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
-- `uv run istots setup` does not provision local corrector assets or Gemini credentials. Local Qwen model/mmproj paths and Gemini API access remain explicit user-supplied inputs.
+- `uv run istots auth gemini set` stores the Gemini API key in the local keyring, and `uv run istots auth gemini env-file set /path/to/.env` configures the fallback `.env` path.
 
 ## HF Fallback
 

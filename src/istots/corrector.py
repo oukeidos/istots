@@ -5,7 +5,6 @@ import datetime as dt
 import hashlib
 import io
 import json
-import os
 import random
 import socket
 import time
@@ -17,6 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from istots.gemini_auth import resolve_gemini_api_key
 from istots.ocr.hf_backend import normalize_ocr_text
 
 STRICT_OCR_V1_PROMPT = (
@@ -135,9 +135,13 @@ def request_gemini_correction(
     image: Image.Image,
     shape: str,
 ) -> tuple[str, str, str]:
-    api_key = os.environ.get(config.api_key_env)
+    api_key, _ = resolve_gemini_api_key(config.api_key_env)
     if not api_key:
-        raise RuntimeError(f"missing Gemini API key in environment variable: {config.api_key_env}")
+        raise RuntimeError(
+            "missing Gemini API key. "
+            f"Run `istots auth gemini set`, configure `istots auth gemini env-file set PATH`, "
+            f"or export {config.api_key_env}."
+        )
 
     prompt, prompt_style = corrector_prompt_for_shape(config, shape)
     payload = _request_gemini_one(

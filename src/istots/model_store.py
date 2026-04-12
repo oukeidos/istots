@@ -9,6 +9,9 @@ DEFAULT_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5"
 DEFAULT_GGUF_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5-GGUF"
 DEFAULT_GGUF_FILENAME = "PaddleOCR-VL-1.5.gguf"
 DEFAULT_GGUF_MMPROJ_FILENAME = "PaddleOCR-VL-1.5-mmproj.gguf"
+DEFAULT_QWEN_CORRECTOR_MODEL_ID = "unsloth/Qwen3.5-35B-A3B-GGUF"
+DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
+DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME = "mmproj-BF16.gguf"
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,9 @@ class SetupArtifacts:
     gguf_model_path: Path
     gguf_mmproj_path: Path
     gguf_mmproj_minpix32768_path: Path
+    qwen_corrector_dir: Path | None = None
+    qwen_corrector_model_path: Path | None = None
+    qwen_corrector_mmproj_path: Path | None = None
 
 
 def default_models_dir() -> Path:
@@ -71,12 +77,13 @@ def download_model(model_id: str, models_dir: Path | None = None, force: bool = 
     return target
 
 
-def download_gguf_runtime_assets(
+def _download_snapshot_files(
     *,
-    model_id: str = DEFAULT_GGUF_MODEL_ID,
+    model_id: str,
+    required_filenames: tuple[str, ...],
     models_dir: Path | None = None,
     force: bool = False,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, tuple[Path, ...]]:
     try:
         from huggingface_hub import snapshot_download
     except Exception as exc:
@@ -94,27 +101,87 @@ def download_gguf_runtime_assets(
         local_dir_use_symlinks=False,
         local_files_only=False,
         allow_patterns=[
-            DEFAULT_GGUF_FILENAME,
-            DEFAULT_GGUF_MMPROJ_FILENAME,
+            *required_filenames,
             "LICENSE*",
             "README*",
             "*.json",
         ],
     )
 
-    model_path = target / DEFAULT_GGUF_FILENAME
-    mmproj_path = target / DEFAULT_GGUF_MMPROJ_FILENAME
-    if not model_path.exists():
-        raise RuntimeError(f"GGUF model file missing after setup: {model_path}")
-    if not mmproj_path.exists():
-        raise RuntimeError(f"GGUF mmproj file missing after setup: {mmproj_path}")
+    resolved_paths: list[Path] = []
+    for filename in required_filenames:
+        path = target / filename
+        if not path.exists():
+            raise RuntimeError(f"required file missing after setup: {path}")
+        resolved_paths.append(path.resolve())
+    return target.resolve(), tuple(resolved_paths)
+
+
+def download_gguf_runtime_assets(
+    *,
+    model_id: str = DEFAULT_GGUF_MODEL_ID,
+    models_dir: Path | None = None,
+    force: bool = False,
+) -> tuple[Path, Path, Path]:
+    target, paths = _download_snapshot_files(
+        model_id=model_id,
+        required_filenames=(
+            DEFAULT_GGUF_FILENAME,
+            DEFAULT_GGUF_MMPROJ_FILENAME,
+        ),
+        models_dir=models_dir,
+        force=force,
+    )
+    model_path, mmproj_path = paths
     return target, model_path, mmproj_path
+
+
+def download_qwen_corrector_assets(
+    *,
+    model_id: str = DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+    model_filename: str = DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+    mmproj_filename: str = DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+    models_dir: Path | None = None,
+    force: bool = False,
+) -> tuple[Path, Path, Path]:
+    target, paths = _download_snapshot_files(
+        model_id=model_id,
+        required_filenames=(model_filename, mmproj_filename),
+        models_dir=models_dir,
+        force=force,
+    )
+    model_path, mmproj_path = paths
+    return target, model_path, mmproj_path
+
+
+def ensure_local_qwen_corrector_assets(
+    *,
+    model_id: str = DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+    model_filename: str = DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+    mmproj_filename: str = DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+    models_dir: Path | None = None,
+) -> tuple[Path, Path]:
+    target = resolve_local_model_path(model_id=model_id, models_dir=models_dir)
+    model_path = (target / model_filename).resolve()
+    mmproj_path = (target / mmproj_filename).resolve()
+    missing_paths = [path for path in (model_path, mmproj_path) if not path.exists()]
+    if missing_paths:
+        raise RuntimeError(
+            "Local Qwen corrector assets are not available. "
+            "Run `istots setup --with-qwen-corrector` or pass explicit "
+            "`--corrector-model-path` and `--corrector-mmproj-path` values."
+        )
+    return model_path, mmproj_path
 
 
 def setup_default_runtime_assets(
     *,
     hf_model_id: str = DEFAULT_MODEL_ID,
     gguf_model_id: str = DEFAULT_GGUF_MODEL_ID,
+    with_qwen_corrector: bool = False,
+    qwen_corrector_model_id: str = DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+    qwen_corrector_model_filename: str = DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+    qwen_corrector_mmproj_filename: str = DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
     models_dir: Path | None = None,
     force: bool = False,
     support_dir: Path | None = None,
@@ -142,10 +209,28 @@ def setup_default_runtime_assets(
         gguf_source_mode=gguf_source_mode,
         force=force,
     )
+    qwen_corrector_dir: Path | None = None
+    qwen_corrector_model_path: Path | None = None
+    qwen_corrector_mmproj_path: Path | None = None
+    if with_qwen_corrector:
+        (
+            qwen_corrector_dir,
+            qwen_corrector_model_path,
+            qwen_corrector_mmproj_path,
+        ) = download_qwen_corrector_assets(
+            model_id=qwen_corrector_model_id,
+            model_filename=qwen_corrector_model_filename,
+            mmproj_filename=qwen_corrector_mmproj_filename,
+            models_dir=models_dir,
+            force=force,
+        )
     return SetupArtifacts(
         hf_model_dir=hf_model_dir,
         gguf_model_dir=gguf_model_dir,
         gguf_model_path=gguf_model_path,
         gguf_mmproj_path=gguf_mmproj_path,
         gguf_mmproj_minpix32768_path=derived_mmproj_path,
+        qwen_corrector_dir=qwen_corrector_dir,
+        qwen_corrector_model_path=qwen_corrector_model_path,
+        qwen_corrector_mmproj_path=qwen_corrector_mmproj_path,
     )

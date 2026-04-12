@@ -63,6 +63,58 @@ def test_download_gguf_runtime_assets_requests_expected_files(monkeypatch, tmp_p
     ]
 
 
+def test_download_qwen_corrector_assets_requests_expected_files(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    target = tmp_path / "unsloth__Qwen3.5-35B-A3B-GGUF"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME).write_bytes(b"model")
+    (target / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME).write_bytes(b"mmproj")
+
+    def fake_snapshot_download(**kwargs) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+
+    qwen_dir, model_path, mmproj_path = model_store.download_qwen_corrector_assets(models_dir=tmp_path)
+
+    assert qwen_dir == target.resolve()
+    assert model_path == (target / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME).resolve()
+    assert mmproj_path == (target / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME).resolve()
+    assert captured["repo_id"] == model_store.DEFAULT_QWEN_CORRECTOR_MODEL_ID
+    assert captured["allow_patterns"] == [
+        model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+        model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+        "LICENSE*",
+        "README*",
+        "*.json",
+    ]
+
+
+def test_ensure_local_qwen_corrector_assets_resolves_default_download(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "unsloth__Qwen3.5-35B-A3B-GGUF"
+    target.mkdir(parents=True, exist_ok=True)
+    model_path = target / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME
+    mmproj_path = target / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME
+    model_path.write_bytes(b"model")
+    mmproj_path.write_bytes(b"mmproj")
+
+    resolved_model_path, resolved_mmproj_path = model_store.ensure_local_qwen_corrector_assets(
+        models_dir=tmp_path,
+    )
+
+    assert resolved_model_path == model_path.resolve()
+    assert resolved_mmproj_path == mmproj_path.resolve()
+
+
+def test_ensure_local_qwen_corrector_assets_raises_when_missing(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="Run `istots setup --with-qwen-corrector`"):
+        model_store.ensure_local_qwen_corrector_assets(models_dir=tmp_path)
+
+
 def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tmp_path: Path) -> None:
     hf_dir = tmp_path / "hf_model"
     gguf_dir = tmp_path / "gguf_model"
@@ -123,5 +175,74 @@ def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tm
         "base_mmproj": gguf_mmproj_path,
         "min_pixels": 32768,
         "gguf_source_mode": "auto",
+        "force": True,
+    }
+
+
+def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkeypatch, tmp_path: Path) -> None:
+    hf_dir = tmp_path / "hf_model"
+    gguf_dir = tmp_path / "gguf_model"
+    gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
+    gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
+    derived_path = gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf"
+    qwen_dir = tmp_path / "qwen_model"
+    qwen_model_path = qwen_dir / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME
+    qwen_mmproj_path = qwen_dir / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME
+
+    monkeypatch.setattr(
+        model_store,
+        "download_model",
+        lambda model_id, models_dir=None, force=False: hf_dir,
+    )
+    monkeypatch.setattr(
+        model_store,
+        "download_gguf_runtime_assets",
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False: (
+            gguf_dir,
+            gguf_model_path,
+            gguf_mmproj_path,
+        ),
+    )
+    qwen_calls: dict[str, object] = {}
+
+    def fake_download_qwen_corrector_assets(
+        *,
+        model_id=model_store.DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+        model_filename=model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+        mmproj_filename=model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+        models_dir=None,
+        force=False,
+    ):
+        qwen_calls.update(
+            {
+                "model_id": model_id,
+                "model_filename": model_filename,
+                "mmproj_filename": mmproj_filename,
+                "models_dir": models_dir,
+                "force": force,
+            }
+        )
+        return qwen_dir, qwen_model_path, qwen_mmproj_path
+
+    monkeypatch.setattr(model_store, "download_qwen_corrector_assets", fake_download_qwen_corrector_assets)
+    monkeypatch.setattr(
+        "istots.llama_mmproj.materialize_mmproj",
+        lambda **kwargs: derived_path,
+    )
+
+    artifacts = model_store.setup_default_runtime_assets(
+        models_dir=tmp_path,
+        force=True,
+        with_qwen_corrector=True,
+    )
+
+    assert artifacts.qwen_corrector_dir == qwen_dir
+    assert artifacts.qwen_corrector_model_path == qwen_model_path
+    assert artifacts.qwen_corrector_mmproj_path == qwen_mmproj_path
+    assert qwen_calls == {
+        "model_id": model_store.DEFAULT_QWEN_CORRECTOR_MODEL_ID,
+        "model_filename": model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+        "mmproj_filename": model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+        "models_dir": tmp_path,
         "force": True,
     }

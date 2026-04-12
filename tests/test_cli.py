@@ -97,6 +97,16 @@ def test_run_routes_smoke(monkeypatch) -> None:
     assert cli.run(["smoke"]) == 23
 
 
+def test_run_routes_auth(monkeypatch) -> None:
+    def fake_auth(args) -> int:
+        assert args.command == "auth"
+        assert args.auth_provider == "gemini"
+        return 29
+
+    monkeypatch.setattr(cli, "run_auth", fake_auth)
+    assert cli.run(["auth", "gemini", "status"]) == 29
+
+
 def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> None:
     artifacts = SimpleNamespace(
         hf_model_dir=tmp_path / "hf_model",
@@ -104,6 +114,9 @@ def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> 
         gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
         gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
         gguf_mmproj_minpix32768_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf",
+        qwen_corrector_dir=None,
+        qwen_corrector_model_path=None,
+        qwen_corrector_mmproj_path=None,
     )
     captured: dict[str, object] = {}
 
@@ -137,9 +150,50 @@ def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> 
     assert rc == 0
     assert captured["hf_model_id"] == "hf/model"
     assert captured["gguf_model_id"] == "gguf/model"
+    assert captured["with_qwen_corrector"] is False
     assert captured["models_dir"] == tmp_path
     assert captured["gguf_source_mode"] == "installed"
     assert captured["min_pixels"] == 32768
+
+
+def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Path) -> None:
+    artifacts = SimpleNamespace(
+        hf_model_dir=tmp_path / "hf_model",
+        gguf_model_dir=tmp_path / "gguf_model",
+        gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
+        gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
+        gguf_mmproj_minpix32768_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf",
+        qwen_corrector_dir=tmp_path / "qwen_model",
+        qwen_corrector_model_path=tmp_path / "qwen_model" / "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
+        qwen_corrector_mmproj_path=tmp_path / "qwen_model" / "mmproj-BF16.gguf",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        model_store,
+        "setup_default_runtime_assets",
+        lambda **kwargs: captured.update(kwargs) or artifacts,
+    )
+
+    rc = cli.run(
+        [
+            "setup",
+            "--with-qwen-corrector",
+            "--qwen-corrector-model-id",
+            "unsloth/Qwen3.5-35B-A3B-GGUF",
+            "--qwen-corrector-model-filename",
+            "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf",
+            "--qwen-corrector-mmproj-filename",
+            "mmproj-BF16.gguf",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["with_qwen_corrector"] is True
+    assert captured["qwen_corrector_model_id"] == "unsloth/Qwen3.5-35B-A3B-GGUF"
+    assert captured["qwen_corrector_model_filename"] == "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
+    assert captured["qwen_corrector_mmproj_filename"] == "mmproj-BF16.gguf"
 
 
 def test_run_materialize_mmproj_applies_requested_value(monkeypatch, tmp_path: Path) -> None:
@@ -612,6 +666,46 @@ def test_run_convert_passes_qwen_local_corrector_config(monkeypatch, tmp_path: P
     assert config.port == 19083
 
 
+def test_run_convert_resolves_default_qwen_local_corrector_assets(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
+    resolved_model_path = tmp_path / "downloaded-qwen.gguf"
+    resolved_mmproj_path = tmp_path / "downloaded-qwen-mmproj.gguf"
+
+    monkeypatch.setattr(
+        model_store,
+        "ensure_local_qwen_corrector_assets",
+        lambda models_dir=None: (resolved_model_path, resolved_mmproj_path),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.QWEN_LOCAL
+    assert config.local_model_path == resolved_model_path
+    assert config.local_mmproj_path == resolved_mmproj_path
+
+
 def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
@@ -868,9 +962,68 @@ def test_run_convert_rejects_qwen_local_without_paths(tmp_path: Path) -> None:
     output_srt = tmp_path / "output.srt"
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.run([str(input_sup), str(output_srt), "--quiet", "--corrector", "qwen-local"])
+        cli.run(
+            [
+                str(input_sup),
+                str(output_srt),
+                "--quiet",
+                "--corrector",
+                "qwen-local",
+                "--corrector-model-path",
+                str(tmp_path / "qwen.gguf"),
+            ]
+        )
 
     assert excinfo.value.code == 2
+
+
+def test_run_auth_status_prints_source_summary(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "istots.gemini_auth.get_gemini_auth_status",
+        lambda: SimpleNamespace(
+            keyring_backend="test.backend",
+            keyring_configured=True,
+            env_file_configured=True,
+            env_file_path=Path("/tmp/test.env"),
+            env_file_contains_key=False,
+            process_env_configured=False,
+            process_env_name=None,
+            effective_source="keyring",
+        ),
+    )
+
+    rc = cli.run(["auth", "gemini", "status"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "keyring: configured (test.backend)" in captured.out
+    assert ".env path: configured (/tmp/test.env)" in captured.out
+    assert "effective source: keyring" in captured.out
+
+
+def test_run_auth_env_file_set(monkeypatch, capsys, tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr(
+        "istots.gemini_auth.set_configured_gemini_env_file",
+        lambda path: path.resolve(),
+    )
+
+    rc = cli.run(["auth", "gemini", "env-file", "set", str(env_path)])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert f"Configured Gemini .env file: {env_path.resolve()}" in captured.out
+
+
+def test_run_auth_set_uses_hidden_prompt(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "secret-key")
+    monkeypatch.setattr("istots.gemini_auth.set_gemini_api_key", lambda api_key: "test.backend")
+
+    rc = cli.run(["auth", "gemini", "set"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "Gemini API key stored in keyring backend: test.backend" in captured.out
 
 
 def test_run_convert_rejects_corrector_output_without_corrector(tmp_path: Path) -> None:
