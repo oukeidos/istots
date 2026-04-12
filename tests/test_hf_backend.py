@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import builtins
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,3 +24,48 @@ def test_hf_backend_missing_optional_runtime_mentions_extra(monkeypatch) -> None
             model_id="org/model",
             device="cpu",
         )
+
+
+def test_hf_backend_applies_min_pixels_override(monkeypatch) -> None:
+    processor = SimpleNamespace(
+        tokenizer=SimpleNamespace(padding_side="right"),
+        image_processor=SimpleNamespace(min_pixels=None),
+    )
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.device = "cpu"
+
+        def to(self, device):
+            self.device = device
+            return self
+
+        def eval(self) -> None:
+            return None
+
+    fake_torch = SimpleNamespace(
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+        cuda=SimpleNamespace(empty_cache=lambda: None, ipc_collect=lambda: None),
+    )
+    fake_transformers = SimpleNamespace(
+        AutoProcessor=SimpleNamespace(from_pretrained=lambda *args, **kwargs: processor),
+        AutoModelForImageTextToText=SimpleNamespace(
+            from_pretrained=lambda *args, **kwargs: FakeModel()
+        ),
+    )
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    backend = HFPaddleOCRVLBackend(
+        model_id="org/model",
+        device="cpu",
+        dtype="float32",
+        min_pixels_override=32768,
+    )
+
+    assert processor.tokenizer.padding_side == "left"
+    assert processor.image_processor.min_pixels == 32768
+    backend.close()

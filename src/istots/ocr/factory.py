@@ -12,6 +12,7 @@ def create_ocr_backend(config: OCRBackendConfig) -> OCRBackend:
         mmproj_path=config.mmproj_path,
         device=config.device,
         hf_dtype=config.hf_dtype,
+        hf_min_pixels=config.hf_min_pixels,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
         models_dir=config.models_dir,
@@ -45,6 +46,7 @@ def _create_hf_backend(config: OCRBackendConfig) -> OCRBackend:
         model_id=config.model_id,
         device=config.device or "cpu",
         dtype=config.hf_dtype,
+        min_pixels_override=config.hf_min_pixels,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
     )

@@ -40,6 +40,7 @@ Implement the experimentally validated feature set into the product code without
 - Post-plan runtime profile cleanup completed: removed the no-op `memory` runtime profile and kept only `auto` and `cpu` as supported product profiles.
 - Post-plan hardware policy cleanup completed: split engine-specific hardware control so `llama-server` now relies only on runtime profiles while HF uses dedicated `hf-device` and `hf-dtype` controls.
 - Post-plan Qwen recipe cleanup completed: removed local Qwen thread-count hardcodes, kept only behavior-critical retained fields such as context size and reasoning mode, and stopped steering `llama-server` through PyTorch CUDA checks.
+- Post-plan HF fast-path parity completed: `--engine hf --ocr-mode fast` now uses the retained hybrid branch rule with default HF reading on tall rows and retained `min_pixels=32768` only on non-tall rows.
 
 ## Completed Design Work
 

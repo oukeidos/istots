@@ -18,6 +18,7 @@ class HFPaddleOCRVLBackend:
     model_id: str
     device: str
     dtype: str = "auto"
+    min_pixels_override: int | None = None
     max_new_tokens: int = 256
     local_files_only: bool = True
 
@@ -45,6 +46,10 @@ class HFPaddleOCRVLBackend:
             self._processor.tokenizer.padding_side = "left"
         elif hasattr(self._processor, "padding_side"):
             self._processor.padding_side = "left"
+        _apply_processor_overrides(
+            self._processor,
+            min_pixels=self.min_pixels_override,
+        )
         self._model = AutoModelForImageTextToText.from_pretrained(
             self.model_id,
             dtype=pick_torch_dtype(self.device, self.dtype),
@@ -131,3 +136,14 @@ def normalize_ocr_text(text: str) -> str:
     lines = [" ".join(line.split()) for line in text.split("\n")]
     lines = [line for line in lines if line]
     return "\n".join(lines).strip()
+
+
+def _apply_processor_overrides(
+    processor,
+    *,
+    min_pixels: int | None,
+) -> None:
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None or min_pixels is None:
+        return
+    setattr(image_processor, "min_pixels", int(min_pixels))

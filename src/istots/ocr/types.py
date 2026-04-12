@@ -34,6 +34,7 @@ class OCRBackendConfig:
     mmproj_path: Path | None = None
     device: str | None = None
     hf_dtype: str = "auto"
+    hf_min_pixels: int | None = None
     max_new_tokens: int = 256
     local_files_only: bool = True
     models_dir: Path | None = None

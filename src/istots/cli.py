@@ -164,8 +164,9 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("default", "fast"),
         default="default",
         help=(
-            "OCR mode for `--engine llama-server`: retained default OCR or the optional "
-            "fast hybrid path (default: default)"
+            "OCR mode for `convert`: retained default OCR or the optional fast hybrid path. "
+            "On llama-server, fast uses `ocr-fast` for non-tall rows; on HF, fast uses "
+            "retained `min_pixels=32768` only for non-tall rows. (default: default)"
         ),
     )
     parser.add_argument(
@@ -1108,8 +1109,6 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--max-items must be a positive integer")
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be a positive integer")
-    if args.ocr_mode == "fast" and args.engine != "llama-server":
-        parser.error("--ocr-mode fast requires --engine llama-server")
     if args.engine != "hf":
         if args.hf_device != "auto":
             parser.error("--hf-device is only valid with --engine hf")

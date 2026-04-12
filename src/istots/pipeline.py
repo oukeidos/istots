@@ -42,6 +42,7 @@ from istots.text_diff import assess_difference
 
 logger = logging.getLogger(__name__)
 TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
+HF_FAST_MIN_PIXELS = 32768
 
 
 @dataclass
@@ -128,6 +129,23 @@ def _build_paddle_backend_config(
     )
 
 
+def _build_fast_backend_config(
+    *,
+    base_config: OCRBackendConfig,
+    role: str,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
+) -> OCRBackendConfig:
+    if base_config.engine is OCREngine.LLAMA_SERVER:
+        return _build_paddle_backend_config(
+            base_config=base_config,
+            role=role,
+            overrides=paddle_runtime_overrides,
+        )
+    if role == "ocr-fast":
+        return replace(base_config, role=role, hf_min_pixels=HF_FAST_MIN_PIXELS)
+    return replace(base_config, role=role)
+
+
 def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
@@ -155,11 +173,10 @@ def convert_sup_to_srt(
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
     normalized_engine = normalize_ocr_engine(engine)
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
+    allow_hf_auto_cpu_fallback = normalized_engine is OCREngine.HF and hf_device == "auto"
     resolved_hf_device = resolve_hf_device(hf_device) if normalized_engine is OCREngine.HF else None
     resolved_paddle_runtime = paddle_runtime_overrides or PaddleOCRVLRuntimeOverrides()
     runtime_label = resolved_hf_device if resolved_hf_device is not None else resolved_paddle_runtime.profile
-    if normalized_ocr_mode == "fast" and normalized_engine is not OCREngine.LLAMA_SERVER:
-        raise ValueError("fast OCR mode requires the llama-server engine")
     if detector_output is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
         raise ValueError("detector output requires the llama-server engine")
     if detector_output is not None and normalized_ocr_mode != "default":
@@ -193,6 +210,7 @@ def convert_sup_to_srt(
             backend_config=backend_config,
             paddle_runtime_overrides=resolved_paddle_runtime,
             runtime_label=runtime_label,
+            allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
             srt_policy=srt_policy,
@@ -225,7 +243,7 @@ def convert_sup_to_srt(
             role="ocr",
             overrides=resolved_paddle_runtime,
         ) if normalized_engine is OCREngine.LLAMA_SERVER else backend_config,
-        allow_hf_auto_cpu_fallback=normalized_engine is OCREngine.HF and hf_device == "auto",
+        allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
         verbose=verbose,
     ) as (active_backend, runtime_used):
         if verbose:
@@ -265,6 +283,7 @@ def _convert_sup_to_srt_fast(
     backend_config: OCRBackendConfig,
     paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     runtime_label: str,
+    allow_hf_auto_cpu_fallback: bool,
     max_items: int | None,
     enable_furigana_mask: bool,
     srt_policy: str,
@@ -292,10 +311,10 @@ def _convert_sup_to_srt_fast(
         backend_specs.append(
             (
                 "ocr-fast",
-                _build_paddle_backend_config(
+                _build_fast_backend_config(
                     base_config=backend_config,
                     role="ocr-fast",
-                    overrides=paddle_runtime_overrides,
+                    paddle_runtime_overrides=paddle_runtime_overrides,
                 ),
             )
         )
@@ -303,15 +322,17 @@ def _convert_sup_to_srt_fast(
         backend_specs.append(
             (
                 "ocr",
-                _build_paddle_backend_config(
+                _build_fast_backend_config(
                     base_config=backend_config,
                     role="ocr",
-                    overrides=paddle_runtime_overrides,
+                    paddle_runtime_overrides=paddle_runtime_overrides,
                 ),
             )
         )
 
     device_logged = False
+    active_runtime_label = runtime_label
+    active_hf_device = backend_config.device
     recognized_by_index: dict[int, str] = {}
 
     for role, config in backend_specs:
@@ -319,13 +340,21 @@ def _convert_sup_to_srt_fast(
         branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
         if not branch_inputs:
             continue
+        active_config = (
+            replace(config, device=active_hf_device)
+            if backend_config.engine is OCREngine.HF
+            else config
+        )
         with _managed_ocr_backend(
-            config,
-            allow_hf_auto_cpu_fallback=False,
+            active_config,
+            allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
             verbose=verbose,
-        ) as (backend, _):
+        ) as (backend, runtime_used):
+            if backend_config.engine is OCREngine.HF:
+                active_hf_device = runtime_used
+                active_runtime_label = runtime_used
             if verbose and not device_logged:
-                _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_label)
+                _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_used)
             device_logged = True
             if role == "ocr-fast":
                 if verbose:
@@ -359,7 +388,7 @@ def _convert_sup_to_srt_fast(
         output_srt=output_srt,
         processed_count=len(prepared_inputs),
         written_count=len(entries),
-        device_used=runtime_label,
+        device_used=active_runtime_label,
     )
 
 

@@ -1013,15 +1013,31 @@ def test_run_convert_rejects_output_directory(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
-def test_run_convert_rejects_fast_mode_for_hf(tmp_path: Path) -> None:
+def test_run_convert_allows_fast_mode_for_hf(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
     output_srt = tmp_path / "output.srt"
+    model_dir = tmp_path / "cached_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
 
-    with pytest.raises(SystemExit) as excinfo:
-        cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--ocr-mode", "fast"])
+    monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: model_dir)
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
 
-    assert excinfo.value.code == 2
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--ocr-mode", "fast"])
+
+    assert rc == 0
+    assert captured["engine"] == "hf"
+    assert captured["ocr_mode"] == "fast"
 
 
 def test_run_convert_accepts_shared_paddle_port_for_fast_mode(monkeypatch, tmp_path: Path) -> None:

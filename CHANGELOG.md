@@ -46,6 +46,8 @@
 - Stopped using PyTorch CUDA detection to steer `llama-server`, limited auto CPU fallback to the HF engine, and removed local Qwen thread-count hardcodes while keeping only behavior-critical recipe fields.
 - Post-plan model-family runtime override cleanup: replaced the last global low-level `llama-server` override surface on `convert` and `smoke` with separate PaddleOCR-VL and Qwen3.5 override families.
 - Added regression coverage to lock model-family override routing, shared Paddle role resolution, and isolated Qwen local runtime overrides.
+- Post-plan HF fast-path parity: added retained hybrid HF fast OCR so non-tall rows use `min_pixels=32768` while tall rows stay on the default HF read.
+- Added regression coverage for HF processor `min_pixels` override routing and for the mixed tall/wide HF fast branch contract.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

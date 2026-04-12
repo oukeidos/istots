@@ -33,6 +33,7 @@ def test_create_ocr_backend_routes_hf(monkeypatch) -> None:
             model_id="org/model",
             device="cpu",
             hf_dtype="auto",
+            hf_min_pixels=32768,
             max_new_tokens=123,
             local_files_only=False,
         )
@@ -44,6 +45,7 @@ def test_create_ocr_backend_routes_hf(monkeypatch) -> None:
         model_id="org/model",
         device="cpu",
         hf_dtype="auto",
+        hf_min_pixels=32768,
         max_new_tokens=123,
         local_files_only=False,
     )

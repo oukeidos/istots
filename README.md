@@ -95,7 +95,9 @@ Global flags:
 - `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
 - OCR requests run sequentially, one subtitle image at a time.
-- `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
+- `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path.
+- `--engine llama-server --ocr-mode fast`: uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
+- `--engine hf --ocr-mode fast`: uses retained default HF reading on tall rows and retained `min_pixels=32768` only on non-tall rows.
 - `--paddle-profile {auto,cpu}`: PaddleOCR-VL `llama-server` runtime profile. Default is `auto`.
 - `--paddle-profile auto` leaves low-level hardware selection to `llama-server`.
 - `--paddle-profile cpu` forces PaddleOCR-VL `llama-server` CPU execution.
@@ -241,6 +243,8 @@ Advanced `llama-server` overrides remain available on `convert` and `smoke` thro
 
 - `default`: the retained primary OCR path. All rows use the retained `ocr` runtime role.
 - `fast`: the retained optional faster OCR path. `istots` partitions rows by image ratio, sends non-tall rows to `ocr-fast`, sends tall rows to retained `ocr`, and restores the original row order before SRT assembly.
+- On `--engine hf`, `fast` uses the same partition rule but applies retained `min_pixels=32768` only on the non-tall branch while keeping tall rows on the default HF read.
+- The retained experiment evidence treated HF `min_pixels=32768` as a conditional speed knob because tall / vertical rows can collapse, so the product HF fast path keeps the tall/default gate.
 
 ## Detector Output
 
