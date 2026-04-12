@@ -64,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.register_subcommand_parser(materialize_mmproj)
     _add_materialize_mmproj_arguments(materialize_mmproj)
 
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Run runtime preflight checks for retained runtime roles",
+    )
+    parser.register_subcommand_parser(doctor)
+    _add_doctor_arguments(doctor)
+
     return parser
 
 
@@ -254,11 +261,104 @@ def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--engine",
+        choices=("llama-server",),
+        default="llama-server",
+        help="Runtime engine to validate (default: llama-server)",
+    )
+    parser.add_argument(
+        "--role",
+        choices=("ocr", "ocr-fast", "detector", "corrector"),
+        default="ocr",
+        help="Retained runtime role to validate (default: ocr)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("auto", "cpu", "memory"),
+        default="auto",
+        help="Runtime launch profile (default: auto)",
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Local model cache root (default: ~/.cache/istots/models "
+            "or ISTOTS_MODELS_DIR)."
+        ),
+    )
+    parser.add_argument(
+        "--min-pixels",
+        type=int,
+        default=32768,
+        help="Derived mmproj min_pixels value used for fast-role asset resolution (default: 32768)",
+    )
+    parser.add_argument(
+        "--llama-server-path",
+        type=Path,
+        default=None,
+        help="Explicit llama-server binary path",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind or probe (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Override the retained default port for the selected role",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "gpu"),
+        default=None,
+        help="Override the runtime device preference",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Override llama-server thread count",
+    )
+    parser.add_argument(
+        "--threads-batch",
+        type=int,
+        default=None,
+        help="Override llama-server batch thread count",
+    )
+    parser.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=None,
+        help="Override llama-server GPU layer count",
+    )
+    parser.add_argument(
+        "--no-mmproj-offload",
+        action="store_true",
+        help="Disable mmproj offload for the doctor launch",
+    )
+    parser.add_argument(
+        "--startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="llama-server startup timeout in seconds",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs",
+    )
+
+
 def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return argv
 
-    known_commands = {"convert", "setup", "materialize-mmproj"}
+    known_commands = {"convert", "setup", "materialize-mmproj", "doctor"}
     first = argv[0]
     if first in known_commands or first.startswith("-"):
         return argv
@@ -277,6 +377,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return run_setup(args)
     if args.command == "materialize-mmproj":
         return run_materialize_mmproj(args)
+    if args.command == "doctor":
+        return run_doctor(args)
     if args.command == "convert":
         return run_convert(args)
 
@@ -348,6 +450,56 @@ def run_materialize_mmproj(args: argparse.Namespace) -> int:
             applied_value,
         )
     return 0
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    configure_logging(verbose=not args.quiet)
+
+    if args.engine != "llama-server":
+        logging.getLogger(__name__).error("unsupported doctor engine: %s", args.engine)
+        return 1
+
+    from istots.llama_runtime import LlamaServerOverrides, LlamaServerProfile, run_llama_server_doctor
+
+    overrides = LlamaServerOverrides(
+        profile=LlamaServerProfile(args.profile),
+        device=args.device,
+        threads=args.threads,
+        threads_batch=args.threads_batch,
+        port=args.port,
+        gpu_layers=args.gpu_layers,
+        no_mmproj_offload=True if args.no_mmproj_offload else None,
+    )
+
+    report = run_llama_server_doctor(
+        role=args.role,
+        models_dir=args.models_dir,
+        min_pixels=args.min_pixels,
+        explicit_binary_path=args.llama_server_path,
+        host=args.host,
+        overrides=overrides,
+        startup_timeout_sec=args.startup_timeout_sec,
+    )
+
+    logger = logging.getLogger(__name__)
+    if report.ok:
+        if not args.quiet and report.launch_spec is not None:
+            logger.info(
+                "doctor passed: role=%s profile=%s binary=%s model=%s mmproj=%s port=%s",
+                report.role,
+                report.profile,
+                report.launch_spec.binary_path,
+                report.launch_spec.model_path,
+                report.launch_spec.mmproj_path,
+                report.launch_spec.port,
+            )
+            if report.smoke_response is not None:
+                logger.info("doctor smoke response: %s", report.smoke_response)
+        return 0
+
+    for issue in report.issues:
+        logger.error("doctor failed [%s]: %s", issue.code, issue.message)
+    return 1
 
 
 def run_convert(args: argparse.Namespace) -> int:

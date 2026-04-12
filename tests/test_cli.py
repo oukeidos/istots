@@ -42,6 +42,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
     assert "--min-pixels MIN_PIXELS" in captured.out
+    assert "--profile {auto,cpu,memory}" in captured.out
     assert "--force" in captured.out
 
 
@@ -65,6 +66,16 @@ def test_run_routes_materialize_mmproj(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "run_materialize_mmproj", fake_materialize)
     assert cli.run(["materialize-mmproj", "base.gguf"]) == 17
+
+
+def test_run_routes_doctor(monkeypatch) -> None:
+    def fake_doctor(args) -> int:
+        assert args.command == "doctor"
+        assert args.engine == "llama-server"
+        return 19
+
+    monkeypatch.setattr(cli, "run_doctor", fake_doctor)
+    assert cli.run(["doctor"]) == 19
 
 
 def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> None:
@@ -147,6 +158,46 @@ def test_run_materialize_mmproj_applies_requested_value(monkeypatch, tmp_path: P
     assert captured["materialize"]["output_path"] == output
     assert captured["materialize"]["gguf_source_mode"] == "installed"
     assert captured["read"]["args"] == (output,)
+
+
+def test_run_doctor_passes_runtime_overrides(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_llama_server_doctor(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(ok=True, role="ocr", profile="cpu", launch_spec=None, smoke_response=None)
+
+    monkeypatch.setattr("istots.llama_runtime.run_llama_server_doctor", fake_run_llama_server_doctor)
+
+    rc = cli.run(
+        [
+            "doctor",
+            "--role",
+            "ocr-fast",
+            "--profile",
+            "cpu",
+            "--models-dir",
+            str(tmp_path),
+            "--port",
+            "19001",
+            "--threads",
+            "12",
+            "--threads-batch",
+            "8",
+            "--no-mmproj-offload",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["role"] == "ocr-fast"
+    assert captured["models_dir"] == tmp_path
+    overrides = captured["overrides"]
+    assert overrides.profile.value == "cpu"
+    assert overrides.port == 19001
+    assert overrides.threads == 12
+    assert overrides.threads_batch == 8
+    assert overrides.no_mmproj_offload is True
 
 
 def test_run_routes_legacy_convert(monkeypatch) -> None:

@@ -33,6 +33,12 @@ This prepares the retained local setup assets:
 uv run istots input.sup output.srt
 ```
 
+Runtime preflight:
+
+```bash
+uv run istots doctor --engine llama-server --role ocr
+```
+
 Optional flags:
 
 ```bash
@@ -79,6 +85,21 @@ export ISTOTS_MODELS_DIR="$HOME/.cache/istots/models"
 # Override support cache root for pinned gguf snapshot fallback
 export ISTOTS_SUPPORT_DIR="$HOME/.cache/istots/support"
 ```
+
+## Runtime Doctor
+
+Use `doctor` before switching to retained `llama-server` runtime roles:
+
+- `uv run istots doctor --engine llama-server --role ocr`
+- `uv run istots doctor --engine llama-server --role ocr-fast --profile cpu`
+
+The doctor checks:
+
+- `llama-server` binary presence
+- required model and mmproj assets for the selected role
+- likely port conflicts
+- launch readiness
+- minimal OpenAI-compatible smoke response
 
 ## Language Support
 

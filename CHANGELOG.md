@@ -7,6 +7,9 @@
 - Step 2: expanded `istots setup` to provision the retained HF fallback assets, GGUF runtime assets, and a derived `min_pixels=32768` GGUF mmproj.
 - Added pinned gguf snapshot support and a deterministic GGUF mmproj materializer aligned with the retained experiment contract.
 - Added regression coverage for GGUF asset download, pinned gguf loading, mmproj materialization, and the expanded setup CLI surface.
+- Step 3: added a product-owned `llama-server` runtime-management layer with retained launch profiles, per-role asset resolution, and launch-command construction.
+- Added `istots doctor --engine llama-server` with retained readiness checks for binary discovery, asset presence, port readiness, launch readiness, and minimal smoke requests.
+- Added reusable explicit llama OpenAI sampling defaults and regression coverage for runtime management and doctor flows.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.
