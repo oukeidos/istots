@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import io
 import json
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -30,6 +32,10 @@ from istots.model_store import (
 DEFAULT_LLAMA_SERVER_HOST = "127.0.0.1"
 DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC = 120.0
 DEFAULT_LLAMA_SERVER_SMOKE_MAX_TOKENS = 16
+DEFAULT_LLAMA_SERVER_MANAGER_LOCK_PATH = Path("/tmp/istots-llama-server.lock")
+DEFAULT_LLAMA_SERVER_MANAGER_STATE_PATH = Path("/tmp/istots-llama-server-state.json")
+
+_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS: dict[int, Any] = {}
 
 
 class LlamaServerRole(StrEnum):
@@ -111,6 +117,17 @@ class LlamaServerDoctorReport:
         return not self.issues
 
 
+@dataclass(frozen=True)
+class LlamaServerManagerState:
+    pid: int
+    binary_path: str
+    model_path: str
+    mmproj_path: str
+    host: str
+    port: int
+    role: str
+
+
 def detect_llama_server_path(explicit: Path | None = None) -> Path | None:
     candidates: list[Path] = []
     if explicit is not None:
@@ -132,6 +149,157 @@ def shutil_which(binary: str) -> str | None:
     import shutil
 
     return shutil.which(binary)
+
+
+def llama_server_manager_lock_path() -> Path:
+    override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH")
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_LLAMA_SERVER_MANAGER_LOCK_PATH
+
+
+def llama_server_manager_state_path() -> Path:
+    override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH")
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_LLAMA_SERVER_MANAGER_STATE_PATH
+
+
+def _acquire_llama_server_manager_lock() -> Any:
+    lock_path = llama_server_manager_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _release_llama_server_manager_lock(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _load_llama_server_manager_state() -> LlamaServerManagerState | None:
+    path = llama_server_manager_state_path()
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return LlamaServerManagerState(
+        pid=int(payload["pid"]),
+        binary_path=str(payload["binary_path"]),
+        model_path=str(payload["model_path"]),
+        mmproj_path=str(payload["mmproj_path"]),
+        host=str(payload["host"]),
+        port=int(payload["port"]),
+        role=str(payload["role"]),
+    )
+
+
+def _write_llama_server_manager_state(
+    spec: LlamaServerLaunchSpec,
+    *,
+    pid: int,
+) -> None:
+    path = llama_server_manager_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": pid,
+        "binary_path": str(spec.binary_path),
+        "model_path": str(spec.model_path),
+        "mmproj_path": str(spec.mmproj_path),
+        "host": spec.host,
+        "port": spec.port,
+        "role": spec.role.value,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _clear_llama_server_manager_state(*, pid: int | None = None) -> None:
+    path = llama_server_manager_state_path()
+    if not path.exists():
+        return
+    if pid is not None:
+        state = _load_llama_server_manager_state()
+        if state is not None and state.pid != pid:
+            return
+    path.unlink()
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_process_cmdline(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _process_matches_manager_state(state: LlamaServerManagerState) -> bool:
+    argv = _read_process_cmdline(state.pid)
+    if not argv:
+        return False
+    try:
+        binary_path = str(Path(argv[0]).expanduser().resolve())
+    except OSError:
+        binary_path = argv[0]
+    return (
+        binary_path == state.binary_path
+        and state.model_path in argv
+        and state.mmproj_path in argv
+        and "--host" in argv
+        and "--port" in argv
+        and state.host in argv
+        and str(state.port) in argv
+    )
+
+
+def _terminate_llama_server_pid(pid: int) -> None:
+    if not _is_pid_alive(pid):
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not _is_pid_alive(pid):
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not _is_pid_alive(pid):
+            return
+        time.sleep(0.1)
+
+
+def _cleanup_stale_llama_server_manager_state() -> None:
+    state = _load_llama_server_manager_state()
+    if state is None:
+        return
+    if not _is_pid_alive(state.pid):
+        _clear_llama_server_manager_state()
+        return
+    if not _process_matches_manager_state(state):
+        _clear_llama_server_manager_state()
+        return
+    _terminate_llama_server_pid(state.pid)
+    _clear_llama_server_manager_state()
 
 
 def resolve_llama_server_role_assets(
@@ -278,19 +446,37 @@ def is_port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def _reserved_llama_server_ports(target_port: int) -> list[int]:
+    return sorted({*DEFAULT_ROLE_PORTS.values(), target_port})
+
+
 def start_llama_server(
     spec: LlamaServerLaunchSpec,
     startup_timeout_sec: float,
 ) -> subprocess.Popen[str]:
+    if _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS:
+        raise RuntimeError(
+            "llama-server manager already has an active runtime in this process; "
+            "close the current runtime before starting another one."
+        )
+
+    manager_lock = _acquire_llama_server_manager_lock()
     command = build_llama_server_command(spec)
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        start_new_session=True,
-    )
     try:
+        _cleanup_stale_llama_server_manager_state()
+        occupied_ports = [port for port in _reserved_llama_server_ports(spec.port) if is_port_in_use(spec.host, port)]
+        if occupied_ports:
+            joined = ", ".join(f"{spec.host}:{port}" for port in occupied_ports)
+            raise RuntimeError(f"reserved llama-server ports are already in use: {joined}")
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        _write_llama_server_manager_state(spec, pid=process.pid)
+        _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS[process.pid] = manager_lock
         wait_until_ready(
             spec.host,
             spec.port,
@@ -299,19 +485,31 @@ def start_llama_server(
         )
         return process
     except Exception:
-        stop_llama_server(process)
+        if "process" in locals():
+            stop_llama_server(process)
+        else:
+            _clear_llama_server_manager_state()
+            _release_llama_server_manager_lock(manager_lock)
         raise
 
 
 def stop_llama_server(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+    manager_lock = _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(process.pid, None)
     try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+    finally:
+        _clear_llama_server_manager_state(pid=process.pid)
+        _release_llama_server_manager_lock(manager_lock)
 
 
 def request_llama_server_smoke(spec: LlamaServerLaunchSpec) -> str:
@@ -425,16 +623,21 @@ def run_llama_server_doctor(
                 )
             )
 
+    manager_lock = _acquire_llama_server_manager_lock()
     try:
-        port_in_use = is_port_in_use(launch_spec.host, launch_spec.port)
-    except OSError as exc:
-        issues.append(
-            LlamaServerDoctorIssue(
-                code="port_probe_failed",
-                message=f"failed to probe port readiness: {exc}",
+        _cleanup_stale_llama_server_manager_state()
+        try:
+            port_in_use = is_port_in_use(launch_spec.host, launch_spec.port)
+        except OSError as exc:
+            issues.append(
+                LlamaServerDoctorIssue(
+                    code="port_probe_failed",
+                    message=f"failed to probe port readiness: {exc}",
+                )
             )
-        )
-        port_in_use = False
+            port_in_use = False
+    finally:
+        _release_llama_server_manager_lock(manager_lock)
 
     if port_in_use:
         issues.append(

@@ -33,6 +33,8 @@
 - Added regression coverage to lock single-backend residency across retained hybrid OCR, detector, and correction flows.
 - Post-plan corrector fix: wrapped Gemini image inputs in the required `inline_data` part envelope so product Gemini correction requests match the retained experiment contract.
 - Added regression coverage for Gemini inline-image request construction and verified retained Qwen local and Gemini correction smoke flows on experiment-backed SUP input slices.
+- Post-plan runtime-manager fix: moved `llama-server` launch ownership behind a single cross-role manager that serializes runtime residency, records managed process state, cleans stale managed runtimes, and rejects unexpected reserved-port conflicts before launch.
+- Added regression coverage for managed stale-runtime cleanup, managed state teardown, and reserved-port conflict detection, and verified the real Qwen local correction slice leaves no `llama-server` process behind after completion.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.
