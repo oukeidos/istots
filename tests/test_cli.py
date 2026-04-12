@@ -43,6 +43,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--ocr-mode {default,fast}" in captured.out
     assert "--furigana-mask" in captured.out
     assert "--detector-output DETECTOR_OUTPUT" in captured.out
+    assert "--detector-mode {default,wider}" in captured.out
     assert "--detector-family-addon" in captured.out
     assert "--corrector {off,qwen-local,gemini}" in captured.out
     assert "--corrector-output CORRECTOR_OUTPUT" in captured.out
@@ -666,6 +667,40 @@ def test_run_convert_passes_detector_output(monkeypatch, tmp_path: Path) -> None
     assert captured["detector_output"] == detector_output
 
 
+def test_run_convert_passes_detector_mode(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+            detector_record_count=2,
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--detector-output",
+            str(detector_output),
+            "--detector-mode",
+            "wider",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["detector_mode"] == "wider"
+
+
 def test_run_convert_passes_detector_family_addon(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
@@ -1163,6 +1198,25 @@ def test_run_convert_rejects_detector_family_addon_without_detector_or_corrector
                 str(output_srt),
                 "--quiet",
                 "--detector-family-addon",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_detector_mode_without_detector_or_corrector(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                str(input_sup),
+                str(output_srt),
+                "--quiet",
+                "--detector-mode",
+                "wider",
             ]
         )
 

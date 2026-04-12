@@ -167,6 +167,7 @@ def convert_sup_to_srt(
     engine: str | OCREngine = OCREngine.HF,
     ocr_mode: str = "default",
     detector_output: Path | None = None,
+    detector_mode: str = "default",
     corrector_config: CorrectorConfig | None = None,
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     models_dir: Path | None = None,
@@ -187,6 +188,7 @@ def convert_sup_to_srt(
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
     normalized_engine = normalize_ocr_engine(engine)
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
+    normalized_detector_mode = _normalize_detector_mode(detector_mode)
     allow_hf_auto_cpu_fallback = normalized_engine is OCREngine.HF and hf_device == "auto"
     resolved_hf_device = resolve_hf_device(hf_device) if normalized_engine is OCREngine.HF else None
     resolved_paddle_runtime = paddle_runtime_overrides or PaddleOCRVLRuntimeOverrides()
@@ -195,6 +197,10 @@ def convert_sup_to_srt(
         raise ValueError("detector output requires the llama-server engine")
     if detector_output is not None and normalized_ocr_mode != "default":
         raise ValueError("detector output requires the default OCR mode")
+    if normalized_detector_mode != "default" and normalized_engine is not OCREngine.LLAMA_SERVER:
+        raise ValueError("detector mode overrides require the llama-server engine")
+    if normalized_detector_mode != "default" and normalized_ocr_mode != "default":
+        raise ValueError("detector mode overrides require the default OCR mode")
     if corrector_config is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
         raise ValueError("correction requires the llama-server engine")
     if corrector_config is not None and normalized_ocr_mode != "default":
@@ -214,6 +220,8 @@ def convert_sup_to_srt(
 
     if verbose:
         logger.info("ocr mode: %s", normalized_ocr_mode)
+        if detector_output is not None or corrector_config is not None:
+            logger.info("detector mode: %s", normalized_detector_mode)
         logger.info("furigana masking: %s", "enabled" if enable_furigana_mask else "disabled")
         logger.info("srt policy: %s", srt_policy)
 
@@ -238,6 +246,7 @@ def convert_sup_to_srt(
             paddle_runtime_overrides=resolved_paddle_runtime,
             runtime_label=runtime_label,
             detector_output=detector_output,
+            detector_mode=normalized_detector_mode,
             corrector_config=corrector_config,
             detector_family_addon=detector_family_addon,
             max_items=max_items,
@@ -415,6 +424,7 @@ def _convert_sup_to_srt_default_with_detector(
     paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     runtime_label: str,
     detector_output: Path | None,
+    detector_mode: str,
     corrector_config: CorrectorConfig | None,
     detector_family_addon: bool,
     max_items: int | None,
@@ -446,11 +456,12 @@ def _convert_sup_to_srt_default_with_detector(
             branch_label="default",
         )
 
-    detector_records = _build_hybrid_detector_records(
-        prepared_inputs,
-        baseline_texts,
+    detector_records = _build_detector_surface_records(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
         detector_backend_config=backend_config,
         paddle_runtime_overrides=paddle_runtime_overrides,
+        detector_mode=detector_mode,
         verbose=verbose,
     )
     if detector_family_addon:
@@ -522,6 +533,13 @@ def _normalize_ocr_mode(ocr_mode: str) -> str:
     if normalized in {"default", "fast"}:
         return normalized
     raise ValueError(f"unsupported OCR mode: {ocr_mode!r}")
+
+
+def _normalize_detector_mode(detector_mode: str) -> str:
+    normalized = detector_mode.strip().lower()
+    if normalized in {"default", "wider"}:
+        return normalized
+    raise ValueError(f"unsupported detector mode: {detector_mode!r}")
 
 
 def _collect_prepared_ocr_inputs(
@@ -759,6 +777,142 @@ def _build_hybrid_detector_records(
                     )
                 )
     return detector_records
+
+
+def _build_detector_surface_records(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    detector_backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
+    detector_mode: str,
+    verbose: bool,
+) -> list[HybridDetectorRecord]:
+    detector_records = _build_hybrid_detector_records(
+        prepared_inputs,
+        baseline_texts,
+        detector_backend_config=detector_backend_config,
+        paddle_runtime_overrides=paddle_runtime_overrides,
+        verbose=verbose,
+    )
+    if detector_mode != "wider":
+        return detector_records
+
+    p2_records = _build_p2_meaningful_temp0_records(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
+        detector_backend_config=detector_backend_config,
+        paddle_runtime_overrides=paddle_runtime_overrides,
+        verbose=verbose,
+    )
+    merged_records = _merge_detector_surface_records(
+        primary_records=detector_records,
+        extra_records=p2_records,
+    )
+    if verbose:
+        overlap_count = len(detector_records) + len(p2_records) - len(merged_records)
+        logger.info(
+            "wider detector surface: s1_rows=%d p2_rows=%d overlap_rows=%d total_rows=%d",
+            len(detector_records),
+            len(p2_records),
+            overlap_count,
+            len(merged_records),
+        )
+    return merged_records
+
+
+def _build_p2_meaningful_temp0_records(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    detector_backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
+    verbose: bool,
+) -> list[HybridDetectorRecord]:
+    if not prepared_inputs:
+        return []
+
+    baseline_by_index = dict(zip((item.index for item in prepared_inputs), baseline_texts, strict=True))
+    detector_records: list[HybridDetectorRecord] = []
+    config = _build_paddle_backend_config(
+        base_config=detector_backend_config,
+        role="detector",
+        overrides=paddle_runtime_overrides,
+    )
+    with _managed_ocr_backend(
+        config,
+        allow_hf_auto_cpu_fallback=False,
+        verbose=verbose,
+    ) as (backend, _):
+        option_texts = _recognize_prepared_inputs(
+            prepared_inputs,
+            backend=backend,
+            verbose=verbose,
+            branch_label="detector-p2_meaningful_temp0",
+        )
+        for item, option_text in zip(prepared_inputs, option_texts, strict=True):
+            baseline_text = baseline_by_index[item.index]
+            if baseline_text == option_text:
+                continue
+            ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+            diff = assess_difference(
+                baseline_text,
+                option_text,
+                profile=DEFAULT_TEXT_DIFF_PROFILE,
+            )
+            if not diff.meaningful:
+                continue
+            detector_records.append(
+                HybridDetectorRecord(
+                    index=item.index,
+                    raw_index=item.frame.raw_index,
+                    window_id=item.frame.window_id,
+                    start_ms=_timedelta_to_ms(item.frame.start),
+                    end_ms=_timedelta_to_ms(item.frame.end),
+                    detector_branch="p2_meaningful_temp0",
+                    shape="tall" if _is_tall_subtitle_image(item.image) else "wide",
+                    ratio=ratio,
+                    option_role="detector",
+                    baseline_text=baseline_text,
+                    option_text=option_text,
+                    diff_label=diff.label,
+                    meaningful=diff.meaningful,
+                    char_error_rate=diff.char_error_rate,
+                    source_tags=("p2_meaningful_temp0",),
+                    alternate_source_kind="temp0_repeat",
+                )
+            )
+    return detector_records
+
+
+def _merge_detector_surface_records(
+    *,
+    primary_records: list[HybridDetectorRecord],
+    extra_records: list[HybridDetectorRecord],
+) -> list[HybridDetectorRecord]:
+    merged_records = list(primary_records)
+    record_index = {record.index: idx for idx, record in enumerate(merged_records)}
+    for record in extra_records:
+        existing_idx = record_index.get(record.index)
+        if existing_idx is None:
+            record_index[record.index] = len(merged_records)
+            merged_records.append(record)
+            continue
+        existing = merged_records[existing_idx]
+        merged_records[existing_idx] = replace(
+            existing,
+            source_tags=_merge_source_tags(existing.source_tags, record.source_tags),
+        )
+    return merged_records
+
+
+def _merge_source_tags(*tag_groups: tuple[str, ...]) -> tuple[str, ...]:
+    merged: list[str] = []
+    for tags in tag_groups:
+        for tag in tags:
+            if tag not in merged:
+                merged.append(tag)
+    return tuple(merged)
 
 
 def _build_dominant_family_addon_records(

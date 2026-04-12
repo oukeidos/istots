@@ -253,10 +253,11 @@ Advanced `llama-server` overrides remain available on `convert` and `smoke` thro
 ## Detector Output
 
 - `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
+- `--detector-mode default|wider`: keeps the default detector surface by default, or adds a wider default-repeat detector slice when `wider` is selected.
 - Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
 - Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
-- `--detector-family-addon` keeps the default `S1` detector intact and then adds an opt-in dominant-family recall layer on top of it.
-- The add-on only considers repeated single-character kanji families observed in the current `S1` detector disagreements.
+- `--detector-family-addon` keeps the selected detector surface intact and then adds an opt-in dominant-family recall layer on top of it.
+- The add-on only considers repeated single-character kanji families observed in the currently selected detector disagreements.
 - For add-on rows, `alternate_text` is a synthetic family-pair swap rather than an extra OCR read, and the manifest marks it as `alternate_source_kind = family_pair_swap`.
 - In the first-wave product surface, detector behavior is retained on the `llama-server` path and is not mirrored onto the explicit `hf` fallback path.
 

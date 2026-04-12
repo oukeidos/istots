@@ -69,22 +69,20 @@ Implement the experimentally validated feature set into the product code without
 
 - Retained experiment read:
   - keep the current hybrid detector as the default detector surface:
-    - `S1`
     - non-tall:
       - alternate-read disagreement against the retained `min_pixels=32768` branch
     - tall:
       - repeat-drift disagreement against a repeated retained default read
   - add an opt-in wider detector surface:
-    - `S2`
-    - `S1` plus `p2 meaningful temp0`
+    - default detector surface plus a wider default-repeat detector slice
     - practical meaning:
       - one extra same-default repeated read that is evaluated as an additional detector pass
   - keep dominant-family widening as a separate optional recall add-on:
-    - `S3 \ S2`
+    - separate family add-on layer
     - not part of the default detector
-    - not equivalent to the `S2` detector extension
+    - not equivalent to the wider detector extension
 - Product posture to preserve:
-  - detector default remains `S1`
+  - detector default remains the current hybrid surface
   - wider detector remains opt-in only
   - dominant-family add-on remains opt-in and explicitly recall-oriented
   - detector stays `llama-server`-only in the product surface
@@ -98,18 +96,18 @@ Implement the experimentally validated feature set into the product code without
     - tall:
       - `detector`
   - detector pass 2:
-    - repeated retained default read for the wider `S2` extension
-    - produce `p2_meaningful_temp0` rows only when the wider detector mode is enabled
+    - repeated retained default read for the wider detector extension
+    - produce wider default-repeat detector rows only when the wider detector mode is enabled
   - add-on layer:
     - dominant-family candidate enrichment runs after detector rows are assembled
     - may be attached to:
-      - `S1`
-      - `S2`
+      - the default detector surface
+      - the wider detector surface
     - but remains logically separate from detector-pass generation
 - Internal contract:
   - replace the current single detector-record builder with a detector-surface builder that can compose:
-    - `S1`
-    - `S2`
+    - the default detector surface
+    - the wider detector surface
     - optional dominant-family add-on
   - preserve per-row provenance in manifests:
     - `detector_branch`
@@ -119,26 +117,26 @@ Implement the experimentally validated feature set into the product code without
       - `p2_meaningful_temp0`
       - `dominant_family_addon`
   - keep correction trigger selection surface-aligned:
-    - default correction uses `S1`
-    - opt-in wider correction may consume `S2`
+    - default correction uses the default detector surface
+    - opt-in wider correction may consume the wider detector surface
     - family add-on rows are available only when explicitly requested
 - User-facing outcome:
   - add a detector mode surface with at least:
     - default hybrid detector
-    - wider `S2` detector
+    - wider detector
   - add an explicit family add-on toggle separate from detector mode
   - do not overload the default detector flag into silently enabling either wider mode or family enrichment
 - Acceptance criteria:
-  - default detector output remains backward-compatible with current `S1`
-  - wider detector adds only the retained `p2_meaningful_temp0` slice on top of `S1`
-  - family add-on can be attached independently to either `S1` or `S2`
-  - manifests preserve enough provenance to reconstruct `S1`, `S2`, and add-on-exclusive slices
+  - default detector output remains backward-compatible with the current default detector surface
+  - wider detector adds only the retained wider default-repeat slice on top of the default detector surface
+  - family add-on can be attached independently to either the default detector surface or the wider detector surface
+  - manifests preserve enough provenance to reconstruct the default detector surface, the wider detector surface, and add-on-exclusive slices
   - regression tests lock row-surface membership and prevent default-surface expansion by accident
 - Current implementation status:
   - completed the first retained slice:
-    - `S1 + dominant-family add-on`
+    - default detector surface plus dominant-family add-on
   - the add-on is now opt-in on top of the default detector surface through `--detector-family-addon`
-  - dominant-family extraction is currently limited to repeated single-character kanji families seen in the live `S1` disagreement rows
+  - dominant-family extraction is currently limited to repeated single-character kanji families seen in the live detector disagreements
   - selection now uses row-level `support`, `pure`, `mixed`, and agreement-breadth gating instead of a count-only winner
   - add-on `alternate_text` is synthesized as the paired family-character swap, matching the retained `family_pair_swap` contract
-  - wider `S2` detector wiring remains pending
+  - wider detector mode is now available through `--detector-mode wider`

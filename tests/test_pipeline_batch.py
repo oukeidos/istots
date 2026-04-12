@@ -851,6 +851,212 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
     assert manifest[3]["dominant_family"] == "仲伸"
 
 
+def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+    ]
+
+    detector_instance_count = 0
+    created_roles: list[str] = []
+
+    class FakeBackend:
+        def __init__(self, role: str, detector_instance: int | None = None) -> None:
+            self.role = role
+            self.detector_instance = detector_instance
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            if self.role == "ocr":
+                return [["BASE-0"], ["BASE-1"], ["BASE-2"]][self.calls - 1]
+            if self.role == "ocr-fast":
+                return [["ALT-S1-0"], ["BASE-1"], ["BASE-2"]][self.calls - 1]
+            if self.role == "detector" and self.detector_instance == 1:
+                return [["ALT-P2-0"], ["BASE-1"], ["ALT-P2-2"]][self.calls - 1]
+            raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        nonlocal detector_instance_count
+        created_roles.append(config.role)
+        if config.role == "detector":
+            detector_instance_count += 1
+            return FakeBackend(config.role, detector_instance=detector_instance_count)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        detector_mode="wider",
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 2
+    assert created_roles == ["ocr", "ocr-fast", "detector"]
+    assert [row["detector_branch"] for row in manifest] == [
+        "alternate_read_non_tall",
+        "p2_meaningful_temp0",
+    ]
+    assert manifest[0]["baseline_text"] == "BASE-0"
+    assert manifest[0]["option_text"] == "ALT-S1-0"
+    assert manifest[0]["source_tags"] == ["hybrid_detector", "p2_meaningful_temp0"]
+    assert manifest[0]["alternate_source_kind"] == "min32768"
+    assert manifest[1]["baseline_text"] == "BASE-2"
+    assert manifest[1]["option_text"] == "ALT-P2-2"
+    assert manifest[1]["source_tags"] == ["p2_meaningful_temp0"]
+    assert manifest[1]["alternate_source_kind"] == "temp0_repeat"
+
+
+def test_convert_sup_to_srt_detector_family_addon_can_attach_to_wider_surface(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10 + index,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=index * 10),
+            end=timedelta(milliseconds=(index + 1) * 10),
+            image=Image.new("RGB", (20, 2), "white"),
+        )
+        for index in range(4)
+    ]
+
+    detector_instance_count = 0
+
+    class FakeBackend:
+        def __init__(self, role: str, detector_instance: int | None = None) -> None:
+            self.role = role
+            self.detector_instance = detector_instance
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            if self.role == "ocr":
+                return [["(仲子) 了解"], ["(仲子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+            if self.role == "ocr-fast":
+                return [["(仲子) 了解"], ["(仲子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+            if self.role == "detector" and self.detector_instance == 1:
+                return [["(伸子) 了解"], ["(伸子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+            raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        nonlocal detector_instance_count
+        if config.role == "detector":
+            detector_instance_count += 1
+            return FakeBackend(config.role, detector_instance=detector_instance_count)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        detector_mode="wider",
+        detector_family_addon=True,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 3
+    assert [row["detector_branch"] for row in manifest] == [
+        "p2_meaningful_temp0",
+        "p2_meaningful_temp0",
+        "dominant_family_addon",
+    ]
+    assert manifest[0]["source_tags"] == ["p2_meaningful_temp0"]
+    assert manifest[1]["source_tags"] == ["p2_meaningful_temp0"]
+    assert manifest[2]["baseline_text"] == "(仲子) またね"
+    assert manifest[2]["option_text"] == "(伸子) またね"
+    assert manifest[2]["dominant_family"] == "仲伸"
+    assert manifest[2]["source_tags"] == ["dominant_family_addon"]
+    assert manifest[2]["family_support_rows"] == 2
+    assert manifest[2]["family_pure_rows"] == 2
+    assert manifest[2]["family_mixed_rows"] == 0
+    assert manifest[2]["family_agreement_rows"] == 1
+
+
 def test_select_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
     records = [
         HybridDetectorRecord(

@@ -243,6 +243,15 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--detector-mode",
+        choices=("default", "wider"),
+        default="default",
+        help=(
+            "Detector surface selection for retained llama-server detector flows. "
+            "`wider` adds the retained wider default-repeat detector slice on top of the default detector surface."
+        ),
+    )
+    parser.add_argument(
         "--detector-family-addon",
         action="store_true",
         help=(
@@ -482,6 +491,15 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-detector",
         action="store_true",
         help="Skip the retained hybrid detector manifest in smoke validation",
+    )
+    parser.add_argument(
+        "--detector-mode",
+        choices=("default", "wider"),
+        default="default",
+        help=(
+            "Detector surface selection for smoke validation. "
+            "`wider` adds the retained wider default-repeat detector slice on top of the default detector surface."
+        ),
     )
     parser.add_argument(
         "--detector-family-addon",
@@ -1136,6 +1154,12 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--detector-output requires --engine llama-server")
     if args.detector_output is not None and args.ocr_mode != "default":
         parser.error("--detector-output requires --ocr-mode default")
+    if args.detector_mode != "default" and args.engine != "llama-server":
+        parser.error("--detector-mode requires --engine llama-server")
+    if args.detector_mode != "default" and args.ocr_mode != "default":
+        parser.error("--detector-mode requires --ocr-mode default")
+    if args.detector_mode != "default" and args.detector_output is None and args.corrector == "off":
+        parser.error("--detector-mode requires --detector-output or --corrector")
     if args.detector_family_addon and args.engine != "llama-server":
         parser.error("--detector-family-addon requires --engine llama-server")
     if args.detector_family_addon and args.ocr_mode != "default":
@@ -1244,6 +1268,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         quiet=args.quiet,
         furigana_mask=args.furigana_mask,
         detector_output=detector_output,
+        detector_mode=args.detector_mode,
         detector_family_addon=args.detector_family_addon,
         corrector=args.corrector,
         corrector_output=corrector_output,
@@ -1406,6 +1431,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             engine=args.engine,
             ocr_mode=args.ocr_mode,
             detector_output=detector_output,
+            detector_mode=args.detector_mode,
             detector_family_addon=args.detector_family_addon,
             corrector_config=corrector_config,
             model_id=model_id,
