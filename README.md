@@ -44,6 +44,7 @@ Optional flags:
 ```bash
 uv run istots input.sup output.srt --furigana-mask
 uv run istots input.sup output.srt --srt-policy overlap
+uv run istots input.sup output.srt --ocr-mode fast
 ```
 
 Global flags:
@@ -60,9 +61,10 @@ Global flags:
 - `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
 - `--batch-size BATCH_SIZE`: OCR batch size. Default is `1`. If GPU OOM occurs, `istots` reduces the batch size and retries.
+- `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
 - `--runtime-profile {auto,cpu,memory}`: retained `llama-server` runtime profile. Default is `auto`.
 - `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
-- `--runtime-port PORT`: override the retained `llama-server` port for convert.
+- `--runtime-port PORT`: override the retained `llama-server` port for convert when `--ocr-mode default` is used.
 - `--threads N`: override `llama-server` thread count.
 - `--threads-batch N`: override `llama-server` batch thread count.
 - `--gpu-layers N`: override `llama-server` GPU layer count.
@@ -109,6 +111,11 @@ The doctor checks:
 - likely port conflicts
 - launch readiness
 - minimal OpenAI-compatible smoke response
+
+## OCR Modes
+
+- `default`: the retained primary OCR path. All rows use the retained `ocr` runtime role.
+- `fast`: the retained optional faster OCR path. `istots` partitions rows by image ratio, sends non-tall rows to `ocr-fast`, sends tall rows to retained `ocr`, and restores the original row order before SRT assembly.
 
 ## Language Support
 

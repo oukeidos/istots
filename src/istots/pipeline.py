@@ -5,6 +5,9 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import time
+from typing import Any
+
+from PIL import Image
 
 from istots.device import resolve_device
 from istots.furigana_mask import build_furigana_masks
@@ -13,6 +16,7 @@ from istots.srt_writer import SubtitleEntry, write_srt
 from istots.sup_reader import iter_sup_window_frames
 
 logger = logging.getLogger(__name__)
+TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
 
 
 @dataclass
@@ -35,11 +39,19 @@ class _WindowTextSegment:
     bottom: int
 
 
+@dataclass(frozen=True)
+class _PreparedOCRInput:
+    index: int
+    frame: Any
+    image: Image.Image
+
+
 def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
     preferred_device: str = "auto",
     engine: str | OCREngine = OCREngine.HF,
+    ocr_mode: str = "default",
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     models_dir: Path | None = None,
     max_items: int | None = None,
@@ -64,8 +76,12 @@ def convert_sup_to_srt(
 
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
     device = resolve_device(preferred_device)
+    normalized_engine = normalize_ocr_engine(engine)
+    normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
+    if normalized_ocr_mode == "fast" and normalized_engine is not OCREngine.LLAMA_SERVER:
+        raise ValueError("fast OCR mode requires the llama-server engine")
     backend_config = OCRBackendConfig(
-        engine=normalize_ocr_engine(engine),
+        engine=normalized_engine,
         model_id=model_id,
         device=device,
         max_new_tokens=max_new_tokens,
@@ -82,39 +98,37 @@ def convert_sup_to_srt(
         no_mmproj_offload=runtime_no_mmproj_offload,
         startup_timeout_sec=runtime_startup_timeout_sec,
     )
-    backend = None
-
-    try:
-        logger.info(
-            "loading OCR backend: engine=%s model=%s device=%s",
-            backend_config.engine,
-            model_id,
-            device,
-        )
-        backend = create_ocr_backend(backend_config)
-    except Exception as exc:
-        if preferred_device.lower() == "auto" and device == "gpu":
-            if verbose:
-                logger.warning("GPU init failed (%s). Retrying with CPU.", exc)
-            device = "cpu"
-            backend_config = replace(backend_config, device=device)
-            logger.info(
-                "loading OCR backend: engine=%s model=%s device=%s",
-                backend_config.engine,
-                model_id,
-                device,
-            )
-            backend = create_ocr_backend(backend_config)
-        else:
-            raise
 
     if verbose:
-        logger.info("using device: %s", device)
+        logger.info("ocr mode: %s", normalized_ocr_mode)
         logger.info("requested OCR batch size: %d", batch_size)
         logger.info("furigana masking: %s", "enabled" if enable_furigana_mask else "disabled")
         logger.info("srt policy: %s", srt_policy)
 
+    if normalized_ocr_mode == "fast":
+        return _convert_sup_to_srt_fast(
+            input_sup=input_sup,
+            output_srt=output_srt,
+            preferred_device=preferred_device,
+            backend_config=backend_config,
+            max_items=max_items,
+            batch_size=batch_size,
+            enable_furigana_mask=enable_furigana_mask,
+            srt_policy=srt_policy,
+            verbose=verbose,
+        )
+
+    backend = None
+
     try:
+        backend, device = _create_ocr_backends(
+            [backend_config],
+            preferred_device=preferred_device,
+            verbose=verbose,
+        )
+        if verbose:
+            logger.info("using device: %s", device)
+        active_backend = backend[0]
         segments: list[_WindowTextSegment] = []
         processed = 0
         total = 0
@@ -153,7 +167,7 @@ def convert_sup_to_srt(
                         images = prepared_images[start_offset : start_offset + len(chunk)]
                     else:
                         images = [frame.image for frame in chunk]
-                    texts = backend.recognize_batch(images)
+                    texts = active_backend.recognize_batch(images)
                 except Exception as exc:
                     if _is_oom_error(exc) and chunk_size > 1:
                         reduced = max(1, chunk_size // 2)
@@ -163,7 +177,7 @@ def convert_sup_to_srt(
                             chunk_size,
                             effective_batch_size,
                         )
-                        backend.clear_device_cache()
+                        active_backend.clear_device_cache()
                         continue
                     raise
 
@@ -181,22 +195,9 @@ def convert_sup_to_srt(
                             logger.info("OCR finished: %s skipped (empty)", _progress_label(processed, total))
                         continue
 
-                    end = frame.end
-                    if end <= frame.start:
-                        end = frame.start + timedelta(milliseconds=1)
-
-                    segments.append(
-                        _WindowTextSegment(
-                            start=frame.start,
-                            end=end,
-                            text=text,
-                            window_id=frame.window_id,
-                            left=frame.left,
-                            top=frame.top,
-                            right=frame.right,
-                            bottom=frame.bottom,
-                        )
-                    )
+                    segment = _build_window_text_segment(frame, text)
+                    if segment is not None:
+                        segments.append(segment)
 
                     if verbose:
                         logger.info("OCR finished: %s accepted", _progress_label(processed, total))
@@ -243,13 +244,305 @@ def convert_sup_to_srt(
             device_used=device,
         )
     finally:
-        if backend is not None and hasattr(backend, "close"):
+        _close_ocr_backends(backend, verbose=verbose)
+
+
+def _convert_sup_to_srt_fast(
+    *,
+    input_sup: Path,
+    output_srt: Path,
+    preferred_device: str,
+    backend_config: OCRBackendConfig,
+    max_items: int | None,
+    batch_size: int,
+    enable_furigana_mask: bool,
+    srt_policy: str,
+    verbose: bool,
+) -> ConversionResult:
+    prepared_inputs = _collect_prepared_ocr_inputs(
+        input_sup,
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        verbose=verbose,
+    )
+    wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
+    tall_inputs = [item for item in prepared_inputs if _is_tall_subtitle_image(item.image)]
+
+    if verbose:
+        logger.info(
+            "hybrid OCR partitioned rows: non_tall=%d tall=%d threshold=%.1f",
+            len(wide_inputs),
+            len(tall_inputs),
+            TALL_SUBTITLE_RATIO_THRESHOLD,
+        )
+
+    backend_specs: list[tuple[str, OCRBackendConfig]] = []
+    if wide_inputs:
+        backend_specs.append(("ocr-fast", replace(backend_config, role="ocr-fast")))
+    if tall_inputs:
+        backend_specs.append(("ocr", replace(backend_config, role="ocr")))
+
+    active_backends: list[Any] = []
+    device = backend_config.device
+    try:
+        active_backends, device = _create_ocr_backends(
+            [config for _, config in backend_specs],
+            preferred_device=preferred_device,
+            verbose=verbose,
+        )
+        if verbose:
+            logger.info("using device: %s", device)
+        backends_by_role = {
+            role: backend for (role, _), backend in zip(backend_specs, active_backends, strict=True)
+        }
+        recognized_by_index: dict[int, str] = {}
+
+        if wide_inputs:
+            if verbose:
+                logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(wide_inputs))
+            wide_texts = _recognize_prepared_inputs(
+                wide_inputs,
+                backend=backends_by_role["ocr-fast"],
+                batch_size=batch_size,
+                verbose=verbose,
+                branch_label="non-tall-fast",
+            )
+            for item, text in zip(wide_inputs, wide_texts, strict=True):
+                recognized_by_index[item.index] = text
+
+        if tall_inputs:
+            if verbose:
+                logger.info("running default OCR branch: tall=%d role=ocr", len(tall_inputs))
+            tall_texts = _recognize_prepared_inputs(
+                tall_inputs,
+                backend=backends_by_role["ocr"],
+                batch_size=batch_size,
+                verbose=verbose,
+                branch_label="tall-default",
+            )
+            for item, text in zip(tall_inputs, tall_texts, strict=True):
+                recognized_by_index[item.index] = text
+
+        segments = [
+            segment
+            for item in prepared_inputs
+            if (segment := _build_window_text_segment(item.frame, recognized_by_index.get(item.index, ""))) is not None
+        ]
+        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        write_srt(entries, output_srt)
+        if verbose:
+            logger.info(
+                "conversion finished: processed=%d written=%d output=%s",
+                len(prepared_inputs),
+                len(entries),
+                output_srt,
+            )
+        return ConversionResult(
+            output_srt=output_srt,
+            processed_count=len(prepared_inputs),
+            written_count=len(entries),
+            device_used=device,
+        )
+    finally:
+        _close_ocr_backends(active_backends, verbose=verbose)
+
+
+def _normalize_ocr_mode(ocr_mode: str) -> str:
+    normalized = ocr_mode.strip().lower()
+    if normalized in {"default", "fast"}:
+        return normalized
+    raise ValueError(f"unsupported OCR mode: {ocr_mode!r}")
+
+
+def _collect_prepared_ocr_inputs(
+    input_sup: Path,
+    *,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    verbose: bool,
+) -> list[_PreparedOCRInput]:
+    total = 0
+
+    def on_total(count: int) -> None:
+        nonlocal total
+        total = count
+        if verbose:
+            logger.info("parsed SUP OCR inputs: total=%d", total)
+
+    frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
+    if enable_furigana_mask:
+        if verbose:
+            logger.info("building furigana mask statistics by orientation")
+        images = [result.image for result in build_furigana_masks([frame.image for frame in frames])]
+    else:
+        images = [frame.image for frame in frames]
+    return [
+        _PreparedOCRInput(index=index, frame=frame, image=image)
+        for index, (frame, image) in enumerate(zip(frames, images, strict=True))
+    ]
+
+
+def _create_ocr_backends(
+    configs: list[OCRBackendConfig],
+    *,
+    preferred_device: str,
+    verbose: bool,
+) -> tuple[list[Any], str]:
+    if not configs:
+        return [], "cpu"
+
+    try:
+        return _attempt_create_ocr_backends(configs, verbose=verbose), configs[0].device
+    except Exception as exc:
+        if preferred_device.lower() == "auto" and configs[0].device == "gpu":
+            if verbose:
+                logger.warning("GPU init failed (%s). Retrying with CPU.", exc)
+            cpu_configs = [replace(config, device="cpu") for config in configs]
+            return _attempt_create_ocr_backends(cpu_configs, verbose=verbose), "cpu"
+        raise
+
+
+def _attempt_create_ocr_backends(
+    configs: list[OCRBackendConfig],
+    *,
+    verbose: bool,
+) -> list[Any]:
+    created: list[Any] = []
+    try:
+        for config in configs:
+            if verbose:
+                logger.info(
+                    "loading OCR backend: engine=%s role=%s model=%s device=%s",
+                    config.engine,
+                    config.role,
+                    config.model_id,
+                    config.device,
+                )
+            created.append(create_ocr_backend(config))
+        return created
+    except Exception:
+        _close_ocr_backends(created, verbose=False)
+        raise
+
+
+def _close_ocr_backends(backends: list[Any] | None, *, verbose: bool) -> None:
+    if not backends:
+        return
+    for backend in backends:
+        if hasattr(backend, "close"):
             try:
                 backend.close()
                 if verbose:
                     logger.info("OCR backend released from device memory")
             except Exception as exc:
                 logger.warning("failed to release OCR backend cleanly: %s", exc)
+
+
+def _recognize_prepared_inputs(
+    prepared_inputs: list[_PreparedOCRInput],
+    *,
+    backend: Any,
+    batch_size: int,
+    verbose: bool,
+    branch_label: str,
+) -> list[str]:
+    if not prepared_inputs:
+        return []
+
+    recognized: list[str] = []
+    processed = 0
+    effective_batch_size = max(1, batch_size)
+    pending = list(prepared_inputs)
+    total = len(prepared_inputs)
+
+    while pending:
+        chunk_size = min(effective_batch_size, len(pending))
+        chunk = pending[:chunk_size]
+
+        start_index = processed + 1
+        end_index = processed + len(chunk)
+        if verbose:
+            logger.info(
+                "OCR batch started: branch=%s %s batch=%d",
+                branch_label,
+                _progress_span_label(start_index, end_index, total),
+                chunk_size,
+            )
+
+        ocr_started = time.monotonic()
+        try:
+            texts = backend.recognize_batch([item.image for item in chunk])
+        except Exception as exc:
+            if _is_oom_error(exc) and chunk_size > 1:
+                reduced = max(1, chunk_size // 2)
+                effective_batch_size = min(effective_batch_size, reduced)
+                logger.warning(
+                    "OCR OOM at branch=%s batch=%d. Retrying with batch=%d.",
+                    branch_label,
+                    chunk_size,
+                    effective_batch_size,
+                )
+                backend.clear_device_cache()
+                continue
+            raise
+
+        ocr_elapsed = time.monotonic() - ocr_started
+        if len(texts) != len(chunk):
+            raise RuntimeError(
+                "OCR backend returned mismatched result count: "
+                f"expected={len(chunk)} actual={len(texts)}"
+            )
+
+        for text in texts:
+            processed += 1
+            if verbose:
+                state = "accepted" if text else "skipped (empty)"
+                logger.info(
+                    "OCR finished: branch=%s %s %s",
+                    branch_label,
+                    _progress_label(processed, total),
+                    state,
+                )
+        recognized.extend(texts)
+
+        if verbose:
+            logger.info(
+                "OCR batch finished: branch=%s %s batch=%d elapsed=%.2fs",
+                branch_label,
+                _progress_label(processed, total),
+                chunk_size,
+                ocr_elapsed,
+            )
+        pending = pending[chunk_size:]
+
+    return recognized
+
+
+def _is_tall_subtitle_image(image: Image.Image) -> bool:
+    width, height = image.size
+    if width <= 0:
+        return False
+    return (float(height) / float(width)) >= TALL_SUBTITLE_RATIO_THRESHOLD
+
+
+def _build_window_text_segment(frame: Any, text: str) -> _WindowTextSegment | None:
+    if not text:
+        return None
+
+    end = frame.end
+    if end <= frame.start:
+        end = frame.start + timedelta(milliseconds=1)
+
+    return _WindowTextSegment(
+        start=frame.start,
+        end=end,
+        text=text,
+        window_id=frame.window_id,
+        left=frame.left,
+        top=frame.top,
+        right=frame.right,
+        bottom=frame.bottom,
+    )
 
 
 def _build_subtitle_entries(

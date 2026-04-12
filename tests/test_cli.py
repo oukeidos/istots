@@ -39,6 +39,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "Subcommand Details:" in captured.out
     assert "--batch-size BATCH_SIZE" in captured.out
     assert "--engine {llama-server,hf}" in captured.out
+    assert "--ocr-mode {default,fast}" in captured.out
     assert "--furigana-mask" in captured.out
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
@@ -331,6 +332,7 @@ def test_run_convert_defaults_to_llama_server(monkeypatch, tmp_path: Path) -> No
     assert rc == 0
     assert called is False
     assert captured["engine"] == "llama-server"
+    assert captured["ocr_mode"] == "default"
     assert captured["local_files_only"] is False
     assert captured["models_dir"] is None
 
@@ -374,6 +376,7 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
 
     assert rc == 0
     assert captured["engine"] == "llama-server"
+    assert captured["ocr_mode"] == "default"
     assert captured["runtime_profile"] == "cpu"
     assert captured["runtime_port"] == 19005
     assert captured["runtime_threads"] == 12
@@ -381,6 +384,40 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
     assert captured["runtime_gpu_layers"] == 0
     assert captured["runtime_no_mmproj_offload"] is True
     assert captured["runtime_startup_timeout_sec"] == 30.0
+
+
+def test_run_convert_passes_fast_ocr_mode(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--ocr-mode",
+            "fast",
+            "--runtime-profile",
+            "cpu",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["engine"] == "llama-server"
+    assert captured["ocr_mode"] == "fast"
+    assert captured["runtime_profile"] == "cpu"
 
 
 def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
@@ -511,5 +548,27 @@ def test_run_convert_rejects_output_directory(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit) as excinfo:
         cli.run([str(input_sup), str(output_dir), "--quiet"])
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_fast_mode_for_hf(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--ocr-mode", "fast"])
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_runtime_port_for_fast_mode(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run([str(input_sup), str(output_srt), "--quiet", "--ocr-mode", "fast", "--runtime-port", "19005"])
 
     assert excinfo.value.code == 2

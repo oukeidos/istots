@@ -388,6 +388,122 @@ def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch
     ]
 
 
+def test_convert_sup_to_srt_fast_mode_requires_llama_server(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    with pytest.raises(ValueError, match="fast OCR mode requires the llama-server engine"):
+        pipeline.convert_sup_to_srt(
+            input_sup=input_sup,
+            output_srt=output_srt,
+            engine=OCREngine.HF,
+            ocr_mode="fast",
+            verbose=False,
+        )
+
+
+def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+        SimpleNamespace(
+            window_id=0,
+            left=0,
+            top=0,
+            right=30,
+            bottom=3,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (30, 3), "white"),
+        ),
+    ]
+
+    created_roles: list[str] = []
+    branch_calls: list[tuple[str, list[tuple[int, int]]]] = []
+    closed_roles: list[str] = []
+    written_entries = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            branch_calls.append((self.role, [image.size for image in images]))
+            self.calls += 1
+            prefix = "fast" if self.role == "ocr-fast" else "default"
+            return [f"{prefix}-{index}" for index in range(self.calls, self.calls + len(images))]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed_roles.append(self.role)
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_roles.append(config.role)
+        return FakeBackend(config.role)
+
+    def fake_write_srt(entries, path):
+        written_entries.extend(entries)
+        path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        ocr_mode="fast",
+        batch_size=4,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    assert result.processed_count == 3
+    assert created_roles == ["ocr-fast", "ocr"]
+    assert branch_calls == [
+        ("ocr-fast", [(20, 2), (30, 3)]),
+        ("ocr", [(2, 20)]),
+    ]
+    assert [entry.text for entry in written_entries] == ["fast-1", "default-1", "fast-2"]
+    assert closed_roles == ["ocr-fast", "ocr"]
+
+
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:
     segments = [
         pipeline._WindowTextSegment(

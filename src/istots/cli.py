@@ -125,6 +125,15 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="OCR batch size (default: 1)",
     )
     parser.add_argument(
+        "--ocr-mode",
+        choices=("default", "fast"),
+        default="default",
+        help=(
+            "OCR mode for `--engine llama-server`: retained default OCR or the optional "
+            "fast hybrid path (default: default)"
+        ),
+    )
+    parser.add_argument(
         "--runtime-profile",
         choices=("auto", "cpu", "memory"),
         default="auto",
@@ -564,6 +573,10 @@ def run_convert(args: argparse.Namespace) -> int:
         parser.error("--max-new-tokens must be a positive integer")
     if args.batch_size <= 0:
         parser.error("--batch-size must be a positive integer")
+    if args.ocr_mode == "fast" and args.engine != "llama-server":
+        parser.error("--ocr-mode fast requires --engine llama-server")
+    if args.ocr_mode == "fast" and args.runtime_port is not None:
+        parser.error("--runtime-port is only supported with --ocr-mode default")
 
     configure_logging(verbose=not args.quiet)
 
@@ -604,8 +617,9 @@ def run_convert(args: argparse.Namespace) -> int:
             logging.getLogger(__name__).info("using HF fallback model: %s", model_path)
     elif not args.quiet:
         logging.getLogger(__name__).info(
-            "using primary OCR engine: %s (profile=%s)",
+            "using primary OCR engine: %s (mode=%s profile=%s)",
             args.engine,
+            args.ocr_mode,
             args.runtime_profile,
         )
 
@@ -615,6 +629,7 @@ def run_convert(args: argparse.Namespace) -> int:
             output_srt=output_srt,
             preferred_device=args.device,
             engine=args.engine,
+            ocr_mode=args.ocr_mode,
             model_id=model_id,
             models_dir=args.models_dir,
             max_items=args.max_items,
