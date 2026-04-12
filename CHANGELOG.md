@@ -58,6 +58,7 @@
 - Added regression coverage for wider-surface row union, overlap provenance retention, and dominant-family add-on attachment on top of the wider detector surface.
 - Post-plan doctor restructuring: replaced the old single-role doctor surface with structured `runtime`, `auth`, and `workflow` checks aligned to PaddleOCR-VL, Qwen, Gemini auth, and explicit input-SUP workflow validation.
 - Added regression coverage for structured doctor CLI routing, explicit workflow input requirements, and shared launch-spec doctor execution.
+- Documentation refresh: rewrote `THIRD_PARTY_NOTICES.md` to match the current core dependencies, optional `hf` extra, external model sources, user-provided `llama-server` runtime, and Gemini service integration surface.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

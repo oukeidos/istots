@@ -1,7 +1,7 @@
 # Third-Party Notices
 
-This document records the third-party software and model artifacts used by
-`istots` in the current repository state.
+This document records the third-party packages, model sources, runtimes, and
+remote services used by the current `istots` repository state.
 
 ## Inventory Basis
 
@@ -9,157 +9,185 @@ This notice file was prepared from:
 
 - `pyproject.toml`
 - `uv.lock` (revision `3`)
-- installed Python distribution metadata (`*.dist-info`)
-- source inspection of `src/istots/*`
-- the model card for `PaddlePaddle/PaddleOCR-VL-1.5` on Hugging Face
+- source inspection of:
+  - `src/istots/model_store.py`
+  - `src/istots/gguf_support.py`
+  - `src/istots/llama_runtime.py`
+  - `src/istots/corrector.py`
+  - `tools/image_compare_gui/compare_images.py`
 
 Important scope notes:
 
-- The exact resolved dependency set can vary by Python version, operating
-  system, architecture, and whether PyTorch is installed in CPU-only or
-  CUDA-enabled form.
-- The optional image comparison GUI in `tools/image_compare_gui/compare_images.py`
-  uses Python's standard-library `tkinter` module. That does not introduce a
-  new PyPI dependency, but it does rely on the Tcl/Tk runtime bundled with or
-  linked by the host Python distribution.
-- `pyproject.toml` declares `uv_build` as the build backend. It is a build-time
-  dependency, not part of the main runtime dependency set, so it is not
-  enumerated below.
-- License strings below are taken from installed package metadata unless noted
-  otherwise. For binary redistribution, the bundled upstream license files take
-  precedence over shortened metadata labels.
+- The exact installed package set varies by Python version, operating system,
+  architecture, and whether the optional `hf` extra is installed.
+- `llama-server` is not vendored by this repository and is not installed by the
+  Python package. `istots` discovers a user- or host-provided binary at run
+  time.
+- Model files are downloaded into a local cache by `istots setup` and are not
+  vendored in this repository.
+- Gemini correction uses the remote Google Generative Language API over HTTP.
+  No Google Gemini Python SDK is bundled here.
+- The optional local image comparison GUI in `tools/image_compare_gui/` uses
+  Python's standard-library `tkinter` module and therefore depends on the host
+  Python runtime's Tcl/Tk packaging.
 
 ## First-Party License
 
 - `istots`: MIT. See `LICENSE`.
 
-## External Model Artifact
+## Host-Provided Runtimes and Remote Services
 
-`istots` is configured to use the following external model by default:
-
-| Component | Source | License | Notes |
+| Component | Source | License / Terms | Notes |
 | --- | --- | --- | --- |
-| `PaddlePaddle/PaddleOCR-VL-1.5` | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5> | `apache-2.0` | Referenced by `src/istots/model_store.py` as `DEFAULT_MODEL_ID`. Model files are downloaded by `istots setup` into a local cache and are not vendored in this repository. |
+| `llama-server` runtime binary | User- or host-provided binary, typically from the `llama.cpp` project | Upstream `llama.cpp` terms and bundled notices apply to the binary actually installed on the host | `istots` probes `ISTOTS_LLAMA_SERVER_PATH`, `PATH`, and a fallback local path. The binary is required for the primary OCR path, detector path, and local Qwen corrector path. |
+| `tkinter` / Tcl-Tk runtime | Host Python distribution | Tcl/Tk license terms as bundled with the host Python distribution | Used only by the optional local image-comparison GUI in `tools/image_compare_gui/compare_images.py`. |
+| Google Generative Language API (`Gemini`) | Remote Google service | Google API and model terms apply | Used only when `--corrector gemini` is selected. No model weights or SDK are redistributed by this repository. |
 
-## Host-Provided GUI Runtime
+## External Model and Artifact Sources
 
-The repository now includes an optional local image-comparison GUI for
-debugging furigana masking results:
-
-| Component | Source | License | Notes |
+| Artifact | Source | License / Terms | Notes |
 | --- | --- | --- | --- |
-| `tkinter` / Tcl-Tk runtime | Host Python distribution | Tcl/Tk license terms as bundled by the Python runtime | Used only by `tools/image_compare_gui/compare_images.py`. This is not declared in `pyproject.toml`, is not required for the CLI conversion pipeline, and may be absent from minimal Python installations. |
+| HF fallback OCR model | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5> | `apache-2.0` according to the upstream model card | Used only by the optional `--engine hf` path. Downloaded by `istots setup`. |
+| Primary OCR GGUF model and base mmproj | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF> | Review the upstream repository license at download time | `istots` downloads `PaddleOCR-VL-1.5.gguf` and `PaddleOCR-VL-1.5-mmproj.gguf` for the retained primary OCR path. |
+| Derived OCR mmproj | Locally materialized from the official Paddle GGUF base mmproj | Inherits the applicable terms of the upstream source artifact | `istots` creates a local derived `min_pixels=32768` mmproj from the official base mmproj; this is not downloaded as a separate upstream artifact. |
+| Optional local Qwen corrector model and mmproj | <https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF> | Review the upstream repository license at download time | When `istots setup --with-qwen-corrector` is used, the default files are `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` and `mmproj-BF16.gguf`. |
+| Pinned `gguf-py` snapshot fallback | <https://github.com/ggml-org/llama.cpp/tree/94ca829b6001019622c0f67fcd48e9ec6bd7dce8/gguf-py> | MIT | The project depends directly on `gguf` from this exact `llama.cpp` commit and can also auto-download the same pinned source snapshot into a local support cache. |
 
-## Direct Runtime Dependencies
+## Direct Python Dependencies
 
 These packages are declared directly in `pyproject.toml`.
 
-| Package | Version | License | Usage in `istots` |
+### Core Runtime
+
+| Package | Version | License | Notes |
 | --- | --- | --- | --- |
-| `huggingface-hub` | `1.4.1` | Apache | Used by `istots setup` to download the OCR model from Hugging Face. |
-| `numpy` | `2.4.2` | `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` | Required by the OCR/model stack. |
-| `pillow` | `12.1.1` | `MIT-CMU` | Used for image handling in the SUP parser and OCR backend. |
-| `torch` | `2.10.0` | `BSD-3-Clause` | Provides inference runtime and CUDA detection. |
-| `transformers` | `5.1.0` | Apache 2.0 License | Loads the processor and model used for OCR inference. |
+| `gguf` | `0.18.0` | MIT | Declared as an exact git-commit-pinned dependency from `llama.cpp` `gguf-py`. Used for GGUF mmproj inspection and materialization. |
+| `huggingface-hub` | `1.4.1` | Apache | Used by `istots setup` to download HF and GGUF model artifacts. |
+| `keyring` | `25.7.0` | MIT | Used for Gemini API key storage. |
+| `numpy` | `2.4.2` | `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` | Used by the SUP parser and image-processing pipeline. |
+| `Pillow` | `12.1.1` | `MIT-CMU` | Used for image decoding, rendering, and OCR image transport. |
 
-## Transitive Runtime Dependencies
+### Optional `hf` Extra
 
-These packages are present in the locked runtime dependency graph used to
-prepare this notice.
+These packages are installed only when the optional `hf` extra is requested,
+for example with `uv sync --extra hf`.
 
-| Package | Version | License |
+| Package | Version | License | Notes |
+| --- | --- | --- | --- |
+| `torch` | `2.10.0` | `BSD-3-Clause` | Required for actual HF OCR inference. Not needed for `istots setup` downloads. |
+| `transformers` | `5.1.0` | Apache 2.0 | Loads the HF processor and model used by `--engine hf`. |
+
+## Locked Transitive Dependencies
+
+The following packages appear in `uv.lock` revision `3` as transitive or
+platform-conditional dependencies of the current product surface.
+
+### Core / Setup / Auth Path
+
+- `annotated-doc 0.0.4`
+- `anyio 4.12.1`
+- `backports-tarfile 1.2.0`
+- `certifi 2026.1.4`
+- `cffi 2.0.0`
+- `charset-normalizer 3.4.7`
+- `click 8.3.1`
+- `cryptography 46.0.7`
+- `filelock 3.24.0`
+- `fsspec 2026.2.0`
+- `h11 0.16.0`
+- `hf-xet 1.2.0`
+- `httpcore 1.0.9`
+- `httpx 0.28.1`
+- `idna 3.11`
+- `importlib-metadata 9.0.0` (`python < 3.12`)
+- `jaraco-classes 3.4.0`
+- `jaraco-context 6.1.2`
+- `jaraco-functools 4.4.0`
+- `jeepney 0.9.0` (`linux`)
+- `more-itertools 11.0.2`
+- `packaging 26.0`
+- `pycparser 3.0`
+- `pywin32-ctypes 0.2.3` (`win32`)
+- `PyYAML 6.0.3`
+- `requests 2.33.1`
+- `SecretStorage 3.5.0` (`linux`)
+- `shellingham 1.5.4`
+- `tqdm 4.67.3`
+- `typer 0.23.1`
+- `typer-slim 0.23.1`
+- `typing-extensions 4.15.0`
+- `urllib3 2.6.3`
+- `zipp 3.23.0` (`python < 3.12`)
+
+### Optional `hf` Extra Path
+
+- `Jinja2 3.1.6`
+- `MarkupSafe 3.0.3`
+- `mpmath 1.3.0`
+- `networkx 3.6.1`
+- `regex 2026.1.15`
+- `safetensors 0.7.0`
+- `setuptools 70.3.0` (`python >= 3.12`)
+- `sympy 1.14.0`
+- `tokenizers 0.22.2`
+- `triton 3.6.0` (`linux`, `x86_64`)
+
+## CUDA and NVIDIA-Specific Optional Runtime Packages
+
+These packages may be present when a CUDA-enabled PyTorch build is installed.
+They are platform-conditional and may be absent from CPU-only deployments.
+
+| Package | Version | Notes |
 | --- | --- | --- |
-| `annotated-doc` | `0.0.4` | `MIT` |
-| `anyio` | `4.12.1` | `MIT` |
-| `certifi` | `2026.1.4` | `MPL-2.0` |
-| `click` | `8.3.1` | `BSD-3-Clause` |
-| `filelock` | `3.24.0` | `MIT` |
-| `fsspec` | `2026.2.0` | `BSD-3-Clause` |
-| `h11` | `0.16.0` | `MIT` |
-| `hf-xet` | `1.2.0` | `Apache-2.0` |
-| `httpcore` | `1.0.9` | `BSD-3-Clause` |
-| `httpx` | `0.28.1` | `BSD-3-Clause` |
-| `idna` | `3.11` | `BSD-3-Clause` |
-| `jinja2` | `3.1.6` | BSD license (see bundled `LICENSE.txt`) |
-| `markdown-it-py` | `4.0.0` | `MIT` |
-| `markupsafe` | `3.0.3` | `BSD-3-Clause` |
-| `mdurl` | `0.1.2` | `MIT` |
-| `mpmath` | `1.3.0` | BSD license |
-| `networkx` | `3.6.1` | `BSD-3-Clause` |
-| `packaging` | `26.0` | `Apache-2.0 OR BSD-2-Clause` |
-| `pygments` | `2.19.2` | `BSD-2-Clause` |
-| `pyyaml` | `6.0.3` | `MIT` |
-| `regex` | `2026.1.15` | `Apache-2.0 AND CNRI-Python` |
-| `rich` | `14.3.2` | `MIT` |
-| `safetensors` | `0.7.0` | Apache Software License |
-| `setuptools` | `70.3.0` | `MIT` |
-| `shellingham` | `1.5.4` | ISC License |
-| `sympy` | `1.14.0` | BSD license |
-| `tokenizers` | `0.22.2` | Apache Software License |
-| `tqdm` | `4.67.3` | `MPL-2.0 AND MIT` |
-| `triton` | `3.6.0` | `MIT` |
-| `typer` | `0.23.1` | `MIT` |
-| `typer-slim` | `0.23.1` | `MIT` |
-| `typing-extensions` | `4.15.0` | `PSF-2.0` |
-
-## CUDA and NVIDIA-Specific Runtime Packages
-
-The following packages may be present when using a CUDA-enabled PyTorch build.
-They may be absent from CPU-only deployments.
-
-Where NVIDIA package metadata is mixed or conservative, this document preserves
-the installed metadata labels and treats those wheels as vendor-governed.
-Review the bundled NVIDIA license files before redistribution.
-
-| Package | Version | License |
-| --- | --- | --- |
-| `cuda-bindings` | `12.9.4` | `LicenseRef-NVIDIA-SOFTWARE-LICENSE` |
-| `cuda-pathfinder` | `1.3.4` | `Apache-2.0` |
-| `nvidia-cublas-cu12` | `12.8.4.1` | NVIDIA Proprietary Software |
-| `nvidia-cuda-cupti-cu12` | `12.8.90` | NVIDIA Proprietary Software |
-| `nvidia-cuda-nvrtc-cu12` | `12.8.93` | NVIDIA Proprietary Software |
-| `nvidia-cuda-runtime-cu12` | `12.8.90` | NVIDIA Proprietary Software |
-| `nvidia-cudnn-cu12` | `9.10.2.21` | `LicenseRef-NVIDIA-Proprietary` |
-| `nvidia-cufft-cu12` | `11.3.3.83` | NVIDIA Proprietary Software |
-| `nvidia-cufile-cu12` | `1.13.1.3` | NVIDIA Proprietary Software |
-| `nvidia-curand-cu12` | `10.3.9.90` | NVIDIA Proprietary Software |
-| `nvidia-cusolver-cu12` | `11.7.3.90` | NVIDIA Proprietary Software |
-| `nvidia-cusparse-cu12` | `12.5.8.93` | NVIDIA Proprietary Software |
-| `nvidia-cusparselt-cu12` | `0.7.1` | NVIDIA Proprietary Software |
-| `nvidia-nccl-cu12` | `2.27.5` | `BSD-3-Clause` license text bundled with the wheel |
-| `nvidia-nvjitlink-cu12` | `12.8.93` | NVIDIA Proprietary Software |
-| `nvidia-nvshmem-cu12` | `3.4.5` | `LicenseRef-NVIDIA-Proprietary` |
-| `nvidia-nvtx-cu12` | `12.8.90` | Apache 2.0 |
+| `cuda-bindings` | `12.9.4` | Linux `x86_64` CUDA-enabled Torch path |
+| `cuda-pathfinder` | `1.3.4` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cublas-cu12` | `12.8.4.1` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cuda-cupti-cu12` | `12.8.90` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cuda-nvrtc-cu12` | `12.8.93` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cuda-runtime-cu12` | `12.8.90` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cudnn-cu12` | `9.10.2.21` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cufft-cu12` | `11.3.3.83` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cufile-cu12` | `1.13.1.3` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-curand-cu12` | `10.3.9.90` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cusolver-cu12` | `11.7.3.90` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cusparse-cu12` | `12.5.8.93` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-cusparselt-cu12` | `0.7.1` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-nccl-cu12` | `2.27.5` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-nvjitlink-cu12` | `12.8.93` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-nvshmem-cu12` | `3.4.5` | Linux `x86_64` CUDA-enabled Torch path |
+| `nvidia-nvtx-cu12` | `12.8.90` | Linux `x86_64` CUDA-enabled Torch path |
 
 ## Development-Only Dependencies
 
-These packages are installed for local testing and linting. They are not part
-of the main runtime path of `istots`.
+These packages are used for local testing and linting and are not part of the
+main product runtime.
 
 | Package | Version | License |
 | --- | --- | --- |
-| `pytest` | `9.0.2` | `MIT` |
-| `ruff` | `0.15.1` | `MIT` |
-| `iniconfig` | `2.3.0` | `MIT` |
-| `pluggy` | `1.6.0` | `MIT` |
+| `pytest` | `9.0.2` | MIT |
+| `ruff` | `0.15.1` | MIT |
+| `iniconfig` | `2.3.0` | MIT |
+| `pluggy` | `1.6.0` | MIT |
+| `Pygments` | `2.19.2` | `BSD-2-Clause` |
+| `colorama` | `0.4.6` | MIT (`win32` only) |
 
 ## Redistribution Notes
 
-- `numpy`, `pillow`, and `torch` ship bundled third-party license material in
-  their installed wheel metadata. If you redistribute those wheels, or a binary
-  image containing them, include the corresponding upstream license directories
-  and notices from the installed distributions.
-- If you redistribute a Python runtime that includes `tkinter`, also review and
-  include the Tcl/Tk license material bundled with that Python distribution.
-- In particular, check the `licenses/` material bundled in the installed
-  distributions for `numpy`, `pillow`, and `torch`.
-- `torch` distributions may also ship an additional upstream `NOTICE` file.
-- NVIDIA CUDA wheels are not covered by the project's MIT license. Review each
-  bundled `License.txt` before mirroring or redistributing those artifacts.
-- Recent multi-window pipeline, furigana-masking, exporter/GUI, line-detection,
-  and SRT policy updates added new first-party code and tests only. They did
-  not add new PyPI package dependencies, vendored source code, or additional
-  model artifacts beyond the optional `tkinter` GUI note above.
-- If `pyproject.toml`, `uv.lock`, the Python version, the platform, the host
-  Python GUI/runtime packaging, or the default OCR model changes, regenerate
-  this file.
+- If you redistribute an environment containing the optional `hf` extra, also
+  include the applicable license files and notices for `torch`,
+  `transformers`, and any bundled CUDA/NVIDIA runtime wheels actually present.
+- `numpy`, `Pillow`, and `torch` bundle additional third-party license material
+  in their wheel metadata. Include those upstream license directories and
+  notices when redistributing binary environments that contain them.
+- `llama-server` is outside the Python package dependency graph of this
+  repository. If you redistribute a host image or installer that bundles a
+  `llama-server` binary, you must separately include the upstream `llama.cpp`
+  license and notice material for the exact binary build you ship.
+- Model artifacts downloaded from Hugging Face are governed by their upstream
+  repository and model-card terms. Review the current upstream license before
+  mirroring or redistributing downloaded weights or GGUF artifacts.
+- If you redistribute a Python runtime that includes `tkinter`, also review the
+  Tcl/Tk license material bundled with that Python distribution.
+- If `pyproject.toml`, `uv.lock`, the optional `hf` extra, the default model
+  repositories, the host-provided `llama-server` binary policy, or the Gemini
+  integration surface changes, regenerate this file.
