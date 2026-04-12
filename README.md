@@ -35,7 +35,9 @@ This prepares the retained local setup assets:
 
 `uv sync` prepares the retained primary `llama-server` path. The `hf` engine remains available as an explicit optional fallback and requires `uv sync --extra hf`.
 
-## Usage
+`uv run istots setup` covers the retained primary OCR path, the optional faster OCR path, the default detector path, and the explicit HF fallback assets. It does not provision local Qwen corrector assets or Gemini credentials.
+
+## Quick Start
 
 ```bash
 uv run istots input.sup output.srt
@@ -47,7 +49,16 @@ Runtime preflight:
 uv run istots doctor --engine llama-server --role ocr
 ```
 
-Optional flags:
+Quick validation on the retained default sample:
+
+```bash
+uv run istots smoke
+uv run istots smoke --output-dir ./artifacts/smoke
+uv run istots smoke --ocr-mode fast
+uv run istots smoke --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
+```
+
+Common convert examples:
 
 ```bash
 uv run istots input.sup output.srt --furigana-mask
@@ -57,6 +68,8 @@ uv run istots input.sup output.srt --detector-output detector.jsonl
 uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
+
+For the full CLI surface, run `uv run istots --help`.
 
 Global flags:
 
@@ -121,6 +134,24 @@ export ISTOTS_MODELS_DIR="$HOME/.cache/istots/models"
 export ISTOTS_SUPPORT_DIR="$HOME/.cache/istots/support"
 ```
 
+## Quick Validation
+
+Use `smoke` when you want the retained fast regression path instead of a full manual convert command.
+
+- `smoke` defaults to `../test/sample.sup`, which is the retained minimum sample for required smoke tests.
+- If `--output-dir` is omitted, `istots` writes smoke artifacts to a temporary directory.
+- The default smoke path writes a smoke SRT plus the retained hybrid detector manifest.
+- `uv run istots smoke --ocr-mode fast` exercises the optional faster OCR path on the same sample.
+- `--corrector qwen-local` or `--corrector gemini` adds a correction manifest alongside the smoke SRT.
+
+Recommended order for a new machine or runtime profile:
+
+1. `uv sync`
+2. `uv run istots setup`
+3. `uv run istots doctor --engine llama-server --role ocr`
+4. `uv run istots smoke`
+5. `uv run istots input.sup output.srt`
+
 ## Runtime Doctor
 
 Use `doctor` before switching to retained `llama-server` runtime roles:
@@ -137,6 +168,29 @@ The doctor checks:
 - launch readiness
 - minimal OpenAI-compatible smoke response
 
+## Runtime Profiles
+
+- `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
+- `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
+- `memory`: the official compatibility profile for more constrained hosts where the default profile may be too aggressive.
+
+Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke` through:
+
+- `--device`
+- `--runtime-profile`
+- `--runtime-port`
+- `--threads`
+- `--threads-batch`
+- `--gpu-layers`
+- `--no-mmproj-offload`
+- `--llama-server-path`
+
+## Host Patterns
+
+- GPU-first host: start with the default `auto` profile and `--device auto`.
+- CPU-only host: use `--runtime-profile cpu --device cpu`.
+- Constrained GPU host: start with `--runtime-profile memory`, then tighten explicit overrides only if doctor or smoke shows bring-up pressure.
+
 ## OCR Modes
 
 - `default`: the retained primary OCR path. All rows use the retained `ocr` runtime role.
@@ -147,6 +201,7 @@ The doctor checks:
 - `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
 - Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
 - Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
+- In the first-wave product surface, detector behavior is retained on the `llama-server` path and is not mirrored onto the explicit `hf` fallback path.
 
 ## Conservative Correction
 

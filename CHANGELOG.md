@@ -27,6 +27,8 @@
 - Step 9: added a dedicated `istots smoke` quick-validation command that defaults to the retained `../test/sample.sup` asset.
 - Auto-wired smoke SRT, detector, and correction artifact paths for the retained primary `llama-server` workflow and kept fast-mode smoke available on the same sample.
 - Added regression coverage for the new smoke CLI surface and for the frozen `sample.sup` parser contract used by required smoke tests.
+- Step 10: refreshed the product-facing README around the retained setup boundary, runtime profiles, host patterns, and the default smoke workflow.
+- Documented the retained detector/corrector posture and the recommended quick-validation order from setup through doctor, smoke, and full convert.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.
