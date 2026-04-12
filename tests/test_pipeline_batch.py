@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -502,6 +503,113 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
     ]
     assert [entry.text for entry in written_entries] == ["fast-1", "default-1", "fast-2"]
     assert closed_roles == ["ocr-fast", "ocr"]
+
+
+def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+    ]
+
+    created_roles: list[str] = []
+    closed_roles: list[str] = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            if self.role == "ocr":
+                return ["CTRL", "BASE-WIDE", "BASE-TALL"]
+            if self.role == "ocr-fast":
+                return ["CTRL", "ALT-WIDE"]
+            if self.role == "detector":
+                return ["ALT-TALL"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed_roles.append(self.role)
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_roles.append(config.role)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        batch_size=4,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.processed_count == 3
+    assert result.detector_record_count == 2
+    assert created_roles == ["ocr", "ocr-fast", "detector"]
+    assert closed_roles == ["ocr-fast", "detector", "ocr"]
+    assert [row["detector_branch"] for row in manifest] == [
+        "alternate_read_non_tall",
+        "repeat_drift_tall",
+    ]
+    assert [row["option_role"] for row in manifest] == ["ocr-fast", "detector"]
+    assert [row["baseline_text"] for row in manifest] == ["BASE-WIDE", "BASE-TALL"]
+    assert [row["option_text"] for row in manifest] == ["ALT-WIDE", "ALT-TALL"]
+    assert [row["diff_label"] for row in manifest] == [
+        "meaningful_difference",
+        "meaningful_difference",
+    ]
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:

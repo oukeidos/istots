@@ -9,11 +9,13 @@ from typing import Any
 
 from PIL import Image
 
+from istots.detector import HybridDetectorRecord, write_hybrid_detector_records
 from istots.device import resolve_device
 from istots.furigana_mask import build_furigana_masks
 from istots.ocr import OCRBackendConfig, OCREngine, create_ocr_backend, normalize_ocr_engine
 from istots.srt_writer import SubtitleEntry, write_srt
 from istots.sup_reader import iter_sup_window_frames
+from istots.text_diff import assess_difference
 
 logger = logging.getLogger(__name__)
 TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
@@ -25,6 +27,7 @@ class ConversionResult:
     processed_count: int
     written_count: int
     device_used: str
+    detector_record_count: int = 0
 
 
 @dataclass
@@ -52,6 +55,7 @@ def convert_sup_to_srt(
     preferred_device: str = "auto",
     engine: str | OCREngine = OCREngine.HF,
     ocr_mode: str = "default",
+    detector_output: Path | None = None,
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     models_dir: Path | None = None,
     max_items: int | None = None,
@@ -80,6 +84,10 @@ def convert_sup_to_srt(
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
     if normalized_ocr_mode == "fast" and normalized_engine is not OCREngine.LLAMA_SERVER:
         raise ValueError("fast OCR mode requires the llama-server engine")
+    if detector_output is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
+        raise ValueError("detector output requires the llama-server engine")
+    if detector_output is not None and normalized_ocr_mode != "default":
+        raise ValueError("detector output requires the default OCR mode")
     backend_config = OCRBackendConfig(
         engine=normalized_engine,
         model_id=model_id,
@@ -111,6 +119,19 @@ def convert_sup_to_srt(
             output_srt=output_srt,
             preferred_device=preferred_device,
             backend_config=backend_config,
+            max_items=max_items,
+            batch_size=batch_size,
+            enable_furigana_mask=enable_furigana_mask,
+            srt_policy=srt_policy,
+            verbose=verbose,
+        )
+    if detector_output is not None:
+        return _convert_sup_to_srt_default_with_detector(
+            input_sup=input_sup,
+            output_srt=output_srt,
+            preferred_device=preferred_device,
+            backend_config=backend_config,
+            detector_output=detector_output,
             max_items=max_items,
             batch_size=batch_size,
             enable_furigana_mask=enable_furigana_mask,
@@ -347,6 +368,77 @@ def _convert_sup_to_srt_fast(
         _close_ocr_backends(active_backends, verbose=verbose)
 
 
+def _convert_sup_to_srt_default_with_detector(
+    *,
+    input_sup: Path,
+    output_srt: Path,
+    preferred_device: str,
+    backend_config: OCRBackendConfig,
+    detector_output: Path,
+    max_items: int | None,
+    batch_size: int,
+    enable_furigana_mask: bool,
+    srt_policy: str,
+    verbose: bool,
+) -> ConversionResult:
+    prepared_inputs = _collect_prepared_ocr_inputs(
+        input_sup,
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        verbose=verbose,
+    )
+    active_backends: list[Any] = []
+    device = backend_config.device
+    try:
+        active_backends, device = _create_ocr_backends(
+            [backend_config],
+            preferred_device=preferred_device,
+            verbose=verbose,
+        )
+        if verbose:
+            logger.info("using device: %s", device)
+        baseline_texts = _recognize_prepared_inputs(
+            prepared_inputs,
+            backend=active_backends[0],
+            batch_size=batch_size,
+            verbose=verbose,
+            branch_label="default",
+        )
+        segments = [
+            segment
+            for item, text in zip(prepared_inputs, baseline_texts, strict=True)
+            if (segment := _build_window_text_segment(item.frame, text)) is not None
+        ]
+        detector_records = _build_hybrid_detector_records(
+            prepared_inputs,
+            baseline_texts,
+            detector_backend_config=replace(backend_config, device=device),
+            batch_size=batch_size,
+            verbose=verbose,
+        )
+        write_hybrid_detector_records(detector_output, detector_records)
+
+        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        write_srt(entries, output_srt)
+        if verbose:
+            logger.info(
+                "conversion finished: processed=%d written=%d detector_disagreements=%d output=%s",
+                len(prepared_inputs),
+                len(entries),
+                len(detector_records),
+                output_srt,
+            )
+        return ConversionResult(
+            output_srt=output_srt,
+            processed_count=len(prepared_inputs),
+            written_count=len(entries),
+            device_used=device,
+            detector_record_count=len(detector_records),
+        )
+    finally:
+        _close_ocr_backends(active_backends, verbose=verbose)
+
+
 def _normalize_ocr_mode(ocr_mode: str) -> str:
     normalized = ocr_mode.strip().lower()
     if normalized in {"default", "fast"}:
@@ -518,6 +610,90 @@ def _recognize_prepared_inputs(
     return recognized
 
 
+def _build_hybrid_detector_records(
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    *,
+    detector_backend_config: OCRBackendConfig,
+    batch_size: int,
+    verbose: bool,
+) -> list[HybridDetectorRecord]:
+    wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
+    tall_inputs = [item for item in prepared_inputs if _is_tall_subtitle_image(item.image)]
+
+    detector_specs: list[tuple[str, str, list[_PreparedOCRInput], OCRBackendConfig]] = []
+    if wide_inputs:
+        detector_specs.append(
+            (
+                "alternate_read_non_tall",
+                "ocr-fast",
+                wide_inputs,
+                replace(detector_backend_config, role="ocr-fast"),
+            )
+        )
+    if tall_inputs:
+        detector_specs.append(
+            (
+                "repeat_drift_tall",
+                "detector",
+                tall_inputs,
+                replace(detector_backend_config, role="detector"),
+            )
+        )
+
+    active_backends: list[Any] = []
+    try:
+        active_backends, _ = _create_ocr_backends(
+            [config for _, _, _, config in detector_specs],
+            preferred_device=detector_backend_config.device,
+            verbose=verbose,
+        )
+        detector_records: list[HybridDetectorRecord] = []
+        baseline_by_index = {
+            item.index: text for item, text in zip(prepared_inputs, baseline_texts, strict=True)
+        }
+
+        for (branch_name, option_role, branch_inputs, _), backend in zip(
+            detector_specs,
+            active_backends,
+            strict=True,
+        ):
+            option_texts = _recognize_prepared_inputs(
+                branch_inputs,
+                backend=backend,
+                batch_size=batch_size,
+                verbose=verbose,
+                branch_label=f"detector-{branch_name}",
+            )
+            for item, option_text in zip(branch_inputs, option_texts, strict=True):
+                baseline_text = baseline_by_index[item.index]
+                if baseline_text == option_text:
+                    continue
+                ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+                diff = assess_difference(baseline_text, option_text)
+                detector_records.append(
+                    HybridDetectorRecord(
+                        index=item.index,
+                        raw_index=item.frame.raw_index,
+                        window_id=item.frame.window_id,
+                        start_ms=_timedelta_to_ms(item.frame.start),
+                        end_ms=_timedelta_to_ms(item.frame.end),
+                        detector_branch=branch_name,
+                        shape="tall" if branch_name == "repeat_drift_tall" else "wide",
+                        ratio=ratio,
+                        option_role=option_role,
+                        baseline_text=baseline_text,
+                        option_text=option_text,
+                        diff_label=diff.label,
+                        meaningful=diff.meaningful,
+                        char_error_rate=diff.char_error_rate,
+                    )
+                )
+        return detector_records
+    finally:
+        _close_ocr_backends(active_backends, verbose=verbose)
+
+
 def _is_tall_subtitle_image(image: Image.Image) -> bool:
     width, height = image.size
     if width <= 0:
@@ -543,6 +719,10 @@ def _build_window_text_segment(frame: Any, text: str) -> _WindowTextSegment | No
         right=frame.right,
         bottom=frame.bottom,
     )
+
+
+def _timedelta_to_ms(value: timedelta) -> int:
+    return int(round(value.total_seconds() * 1000.0))
 
 
 def _build_subtitle_entries(

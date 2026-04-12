@@ -45,6 +45,7 @@ Optional flags:
 uv run istots input.sup output.srt --furigana-mask
 uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
+uv run istots input.sup output.srt --detector-output detector.jsonl
 ```
 
 Global flags:
@@ -71,6 +72,7 @@ Global flags:
 - `--no-mmproj-offload`: disable `mmproj` offload for `llama-server`.
 - `--startup-timeout-sec SECONDS`: `llama-server` startup timeout.
 - `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
+- `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--srt-policy {safe,overlap}`: SRT output policy. `safe` merges simultaneous windows into one cue. `overlap` keeps overlapping cues separate.
 - `--quiet`: suppress progress logs.
 - `--force`: overwrite an existing output `.srt` file without prompting.
@@ -103,6 +105,7 @@ Use `doctor` before switching to retained `llama-server` runtime roles:
 
 - `uv run istots doctor --engine llama-server --role ocr`
 - `uv run istots doctor --engine llama-server --role ocr-fast --profile cpu`
+- `uv run istots doctor --engine llama-server --role detector`
 
 The doctor checks:
 
@@ -116,6 +119,12 @@ The doctor checks:
 
 - `default`: the retained primary OCR path. All rows use the retained `ocr` runtime role.
 - `fast`: the retained optional faster OCR path. `istots` partitions rows by image ratio, sends non-tall rows to `ocr-fast`, sends tall rows to retained `ocr`, and restores the original row order before SRT assembly.
+
+## Detector Output
+
+- `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
+- Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
+- Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
 
 ## Language Support
 

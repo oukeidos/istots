@@ -16,6 +16,9 @@
 - Step 5: added the retained optional faster OCR mode for `convert`, keeping retained `default` as the primary OCR path.
 - Added retained hybrid branch routing with non-tall rows sent to `ocr-fast`, tall rows sent to retained `ocr`, batch-by-branch execution, and original-order restoration before SRT assembly.
 - Added regression coverage for fast-mode CLI validation, hybrid OCR branch partitioning, retained role selection, and row-order restoration.
+- Step 6: added retained hybrid detector manifest generation on `convert` for the default disagreement surface.
+- Added non-tall alternate-read detector routing through `ocr-fast`, tall repeat-drift routing through the retained `detector` role, and disagreement labeling for correction-ready downstream use.
+- Added regression coverage for detector CLI validation, detector manifest generation, and detector text-difference assessment.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

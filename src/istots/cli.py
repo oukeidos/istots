@@ -191,6 +191,15 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Enable optional furigana masking before OCR (default: disabled)",
     )
     parser.add_argument(
+        "--detector-output",
+        type=Path,
+        default=None,
+        help=(
+            "Write retained hybrid detector disagreements to a JSONL manifest. "
+            "Requires `--engine llama-server` with `--ocr-mode default`."
+        ),
+    )
+    parser.add_argument(
         "--srt-policy",
         choices=("safe", "overlap"),
         default="safe",
@@ -577,16 +586,23 @@ def run_convert(args: argparse.Namespace) -> int:
         parser.error("--ocr-mode fast requires --engine llama-server")
     if args.ocr_mode == "fast" and args.runtime_port is not None:
         parser.error("--runtime-port is only supported with --ocr-mode default")
+    if args.detector_output is not None and args.engine != "llama-server":
+        parser.error("--detector-output requires --engine llama-server")
+    if args.detector_output is not None and args.ocr_mode != "default":
+        parser.error("--detector-output requires --ocr-mode default")
 
     configure_logging(verbose=not args.quiet)
 
     input_sup = args.input_sup.expanduser().resolve()
     output_srt = args.output_srt.expanduser().resolve()
+    detector_output = args.detector_output.expanduser().resolve() if args.detector_output is not None else None
 
     if output_srt.exists() and output_srt.is_dir():
         parser.error("output_srt must be a file path, not an existing directory")
     if input_sup == output_srt:
         parser.error("input_sup and output_srt must be different paths")
+    if detector_output is not None and detector_output.exists() and detector_output.is_dir():
+        parser.error("detector_output must be a file path, not an existing directory")
     if output_srt.exists() and not args.force:
         if _can_prompt_for_overwrite():
             if not _confirm_overwrite(output_srt):
@@ -630,6 +646,7 @@ def run_convert(args: argparse.Namespace) -> int:
             preferred_device=args.device,
             engine=args.engine,
             ocr_mode=args.ocr_mode,
+            detector_output=detector_output,
             model_id=model_id,
             models_dir=args.models_dir,
             max_items=args.max_items,
@@ -659,6 +676,12 @@ def run_convert(args: argparse.Namespace) -> int:
             result.output_srt,
             result.device_used,
         )
+        if detector_output is not None:
+            logging.getLogger(__name__).info(
+                "detector manifest: %s disagreements=%d",
+                detector_output,
+                result.detector_record_count,
+            )
     return 0
 
 
