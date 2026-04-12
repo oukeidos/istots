@@ -26,7 +26,16 @@ from istots.corrector import (
 from istots.detector import HybridDetectorRecord, write_hybrid_detector_records
 from istots.device import resolve_hf_device
 from istots.furigana_mask import build_furigana_masks
-from istots.ocr import OCRBackendConfig, OCREngine, create_ocr_backend, normalize_ocr_engine
+from istots.llama_runtime import DEFAULT_ROLE_PORTS, LlamaServerRole
+from istots.ocr import (
+    OCRBackendConfig,
+    OCREngine,
+    PaddleOCRVLRuntimeOverrides,
+    Qwen35RuntimeOverrides,
+    ResolvedLlamaRuntimeOverrides,
+    create_ocr_backend,
+    normalize_ocr_engine,
+)
 from istots.srt_writer import SubtitleEntry, write_srt
 from istots.sup_reader import iter_sup_window_frames
 from istots.text_diff import assess_difference
@@ -65,6 +74,60 @@ class _PreparedOCRInput:
     image: Image.Image
 
 
+def _resolve_paddle_runtime_overrides(
+    *,
+    role: str,
+    overrides: PaddleOCRVLRuntimeOverrides,
+) -> ResolvedLlamaRuntimeOverrides:
+    normalized_role = LlamaServerRole(role)
+    return ResolvedLlamaRuntimeOverrides(
+        profile=overrides.profile,
+        port=overrides.port if overrides.port is not None else DEFAULT_ROLE_PORTS[normalized_role],
+        threads=overrides.threads,
+        threads_batch=overrides.threads_batch,
+        gpu_layers=overrides.gpu_layers,
+        no_mmproj_offload=overrides.no_mmproj_offload,
+        startup_timeout_sec=overrides.startup_timeout_sec,
+    )
+
+
+def _resolve_qwen_runtime_overrides(
+    overrides: Qwen35RuntimeOverrides,
+) -> ResolvedLlamaRuntimeOverrides:
+    return ResolvedLlamaRuntimeOverrides(
+        profile=overrides.profile,
+        port=overrides.port if overrides.port is not None else DEFAULT_ROLE_PORTS[LlamaServerRole.CORRECTOR],
+        threads=overrides.threads,
+        threads_batch=overrides.threads_batch,
+        gpu_layers=overrides.gpu_layers,
+        no_mmproj_offload=overrides.no_mmproj_offload,
+        startup_timeout_sec=overrides.startup_timeout_sec,
+        ctx_size=overrides.ctx_size if overrides.ctx_size is not None else LOCAL_QWEN_CTX_SIZE,
+        n_predict=overrides.n_predict if overrides.n_predict is not None else LOCAL_QWEN_MAX_NEW_TOKENS,
+        reasoning=overrides.reasoning if overrides.reasoning is not None else "off",
+    )
+
+
+def _build_paddle_backend_config(
+    *,
+    base_config: OCRBackendConfig,
+    role: str,
+    overrides: PaddleOCRVLRuntimeOverrides,
+) -> OCRBackendConfig:
+    resolved = _resolve_paddle_runtime_overrides(role=role, overrides=overrides)
+    return replace(
+        base_config,
+        role=role,
+        profile=resolved.profile,
+        port=resolved.port,
+        threads=resolved.threads,
+        threads_batch=resolved.threads_batch,
+        gpu_layers=resolved.gpu_layers,
+        no_mmproj_offload=resolved.no_mmproj_offload,
+        startup_timeout_sec=resolved.startup_timeout_sec,
+    )
+
+
 def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
@@ -81,15 +144,9 @@ def convert_sup_to_srt(
     local_files_only: bool = True,
     enable_furigana_mask: bool = False,
     srt_policy: str = "safe",
-    runtime_profile: str = "auto",
     runtime_binary_path: Path | None = None,
     runtime_host: str = "127.0.0.1",
-    runtime_port: int | None = None,
-    runtime_threads: int | None = None,
-    runtime_threads_batch: int | None = None,
-    runtime_gpu_layers: int | None = None,
-    runtime_no_mmproj_offload: bool | None = None,
-    runtime_startup_timeout_sec: float = 120.0,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides | None = None,
     verbose: bool = True,
 ) -> ConversionResult:
     if not input_sup.exists():
@@ -99,7 +156,8 @@ def convert_sup_to_srt(
     normalized_engine = normalize_ocr_engine(engine)
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
     resolved_hf_device = resolve_hf_device(hf_device) if normalized_engine is OCREngine.HF else None
-    runtime_label = resolved_hf_device if resolved_hf_device is not None else runtime_profile
+    resolved_paddle_runtime = paddle_runtime_overrides or PaddleOCRVLRuntimeOverrides()
+    runtime_label = resolved_hf_device if resolved_hf_device is not None else resolved_paddle_runtime.profile
     if normalized_ocr_mode == "fast" and normalized_engine is not OCREngine.LLAMA_SERVER:
         raise ValueError("fast OCR mode requires the llama-server engine")
     if detector_output is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
@@ -119,15 +177,8 @@ def convert_sup_to_srt(
         local_files_only=local_files_only,
         models_dir=models_dir,
         role="ocr",
-        profile=runtime_profile,
         binary_path=runtime_binary_path,
         host=runtime_host,
-        port=runtime_port,
-        threads=runtime_threads,
-        threads_batch=runtime_threads_batch,
-        gpu_layers=runtime_gpu_layers,
-        no_mmproj_offload=runtime_no_mmproj_offload,
-        startup_timeout_sec=runtime_startup_timeout_sec,
     )
 
     if verbose:
@@ -140,6 +191,7 @@ def convert_sup_to_srt(
             input_sup=input_sup,
             output_srt=output_srt,
             backend_config=backend_config,
+            paddle_runtime_overrides=resolved_paddle_runtime,
             runtime_label=runtime_label,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
@@ -151,6 +203,7 @@ def convert_sup_to_srt(
             input_sup=input_sup,
             output_srt=output_srt,
             backend_config=backend_config,
+            paddle_runtime_overrides=resolved_paddle_runtime,
             runtime_label=runtime_label,
             detector_output=detector_output,
             corrector_config=corrector_config,
@@ -167,7 +220,11 @@ def convert_sup_to_srt(
         verbose=verbose,
     )
     with _managed_ocr_backend(
-        backend_config,
+        _build_paddle_backend_config(
+            base_config=backend_config,
+            role="ocr",
+            overrides=resolved_paddle_runtime,
+        ) if normalized_engine is OCREngine.LLAMA_SERVER else backend_config,
         allow_hf_auto_cpu_fallback=normalized_engine is OCREngine.HF and hf_device == "auto",
         verbose=verbose,
     ) as (active_backend, runtime_used):
@@ -206,6 +263,7 @@ def _convert_sup_to_srt_fast(
     input_sup: Path,
     output_srt: Path,
     backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     runtime_label: str,
     max_items: int | None,
     enable_furigana_mask: bool,
@@ -231,9 +289,27 @@ def _convert_sup_to_srt_fast(
 
     backend_specs: list[tuple[str, OCRBackendConfig]] = []
     if wide_inputs:
-        backend_specs.append(("ocr-fast", replace(backend_config, role="ocr-fast")))
+        backend_specs.append(
+            (
+                "ocr-fast",
+                _build_paddle_backend_config(
+                    base_config=backend_config,
+                    role="ocr-fast",
+                    overrides=paddle_runtime_overrides,
+                ),
+            )
+        )
     if tall_inputs:
-        backend_specs.append(("ocr", replace(backend_config, role="ocr")))
+        backend_specs.append(
+            (
+                "ocr",
+                _build_paddle_backend_config(
+                    base_config=backend_config,
+                    role="ocr",
+                    overrides=paddle_runtime_overrides,
+                ),
+            )
+        )
 
     device_logged = False
     recognized_by_index: dict[int, str] = {}
@@ -292,6 +368,7 @@ def _convert_sup_to_srt_default_with_detector(
     input_sup: Path,
     output_srt: Path,
     backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     runtime_label: str,
     detector_output: Path | None,
     corrector_config: CorrectorConfig | None,
@@ -307,7 +384,11 @@ def _convert_sup_to_srt_default_with_detector(
         verbose=verbose,
     )
     with _managed_ocr_backend(
-        backend_config,
+        _build_paddle_backend_config(
+            base_config=backend_config,
+            role="ocr",
+            overrides=paddle_runtime_overrides,
+        ),
         allow_hf_auto_cpu_fallback=False,
         verbose=verbose,
     ) as (baseline_backend, _):
@@ -324,6 +405,7 @@ def _convert_sup_to_srt_default_with_detector(
         prepared_inputs,
         baseline_texts,
         detector_backend_config=backend_config,
+        paddle_runtime_overrides=paddle_runtime_overrides,
         verbose=verbose,
     )
     if detector_output is not None:
@@ -336,7 +418,6 @@ def _convert_sup_to_srt_default_with_detector(
             prepared_inputs=prepared_inputs,
             detector_records=detector_records,
             corrector_config=corrector_config,
-            runtime_profile=backend_config.profile,
             runtime_binary_path=backend_config.binary_path,
             runtime_host=backend_config.host,
             verbose=verbose,
@@ -533,6 +614,7 @@ def _build_hybrid_detector_records(
     baseline_texts: list[str],
     *,
     detector_backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     verbose: bool,
 ) -> list[HybridDetectorRecord]:
     wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
@@ -545,7 +627,11 @@ def _build_hybrid_detector_records(
                 "alternate_read_non_tall",
                 "ocr-fast",
                 wide_inputs,
-                replace(detector_backend_config, role="ocr-fast"),
+                _build_paddle_backend_config(
+                    base_config=detector_backend_config,
+                    role="ocr-fast",
+                    overrides=paddle_runtime_overrides,
+                ),
             )
         )
     if tall_inputs:
@@ -554,7 +640,11 @@ def _build_hybrid_detector_records(
                 "repeat_drift_tall",
                 "detector",
                 tall_inputs,
-                replace(detector_backend_config, role="detector"),
+                _build_paddle_backend_config(
+                    base_config=detector_backend_config,
+                    role="detector",
+                    overrides=paddle_runtime_overrides,
+                ),
             )
         )
 
@@ -607,7 +697,6 @@ def _apply_conservative_corrections(
     prepared_inputs: list[_PreparedOCRInput],
     detector_records: list[HybridDetectorRecord],
     corrector_config: CorrectorConfig,
-    runtime_profile: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
     verbose: bool,
@@ -620,7 +709,6 @@ def _apply_conservative_corrections(
             prepared_inputs=prepared_inputs,
             detector_records=detector_records,
             corrector_config=corrector_config,
-            runtime_profile=runtime_profile,
             runtime_binary_path=runtime_binary_path,
             runtime_host=runtime_host,
             verbose=verbose,
@@ -640,7 +728,6 @@ def _apply_local_qwen_corrections(
     prepared_inputs: list[_PreparedOCRInput],
     detector_records: list[HybridDetectorRecord],
     corrector_config: CorrectorConfig,
-    runtime_profile: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
     verbose: bool,
@@ -648,6 +735,7 @@ def _apply_local_qwen_corrections(
     if corrector_config.local_model_path is None or corrector_config.local_mmproj_path is None:
         raise RuntimeError("qwen-local correction requires explicit corrector model and mmproj paths")
 
+    resolved_runtime = _resolve_qwen_runtime_overrides(corrector_config.local_runtime_overrides)
     correction_inputs = [prepared_inputs[record.index] for record in detector_records]
     corrector_backend_config = OCRBackendConfig(
         engine=OCREngine.LLAMA_SERVER,
@@ -658,15 +746,18 @@ def _apply_local_qwen_corrections(
         local_files_only=True,
         role="corrector",
         prompt_text=STRICT_OCR_V1_PROMPT,
-        profile=runtime_profile,
+        profile=resolved_runtime.profile,
         binary_path=runtime_binary_path,
         host=runtime_host,
-        port=corrector_config.port,
-        ctx_size=LOCAL_QWEN_CTX_SIZE,
-        n_predict=LOCAL_QWEN_MAX_NEW_TOKENS,
-        reasoning="off",
-        no_mmproj_offload=corrector_config.local_no_mmproj_offload,
-        startup_timeout_sec=corrector_config.startup_timeout_sec,
+        port=resolved_runtime.port,
+        threads=resolved_runtime.threads,
+        threads_batch=resolved_runtime.threads_batch,
+        ctx_size=resolved_runtime.ctx_size,
+        n_predict=resolved_runtime.n_predict,
+        reasoning=resolved_runtime.reasoning,
+        gpu_layers=resolved_runtime.gpu_layers,
+        no_mmproj_offload=resolved_runtime.no_mmproj_offload,
+        startup_timeout_sec=resolved_runtime.startup_timeout_sec,
     )
     with _managed_ocr_backend(
         corrector_backend_config,

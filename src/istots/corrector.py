@@ -10,13 +10,14 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 from PIL import Image
 
 from istots.gemini_auth import resolve_gemini_api_key
+from istots.ocr.types import Qwen35RuntimeOverrides
 from istots.ocr.hf_backend import normalize_ocr_text
 
 STRICT_OCR_V1_PROMPT = (
@@ -48,9 +49,7 @@ class CorrectorConfig:
     output_path: Path | None = None
     local_model_path: Path | None = None
     local_mmproj_path: Path | None = None
-    local_no_mmproj_offload: bool = False
-    port: int | None = None
-    startup_timeout_sec: float = 120.0
+    local_runtime_overrides: Qwen35RuntimeOverrides = field(default_factory=Qwen35RuntimeOverrides)
     api_key_env: str = "GEMINI_API_KEY"
     api_base: str = DEFAULT_GEMINI_API_BASE
     gemini_model: str = DEFAULT_GEMINI_MODEL

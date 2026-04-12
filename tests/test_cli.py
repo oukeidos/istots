@@ -8,6 +8,7 @@ import pytest
 from istots import __version__, cli
 from istots import model_store, pipeline
 from istots.corrector import CorrectorMode
+from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
 
 def test_normalize_argv_keeps_subcommand() -> None:
@@ -48,7 +49,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--hf-device {auto,cpu,gpu}" in captured.out
     assert "--hf-dtype {auto,float32,float16,bfloat16}" in captured.out
     assert "--min-pixels MIN_PIXELS" in captured.out
-    assert "--runtime-profile {auto,cpu}" in captured.out
+    assert "--paddle-profile {auto,cpu}" in captured.out
+    assert "--qwen-profile {auto,cpu}" in captured.out
     assert "--profile {auto,cpu}" in captured.out
     assert "--output-dir OUTPUT_DIR" in captured.out
     assert "--no-detector" in captured.out
@@ -567,18 +569,18 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
             str(input_sup),
             str(output_srt),
             "--quiet",
-            "--runtime-profile",
+            "--paddle-profile",
             "cpu",
-            "--runtime-port",
+            "--paddle-port",
             "19005",
-            "--threads",
+            "--paddle-threads",
             "12",
-            "--threads-batch",
+            "--paddle-threads-batch",
             "8",
-            "--gpu-layers",
+            "--paddle-gpu-layers",
             "0",
-            "--no-mmproj-offload",
-            "--startup-timeout-sec",
+            "--paddle-no-mmproj-offload",
+            "--paddle-startup-timeout-sec",
             "30",
         ]
     )
@@ -586,13 +588,15 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
     assert rc == 0
     assert captured["engine"] == "llama-server"
     assert captured["ocr_mode"] == "default"
-    assert captured["runtime_profile"] == "cpu"
-    assert captured["runtime_port"] == 19005
-    assert captured["runtime_threads"] == 12
-    assert captured["runtime_threads_batch"] == 8
-    assert captured["runtime_gpu_layers"] == 0
-    assert captured["runtime_no_mmproj_offload"] is True
-    assert captured["runtime_startup_timeout_sec"] == 30.0
+    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(
+        profile="cpu",
+        port=19005,
+        threads=12,
+        threads_batch=8,
+        gpu_layers=0,
+        no_mmproj_offload=True,
+        startup_timeout_sec=30.0,
+    )
 
 
 def test_run_convert_passes_fast_ocr_mode(monkeypatch, tmp_path: Path) -> None:
@@ -618,7 +622,7 @@ def test_run_convert_passes_fast_ocr_mode(monkeypatch, tmp_path: Path) -> None:
             "--quiet",
             "--ocr-mode",
             "fast",
-            "--runtime-profile",
+            "--paddle-profile",
             "cpu",
         ]
     )
@@ -626,7 +630,7 @@ def test_run_convert_passes_fast_ocr_mode(monkeypatch, tmp_path: Path) -> None:
     assert rc == 0
     assert captured["engine"] == "llama-server"
     assert captured["ocr_mode"] == "fast"
-    assert captured["runtime_profile"] == "cpu"
+    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(profile="cpu")
 
 
 def test_run_convert_passes_detector_output(monkeypatch, tmp_path: Path) -> None:
@@ -693,7 +697,7 @@ def test_run_convert_passes_qwen_local_corrector_config(monkeypatch, tmp_path: P
             str(mmproj_path),
             "--corrector-output",
             str(corrector_output),
-            "--corrector-port",
+            "--qwen-port",
             "19083",
         ]
     )
@@ -703,9 +707,8 @@ def test_run_convert_passes_qwen_local_corrector_config(monkeypatch, tmp_path: P
     assert config.mode is CorrectorMode.QWEN_LOCAL
     assert config.local_model_path == model_path.resolve()
     assert config.local_mmproj_path == mmproj_path.resolve()
-    assert config.local_no_mmproj_offload is False
     assert config.output_path == corrector_output.resolve()
-    assert config.port == 19083
+    assert config.local_runtime_overrides == Qwen35RuntimeOverrides(port=19083)
 
 
 def test_run_convert_passes_qwen_local_mmproj_offload_override(monkeypatch, tmp_path: Path) -> None:
@@ -737,14 +740,63 @@ def test_run_convert_passes_qwen_local_mmproj_offload_override(monkeypatch, tmp_
             str(model_path),
             "--corrector-mmproj-path",
             str(mmproj_path),
-            "--corrector-no-mmproj-offload",
+            "--qwen-no-mmproj-offload",
         ]
     )
 
     assert rc == 0
     config = captured["corrector_config"]
     assert config.mode is CorrectorMode.QWEN_LOCAL
-    assert config.local_no_mmproj_offload is True
+    assert config.local_runtime_overrides == Qwen35RuntimeOverrides(no_mmproj_offload=True)
+
+
+def test_run_convert_keeps_paddle_and_qwen_runtime_overrides_isolated(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--paddle-profile",
+            "cpu",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--qwen-port",
+            "19083",
+            "--qwen-no-mmproj-offload",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(profile="cpu")
+    config = captured["corrector_config"]
+    assert config.local_runtime_overrides == Qwen35RuntimeOverrides(
+        port=19083,
+        no_mmproj_offload=True,
+    )
 
 
 def test_run_convert_resolves_default_qwen_local_corrector_assets(monkeypatch, tmp_path: Path) -> None:
@@ -785,7 +837,7 @@ def test_run_convert_resolves_default_qwen_local_corrector_assets(monkeypatch, t
     assert config.mode is CorrectorMode.QWEN_LOCAL
     assert config.local_model_path == resolved_model_path
     assert config.local_mmproj_path == resolved_mmproj_path
-    assert config.local_no_mmproj_offload is False
+    assert config.local_runtime_overrides == Qwen35RuntimeOverrides()
 
 
 def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path) -> None:
@@ -972,15 +1024,37 @@ def test_run_convert_rejects_fast_mode_for_hf(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
-def test_run_convert_rejects_runtime_port_for_fast_mode(tmp_path: Path) -> None:
+def test_run_convert_accepts_shared_paddle_port_for_fast_mode(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
     output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
 
-    with pytest.raises(SystemExit) as excinfo:
-        cli.run([str(input_sup), str(output_srt), "--quiet", "--ocr-mode", "fast", "--runtime-port", "19005"])
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
 
-    assert excinfo.value.code == 2
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--ocr-mode",
+            "fast",
+            "--paddle-port",
+            "19005",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["ocr_mode"] == "fast"
+    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(port=19005)
 
 
 def test_run_convert_rejects_detector_output_for_hf(tmp_path: Path) -> None:
@@ -1070,7 +1144,7 @@ def test_run_convert_rejects_qwen_mmproj_offload_override_without_qwen_local(tmp
                 str(input_sup),
                 str(output_srt),
                 "--quiet",
-                "--corrector-no-mmproj-offload",
+                "--qwen-no-mmproj-offload",
             ]
         )
 

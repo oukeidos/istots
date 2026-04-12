@@ -41,25 +41,25 @@ Implement the experimentally validated feature set into the product code without
 - Post-plan hardware policy cleanup completed: split engine-specific hardware control so `llama-server` now relies only on runtime profiles while HF uses dedicated `hf-device` and `hf-dtype` controls.
 - Post-plan Qwen recipe cleanup completed: removed local Qwen thread-count hardcodes, kept only behavior-critical retained fields such as context size and reasoning mode, and stopped steering `llama-server` through PyTorch CUDA checks.
 
-## Planned Design Work
+## Completed Design Work
 
-- Planned next implementation: add model-family structured `llama-server` overrides so PaddleOCR-VL runtime launches and Qwen3.5 corrector runtime launches can receive different low-level launch settings in the same `convert` or `smoke` execution.
+- Implemented model-family structured `llama-server` overrides so PaddleOCR-VL runtime launches and Qwen3.5 corrector runtime launches can receive different low-level launch settings in the same `convert` or `smoke` execution.
 - Scope boundary:
   - keep shared runtime infrastructure such as `llama-server` binary discovery and shared host selection separate from model-family override policy
   - treat PaddleOCR-VL runtime roles (`ocr`, `ocr-fast`, `detector`) as one model-family override surface
   - treat the Qwen3.5 corrector runtime (`corrector`) as a separate model-family override surface
   - keep role-local differences such as role names, default ports, and mmproj selection as internal resolution details rather than user-facing tuning families
-- Target user-facing outcome:
-  - remove the remaining misleading global low-level `llama-server` override surface from `convert` and `smoke`
-  - replace it with explicit structured override families for PaddleOCR-VL and Qwen3.5
-  - preserve `doctor` as a single-role inspection tool with direct role-level override input
+- User-facing outcome:
+  - removed the remaining misleading global low-level `llama-server` override surface from `convert` and `smoke`
+  - replaced it with explicit structured override families for PaddleOCR-VL and Qwen3.5
+  - preserved `doctor` as a single-role inspection tool with direct role-level override input
 - Proposed internal contract:
   - introduce product-owned structured override objects for `PaddleOCRVLRuntimeOverrides` and `Qwen35RuntimeOverrides`
   - resolve those family-level objects into final launch specs through internal role-local defaults
   - let `ocr`, `ocr-fast`, and `detector` inherit the same PaddleOCR-VL tuning inputs while preserving their internal role-local asset and port defaults
   - let `corrector` resolve from the Qwen3.5 tuning inputs without inheriting Paddle-specific runtime policy
-- Acceptance criteria:
+- Acceptance criteria status:
   - one `convert` run can pass different override sets to PaddleOCR-VL and Qwen3.5 runtimes without cross-contamination
-  - `--corrector-no-mmproj-offload` or a future Qwen family override only affects the Qwen corrector launch
+  - `--qwen-no-mmproj-offload` and the wider Qwen family override surface only affect the Qwen corrector launch
   - PaddleOCR-VL launch behavior remains unchanged when only Qwen overrides are changed
   - regression tests lock the resolved launch spec for mixed Paddle/Qwen runs and verify that internal role defaults remain stable

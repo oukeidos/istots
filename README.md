@@ -58,7 +58,7 @@ uv run istots smoke
 uv run istots smoke --output-dir ./artifacts/smoke
 uv run istots smoke --ocr-mode fast
 uv run istots smoke --corrector qwen-local
-uv run istots smoke --corrector qwen-local --corrector-no-mmproj-offload
+uv run istots smoke --corrector qwen-local --qwen-no-mmproj-offload
 uv run istots smoke --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots auth gemini set
 uv run istots smoke --corrector gemini
@@ -72,7 +72,7 @@ uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
 uv run istots input.sup output.srt --detector-output detector.jsonl
 uv run istots input.sup output.srt --corrector qwen-local
-uv run istots input.sup output.srt --corrector qwen-local --corrector-no-mmproj-offload
+uv run istots input.sup output.srt --corrector qwen-local --qwen-no-mmproj-offload
 uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
@@ -96,25 +96,32 @@ Global flags:
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
 - OCR requests run sequentially, one subtitle image at a time.
 - `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
-- `--runtime-profile {auto,cpu}`: retained `llama-server` runtime profile. Default is `auto`.
-- `--runtime-profile auto` leaves low-level hardware selection to `llama-server`.
-- `--runtime-profile cpu` forces `llama-server` CPU execution.
+- `--paddle-profile {auto,cpu}`: PaddleOCR-VL `llama-server` runtime profile. Default is `auto`.
+- `--paddle-profile auto` leaves low-level hardware selection to `llama-server`.
+- `--paddle-profile cpu` forces PaddleOCR-VL `llama-server` CPU execution.
 - `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
-- `--runtime-port PORT`: override the retained `llama-server` port for convert when `--ocr-mode default` is used.
-- `--threads N`: override `llama-server` thread count.
-- `--threads-batch N`: override `llama-server` batch thread count.
-- `--gpu-layers N`: override `llama-server` GPU layer count.
-- `--no-mmproj-offload`: disable `mmproj` offload for `llama-server`.
-- `--startup-timeout-sec SECONDS`: `llama-server` startup timeout.
+- `--paddle-port PORT`: override the shared PaddleOCR-VL `llama-server` port used by `convert` or `smoke`.
+- `--paddle-threads N`: override PaddleOCR-VL `llama-server` thread count.
+- `--paddle-threads-batch N`: override PaddleOCR-VL `llama-server` batch thread count.
+- `--paddle-gpu-layers N`: override PaddleOCR-VL `llama-server` GPU layer count.
+- `--paddle-no-mmproj-offload`: disable `mmproj` offload for PaddleOCR-VL `llama-server`.
+- `--paddle-startup-timeout-sec SECONDS`: PaddleOCR-VL `llama-server` startup timeout.
 - `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
 - `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--corrector {off,qwen-local,gemini}`: attach the retained conservative anchor-only corrector to `convert`. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--corrector-output CORRECTOR_OUTPUT`: optional JSONL path for conservative correction records.
 - `--corrector-model-path CORRECTOR_MODEL_PATH`: optional explicit local GGUF corrector model path override for `--corrector qwen-local`.
 - `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: optional explicit local GGUF corrector mmproj path override for `--corrector qwen-local`.
-- `--corrector-port PORT`: override the retained corrector port for `--corrector qwen-local`.
-- `--corrector-no-mmproj-offload`: force `--no-mmproj-offload` for `--corrector qwen-local`.
-- `--corrector-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
+- `--qwen-profile {auto,cpu}`: Qwen3.5 `llama-server` runtime profile for `--corrector qwen-local`.
+- `--qwen-port PORT`: override the Qwen3.5 `llama-server` port for `--corrector qwen-local`.
+- `--qwen-threads N`: override Qwen3.5 `llama-server` thread count.
+- `--qwen-threads-batch N`: override Qwen3.5 `llama-server` batch thread count.
+- `--qwen-gpu-layers N`: override Qwen3.5 `llama-server` GPU layer count.
+- `--qwen-no-mmproj-offload`: force `--no-mmproj-offload` for `--corrector qwen-local`.
+- `--qwen-ctx-size N`: override Qwen3.5 `llama-server` context size.
+- `--qwen-n-predict N`: override Qwen3.5 `llama-server` `-n` value.
+- `--qwen-reasoning MODE`: override the Qwen3.5 `llama-server` reasoning mode.
+- `--qwen-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
 - `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
 - `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current shell environment.
 - `--corrector-thinking-level LEVEL`: optional Gemini thinking level for `--corrector gemini`.
@@ -218,20 +225,17 @@ The doctor checks:
 - `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
 - `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
 
-Advanced `llama-server` overrides remain available on `convert`, `doctor`, and `smoke` through:
+Advanced `llama-server` overrides remain available on `convert` and `smoke` through model-family surfaces:
 
-- `--runtime-profile`
-- `--runtime-port`
-- `--threads`
-- `--threads-batch`
-- `--gpu-layers`
-- `--no-mmproj-offload`
-- `--llama-server-path`
+- PaddleOCR-VL: `--paddle-profile`, `--paddle-port`, `--paddle-threads`, `--paddle-threads-batch`, `--paddle-gpu-layers`, `--paddle-no-mmproj-offload`, `--paddle-startup-timeout-sec`
+- Qwen3.5: `--qwen-profile`, `--qwen-port`, `--qwen-threads`, `--qwen-threads-batch`, `--qwen-gpu-layers`, `--qwen-no-mmproj-offload`, `--qwen-ctx-size`, `--qwen-n-predict`, `--qwen-reasoning`, `--qwen-startup-timeout-sec`
+- Shared infrastructure: `--llama-server-path`
+- `doctor` remains the role-level diagnostic surface with direct single-role overrides.
 
 ## Host Patterns
 
 - GPU-capable host: start with the default `auto` profile and let `llama-server` choose its own hardware path.
-- CPU-only host: use `--runtime-profile cpu`.
+- CPU-only host: use `--paddle-profile cpu`. If you also use `--corrector qwen-local`, set `--qwen-profile cpu` separately.
 
 ## OCR Modes
 
@@ -251,7 +255,7 @@ Advanced `llama-server` overrides remain available on `convert`, `doctor`, and `
 - The retained hybrid detector disagreement surface is the default correction trigger surface.
 - `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
 - If the retained local Qwen corrector assets were provisioned with `uv run istots setup --with-qwen-corrector`, `--corrector qwen-local` can run without explicit model or mmproj path overrides.
-- `--corrector-no-mmproj-offload` is available as an opt-in Qwen local override and is not forced by default.
+- `--qwen-no-mmproj-offload` is available as an opt-in Qwen local override and is not forced by default.
 - `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
 - `uv run istots auth gemini set` stores the Gemini API key in the local keyring, and `uv run istots auth gemini env-file set /path/to/.env` configures the fallback `.env` path.
 

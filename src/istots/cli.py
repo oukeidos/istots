@@ -169,11 +169,12 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--runtime-profile",
+        "--paddle-profile",
         choices=("auto", "cpu"),
         default="auto",
-        help="llama-server runtime profile when using `--engine llama-server` (default: auto)",
+        help="PaddleOCR-VL llama-server runtime profile when using `--engine llama-server` (default: auto)",
     )
+    parser.add_argument("--runtime-profile", dest="paddle_profile", choices=("auto", "cpu"), help=argparse.SUPPRESS)
     parser.add_argument(
         "--llama-server-path",
         type=Path,
@@ -181,40 +182,46 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Explicit llama-server binary path for `--engine llama-server`",
     )
     parser.add_argument(
-        "--runtime-port",
+        "--paddle-port",
         type=int,
         default=None,
-        help="Override the retained llama-server port for `--engine llama-server`",
+        help="Override the shared PaddleOCR-VL llama-server port for convert",
     )
+    parser.add_argument("--runtime-port", dest="paddle_port", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--threads",
+        "--paddle-threads",
         type=int,
         default=None,
-        help="Override llama-server thread count for `--engine llama-server`",
+        help="Override PaddleOCR-VL llama-server thread count",
     )
+    parser.add_argument("--threads", dest="paddle_threads", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--threads-batch",
+        "--paddle-threads-batch",
         type=int,
         default=None,
-        help="Override llama-server batch thread count for `--engine llama-server`",
+        help="Override PaddleOCR-VL llama-server batch thread count",
     )
+    parser.add_argument("--threads-batch", dest="paddle_threads_batch", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--gpu-layers",
+        "--paddle-gpu-layers",
         type=int,
         default=None,
-        help="Override llama-server GPU layer count for `--engine llama-server`",
+        help="Override PaddleOCR-VL llama-server GPU layer count",
     )
+    parser.add_argument("--gpu-layers", dest="paddle_gpu_layers", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--no-mmproj-offload",
+        "--paddle-no-mmproj-offload",
         action="store_true",
-        help="Disable mmproj offload for `--engine llama-server`",
+        help="Disable mmproj offload for PaddleOCR-VL llama-server runs",
     )
+    parser.add_argument("--no-mmproj-offload", dest="paddle_no_mmproj_offload", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--startup-timeout-sec",
+        "--paddle-startup-timeout-sec",
         type=float,
         default=120.0,
-        help="llama-server startup timeout in seconds for `--engine llama-server`",
+        help="PaddleOCR-VL llama-server startup timeout in seconds",
     )
+    parser.add_argument("--startup-timeout-sec", dest="paddle_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -262,22 +269,66 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Explicit local GGUF corrector mmproj path for `--corrector qwen-local`.",
     )
     parser.add_argument(
-        "--corrector-port",
-        type=int,
-        default=None,
-        help="Override the retained corrector port for `--corrector qwen-local`.",
+        "--qwen-profile",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Qwen3.5 llama-server runtime profile for `--corrector qwen-local`",
     )
     parser.add_argument(
-        "--corrector-no-mmproj-offload",
+        "--qwen-port",
+        type=int,
+        default=None,
+        help="Override the Qwen3.5 llama-server port for `--corrector qwen-local`.",
+    )
+    parser.add_argument("--corrector-port", dest="qwen_port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--qwen-threads",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server thread count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-threads-batch",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server batch thread count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-gpu-layers",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server GPU layer count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-no-mmproj-offload",
         action="store_true",
         help="Force `--no-mmproj-offload` for `--corrector qwen-local`.",
     )
+    parser.add_argument("--corrector-no-mmproj-offload", dest="qwen_no_mmproj_offload", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--corrector-startup-timeout-sec",
+        "--qwen-ctx-size",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server context size for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-n-predict",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server `-n` value for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-reasoning",
+        default=None,
+        help="Override Qwen3.5 llama-server reasoning mode for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-startup-timeout-sec",
         type=float,
         default=120.0,
-        help="llama-server startup timeout in seconds for `--corrector qwen-local`.",
+        help="Qwen3.5 llama-server startup timeout in seconds for `--corrector qwen-local`.",
     )
+    parser.add_argument("--corrector-startup-timeout-sec", dest="qwen_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--corrector-gemini-model",
         default="gemini-3.1-pro-preview",
@@ -355,11 +406,12 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--runtime-profile",
+        "--paddle-profile",
         choices=("auto", "cpu"),
         default="auto",
-        help="llama-server runtime profile for smoke validation (default: auto)",
+        help="PaddleOCR-VL llama-server runtime profile for smoke validation (default: auto)",
     )
+    parser.add_argument("--runtime-profile", dest="paddle_profile", choices=("auto", "cpu"), help=argparse.SUPPRESS)
     parser.add_argument(
         "--llama-server-path",
         type=Path,
@@ -367,40 +419,46 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         help="Explicit llama-server binary path for smoke validation",
     )
     parser.add_argument(
-        "--runtime-port",
+        "--paddle-port",
         type=int,
         default=None,
-        help="Override the retained llama-server port for smoke validation",
+        help="Override the shared PaddleOCR-VL llama-server port for smoke validation",
     )
+    parser.add_argument("--runtime-port", dest="paddle_port", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--threads",
+        "--paddle-threads",
         type=int,
         default=None,
-        help="Override llama-server thread count for smoke validation",
+        help="Override PaddleOCR-VL llama-server thread count for smoke validation",
     )
+    parser.add_argument("--threads", dest="paddle_threads", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--threads-batch",
+        "--paddle-threads-batch",
         type=int,
         default=None,
-        help="Override llama-server batch thread count for smoke validation",
+        help="Override PaddleOCR-VL llama-server batch thread count for smoke validation",
     )
+    parser.add_argument("--threads-batch", dest="paddle_threads_batch", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--gpu-layers",
+        "--paddle-gpu-layers",
         type=int,
         default=None,
-        help="Override llama-server GPU layer count for smoke validation",
+        help="Override PaddleOCR-VL llama-server GPU layer count for smoke validation",
     )
+    parser.add_argument("--gpu-layers", dest="paddle_gpu_layers", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--no-mmproj-offload",
+        "--paddle-no-mmproj-offload",
         action="store_true",
-        help="Disable mmproj offload for smoke validation",
+        help="Disable mmproj offload for PaddleOCR-VL smoke validation",
     )
+    parser.add_argument("--no-mmproj-offload", dest="paddle_no_mmproj_offload", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--startup-timeout-sec",
+        "--paddle-startup-timeout-sec",
         type=float,
         default=120.0,
-        help="llama-server startup timeout in seconds for smoke validation",
+        help="PaddleOCR-VL llama-server startup timeout in seconds for smoke validation",
     )
+    parser.add_argument("--startup-timeout-sec", dest="paddle_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -438,22 +496,66 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         help="Explicit local GGUF corrector mmproj path for `--corrector qwen-local`.",
     )
     parser.add_argument(
-        "--corrector-port",
-        type=int,
-        default=None,
-        help="Override the retained corrector port for `--corrector qwen-local`.",
+        "--qwen-profile",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Qwen3.5 llama-server runtime profile for `--corrector qwen-local`.",
     )
     parser.add_argument(
-        "--corrector-no-mmproj-offload",
+        "--qwen-port",
+        type=int,
+        default=None,
+        help="Override the Qwen3.5 llama-server port for `--corrector qwen-local`.",
+    )
+    parser.add_argument("--corrector-port", dest="qwen_port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--qwen-threads",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server thread count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-threads-batch",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server batch thread count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-gpu-layers",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server GPU layer count for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-no-mmproj-offload",
         action="store_true",
         help="Force `--no-mmproj-offload` for `--corrector qwen-local`.",
     )
+    parser.add_argument("--corrector-no-mmproj-offload", dest="qwen_no_mmproj_offload", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--corrector-startup-timeout-sec",
+        "--qwen-ctx-size",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server context size for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-n-predict",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server `-n` value for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-reasoning",
+        default=None,
+        help="Override Qwen3.5 llama-server reasoning mode for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--qwen-startup-timeout-sec",
         type=float,
         default=120.0,
-        help="llama-server startup timeout in seconds for `--corrector qwen-local`.",
+        help="Qwen3.5 llama-server startup timeout in seconds for `--corrector qwen-local`.",
     )
+    parser.add_argument("--corrector-startup-timeout-sec", dest="qwen_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
     parser.add_argument(
         "--corrector-gemini-model",
         default="gemini-3.1-pro-preview",
@@ -1013,8 +1115,8 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
             parser.error("--hf-device is only valid with --engine hf")
         if args.hf_dtype != "auto":
             parser.error("--hf-dtype is only valid with --engine hf")
-    if args.ocr_mode == "fast" and args.runtime_port is not None:
-        parser.error("--runtime-port is only supported with --ocr-mode default")
+    if args.engine != "llama-server" and _has_paddle_runtime_override_request(args):
+        parser.error("Paddle llama-server overrides are only valid with --engine llama-server")
     if args.detector_output is not None and args.engine != "llama-server":
         parser.error("--detector-output requires --engine llama-server")
     if args.detector_output is not None and args.ocr_mode != "default":
@@ -1025,8 +1127,8 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--corrector requires --ocr-mode default")
     if args.corrector == "off" and args.corrector_output is not None:
         parser.error("--corrector-output requires --corrector")
-    if args.corrector != "qwen-local" and args.corrector_no_mmproj_offload:
-        parser.error("--corrector-no-mmproj-offload is only valid with --corrector qwen-local")
+    if args.corrector != "qwen-local" and _has_qwen_runtime_override_request(args):
+        parser.error("Qwen llama-server overrides are only valid with --corrector qwen-local")
     if args.corrector == "qwen-local":
         has_model_path = args.corrector_model_path is not None
         has_mmproj_path = args.corrector_mmproj_path is not None
@@ -1038,8 +1140,37 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
     if args.corrector == "gemini":
         if args.corrector_model_path is not None or args.corrector_mmproj_path is not None:
             parser.error("--corrector-model-path and --corrector-mmproj-path are only valid with --corrector qwen-local")
-        if args.corrector_port is not None:
-            parser.error("--corrector-port is only valid with --corrector qwen-local")
+
+
+def _has_paddle_runtime_override_request(args: argparse.Namespace) -> bool:
+    return any(
+        (
+            args.paddle_profile != "auto",
+            args.paddle_port is not None,
+            args.paddle_threads is not None,
+            args.paddle_threads_batch is not None,
+            args.paddle_gpu_layers is not None,
+            args.paddle_no_mmproj_offload,
+            args.paddle_startup_timeout_sec != 120.0,
+        )
+    )
+
+
+def _has_qwen_runtime_override_request(args: argparse.Namespace) -> bool:
+    return any(
+        (
+            args.qwen_profile != "auto",
+            args.qwen_port is not None,
+            args.qwen_threads is not None,
+            args.qwen_threads_batch is not None,
+            args.qwen_gpu_layers is not None,
+            args.qwen_no_mmproj_offload,
+            args.qwen_ctx_size is not None,
+            args.qwen_n_predict is not None,
+            args.qwen_reasoning is not None,
+            args.qwen_startup_timeout_sec != 120.0,
+        )
+    )
 
 
 def _default_smoke_input_sup() -> Path:
@@ -1081,14 +1212,14 @@ def run_smoke(args: argparse.Namespace) -> int:
         max_items=None,
         max_new_tokens=args.max_new_tokens,
         ocr_mode=args.ocr_mode,
-        runtime_profile=args.runtime_profile,
+        paddle_profile=args.paddle_profile,
         llama_server_path=args.llama_server_path,
-        runtime_port=args.runtime_port,
-        threads=args.threads,
-        threads_batch=args.threads_batch,
-        gpu_layers=args.gpu_layers,
-        no_mmproj_offload=args.no_mmproj_offload,
-        startup_timeout_sec=args.startup_timeout_sec,
+        paddle_port=args.paddle_port,
+        paddle_threads=args.paddle_threads,
+        paddle_threads_batch=args.paddle_threads_batch,
+        paddle_gpu_layers=args.paddle_gpu_layers,
+        paddle_no_mmproj_offload=args.paddle_no_mmproj_offload,
+        paddle_startup_timeout_sec=args.paddle_startup_timeout_sec,
         quiet=args.quiet,
         furigana_mask=args.furigana_mask,
         detector_output=detector_output,
@@ -1096,9 +1227,16 @@ def run_smoke(args: argparse.Namespace) -> int:
         corrector_output=corrector_output,
         corrector_model_path=args.corrector_model_path,
         corrector_mmproj_path=args.corrector_mmproj_path,
-        corrector_port=args.corrector_port,
-        corrector_no_mmproj_offload=args.corrector_no_mmproj_offload,
-        corrector_startup_timeout_sec=args.corrector_startup_timeout_sec,
+        qwen_profile=args.qwen_profile,
+        qwen_port=args.qwen_port,
+        qwen_threads=args.qwen_threads,
+        qwen_threads_batch=args.qwen_threads_batch,
+        qwen_gpu_layers=args.qwen_gpu_layers,
+        qwen_no_mmproj_offload=args.qwen_no_mmproj_offload,
+        qwen_ctx_size=args.qwen_ctx_size,
+        qwen_n_predict=args.qwen_n_predict,
+        qwen_reasoning=args.qwen_reasoning,
+        qwen_startup_timeout_sec=args.qwen_startup_timeout_sec,
         corrector_gemini_model=args.corrector_gemini_model,
         corrector_api_key_env=args.corrector_api_key_env,
         corrector_thinking_level=args.corrector_thinking_level,
@@ -1149,6 +1287,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
 
     from istots.model_store import ensure_local_model, ensure_local_qwen_corrector_assets
     from istots.pipeline import convert_sup_to_srt
+    from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
     corrector_config = None
     if args.corrector != "off":
@@ -1174,9 +1313,18 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             output_path=corrector_output,
             local_model_path=resolved_corrector_model_path,
             local_mmproj_path=resolved_corrector_mmproj_path,
-            local_no_mmproj_offload=args.corrector_no_mmproj_offload,
-            port=args.corrector_port,
-            startup_timeout_sec=args.corrector_startup_timeout_sec,
+            local_runtime_overrides=Qwen35RuntimeOverrides(
+                profile=args.qwen_profile,
+                port=args.qwen_port,
+                threads=args.qwen_threads,
+                threads_batch=args.qwen_threads_batch,
+                gpu_layers=args.qwen_gpu_layers,
+                no_mmproj_offload=True if args.qwen_no_mmproj_offload else None,
+                startup_timeout_sec=args.qwen_startup_timeout_sec,
+                ctx_size=args.qwen_ctx_size,
+                n_predict=args.qwen_n_predict,
+                reasoning=args.qwen_reasoning,
+            ),
             api_key_env=args.corrector_api_key_env,
             gemini_model=args.corrector_gemini_model,
             thinking_level=args.corrector_thinking_level,
@@ -1206,7 +1354,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             "using primary OCR engine: %s (mode=%s profile=%s)",
             args.engine,
             args.ocr_mode,
-            args.runtime_profile,
+            args.paddle_profile,
         )
         if corrector_config is not None:
             logging.getLogger(__name__).info("using conservative corrector: %s", corrector_config.mode)
@@ -1216,6 +1364,16 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
                     corrector_config.local_model_path,
                     corrector_config.local_mmproj_path,
                 )
+
+    paddle_runtime_overrides = PaddleOCRVLRuntimeOverrides(
+        profile=args.paddle_profile,
+        port=args.paddle_port,
+        threads=args.paddle_threads,
+        threads_batch=args.paddle_threads_batch,
+        gpu_layers=args.paddle_gpu_layers,
+        no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
+        startup_timeout_sec=args.paddle_startup_timeout_sec,
+    )
 
     try:
         result = convert_sup_to_srt(
@@ -1234,14 +1392,8 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             local_files_only=args.engine == "hf",
             enable_furigana_mask=args.furigana_mask,
             srt_policy=args.srt_policy,
-            runtime_profile=args.runtime_profile,
             runtime_binary_path=args.llama_server_path,
-            runtime_port=args.runtime_port,
-            runtime_threads=args.threads,
-            runtime_threads_batch=args.threads_batch,
-            runtime_gpu_layers=args.gpu_layers,
-            runtime_no_mmproj_offload=True if args.no_mmproj_offload else None,
-            runtime_startup_timeout_sec=args.startup_timeout_sec,
+            paddle_runtime_overrides=paddle_runtime_overrides,
             verbose=not args.quiet,
         )
     except Exception as exc:

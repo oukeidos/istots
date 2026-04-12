@@ -54,6 +54,45 @@ class OCRBackendConfig:
     startup_timeout_sec: float = 120.0
 
 
+@dataclass(frozen=True)
+class PaddleOCRVLRuntimeOverrides:
+    profile: str = "auto"
+    port: int | None = None
+    threads: int | None = None
+    threads_batch: int | None = None
+    gpu_layers: int | None = None
+    no_mmproj_offload: bool | None = None
+    startup_timeout_sec: float = 120.0
+
+
+@dataclass(frozen=True)
+class Qwen35RuntimeOverrides:
+    profile: str = "auto"
+    port: int | None = None
+    threads: int | None = None
+    threads_batch: int | None = None
+    gpu_layers: int | None = None
+    no_mmproj_offload: bool | None = None
+    startup_timeout_sec: float = 120.0
+    ctx_size: int | None = None
+    n_predict: int | None = None
+    reasoning: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedLlamaRuntimeOverrides:
+    profile: str = "auto"
+    port: int | None = None
+    threads: int | None = None
+    threads_batch: int | None = None
+    gpu_layers: int | None = None
+    no_mmproj_offload: bool | None = None
+    startup_timeout_sec: float = 120.0
+    ctx_size: int | None = None
+    n_predict: int | None = None
+    reasoning: str | None = None
+
+
 @runtime_checkable
 class OCRBackend(Protocol):
     def recognize(self, image: Image.Image) -> str:

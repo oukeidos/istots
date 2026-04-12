@@ -40,10 +40,12 @@
 - Post-plan OCR execution cleanup: removed the product batch-execution surface and now run OCR sequentially per subtitle image across convert, smoke, detector, and corrector flows.
 - Removed the `--batch-size` CLI surface, simplified the OCR pipeline and backend execution path, and added regression coverage for the sequential-only behavior.
 - Post-plan mmproj offload cleanup: stopped forcing `--no-mmproj-offload` through shared runtime profiles and removed the default force from local Qwen correction.
-- Added an opt-in `--corrector-no-mmproj-offload` override for `qwen-local` and locked the new launch behavior with runtime, CLI, and pipeline regression coverage.
+- Added an opt-in `--qwen-no-mmproj-offload` override for `qwen-local` and locked the new launch behavior with runtime, CLI, and pipeline regression coverage.
 - Post-plan runtime profile cleanup: removed the no-op `memory` profile from the product surface and kept `auto` and `cpu` as the supported runtime profiles.
 - Post-plan hardware policy cleanup: removed the legacy global device surface from `llama-server` flows and split hardware control into `llama-server` runtime profiles plus HF-only `--hf-device` / `--hf-dtype` options.
 - Stopped using PyTorch CUDA detection to steer `llama-server`, limited auto CPU fallback to the HF engine, and removed local Qwen thread-count hardcodes while keeping only behavior-critical recipe fields.
+- Post-plan model-family runtime override cleanup: replaced the last global low-level `llama-server` override surface on `convert` and `smoke` with separate PaddleOCR-VL and Qwen3.5 override families.
+- Added regression coverage to lock model-family override routing, shared Paddle role resolution, and isolated Qwen local runtime overrides.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

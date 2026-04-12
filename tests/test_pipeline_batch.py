@@ -10,7 +10,12 @@ from PIL import Image
 
 from istots import pipeline
 from istots.corrector import CorrectorConfig, CorrectorMode
-from istots.ocr import OCRBackendConfig, OCREngine
+from istots.ocr import (
+    OCRBackendConfig,
+    OCREngine,
+    PaddleOCRVLRuntimeOverrides,
+    Qwen35RuntimeOverrides,
+)
 
 
 def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: Path) -> None:
@@ -702,12 +707,13 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
         input_sup=input_sup,
         output_srt=output_srt,
         engine=OCREngine.LLAMA_SERVER,
-        runtime_profile="cpu",
+        paddle_runtime_overrides=PaddleOCRVLRuntimeOverrides(profile="cpu"),
         corrector_config=CorrectorConfig(
             mode=CorrectorMode.QWEN_LOCAL,
             output_path=corrector_output,
             local_model_path=tmp_path / "qwen.gguf",
             local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
+            local_runtime_overrides=Qwen35RuntimeOverrides(profile="cpu"),
         ),
         srt_policy="overlap",
         verbose=False,
@@ -728,7 +734,7 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
     assert created_configs[2].ctx_size == 4096
     assert created_configs[2].threads is None
     assert created_configs[2].threads_batch is None
-    assert created_configs[2].no_mmproj_offload is False
+    assert created_configs[2].no_mmproj_offload is None
     assert [entry.text for entry in written_entries] == ["AEC"]
     assert closed_roles == ["ocr", "ocr-fast", "corrector"]
     assert max_live_count == 1
@@ -803,7 +809,7 @@ def test_convert_sup_to_srt_applies_qwen_mmproj_offload_override_when_requested(
             output_path=tmp_path / "corrected.jsonl",
             local_model_path=tmp_path / "qwen.gguf",
             local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
-            local_no_mmproj_offload=True,
+            local_runtime_overrides=Qwen35RuntimeOverrides(no_mmproj_offload=True),
         ),
         srt_policy="overlap",
         verbose=False,
