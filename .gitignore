@@ -20,3 +20,13 @@ dist/
 
 # Local experiment outputs (README examples)
 out_images/
+
+# Local utility folders
+scripts/
+tools/
+
+# Local planning notes
+AGENTS.md
+PLAN.md
+TODO.md
+IMPLEMENTATION_PLAN.md
