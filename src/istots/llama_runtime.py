@@ -304,15 +304,30 @@ def stop_llama_server(process: subprocess.Popen[str]) -> None:
 
 def request_llama_server_smoke(spec: LlamaServerLaunchSpec) -> str:
     image = Image.new("RGB", (1, 1), "white")
+    return request_llama_server_ocr(
+        spec,
+        image,
+        max_new_tokens=DEFAULT_LLAMA_SERVER_SMOKE_MAX_TOKENS,
+        prompt_text=spec.prompt_text,
+    )
+
+
+def request_llama_server_ocr(
+    spec: LlamaServerLaunchSpec,
+    image: Image.Image,
+    *,
+    max_new_tokens: int,
+    prompt_text: str = "OCR:",
+) -> str:
     url = f"http://{spec.host}:{spec.port}/v1/chat/completions"
     body: dict[str, Any] = {
         "model": "gpt-3.5-turbo",
-        "max_tokens": DEFAULT_LLAMA_SERVER_SMOKE_MAX_TOKENS,
+        "max_tokens": max_new_tokens,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": spec.prompt_text},
+                    {"type": "text", "text": prompt_text},
                     {"type": "image_url", "image_url": {"url": image_to_data_url(image)}},
                 ],
             }

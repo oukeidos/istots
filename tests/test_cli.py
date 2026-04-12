@@ -38,10 +38,12 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     captured = capsys.readouterr()
     assert "Subcommand Details:" in captured.out
     assert "--batch-size BATCH_SIZE" in captured.out
+    assert "--engine {llama-server,hf}" in captured.out
     assert "--furigana-mask" in captured.out
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
     assert "--min-pixels MIN_PIXELS" in captured.out
+    assert "--runtime-profile {auto,cpu,memory}" in captured.out
     assert "--profile {auto,cpu,memory}" in captured.out
     assert "--force" in captured.out
 
@@ -237,8 +239,9 @@ def test_run_convert_uses_local_model_and_offline(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
     output_srt = tmp_path / "output.srt"
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--model-id", "org/model"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--model-id", "org/model"])
     assert rc == 0
+    assert captured["engine"] == "hf"
     assert captured["model_id"] == str(model_dir)
     assert captured["local_files_only"] is True
     assert captured["enable_furigana_mask"] is False
@@ -268,7 +271,7 @@ def test_run_convert_passes_furigana_mask_flag(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
     output_srt = tmp_path / "output.srt"
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--furigana-mask"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--furigana-mask"])
     assert rc == 0
     assert captured["enable_furigana_mask"] is True
 
@@ -294,9 +297,90 @@ def test_run_convert_passes_srt_policy(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
     output_srt = tmp_path / "output.srt"
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--srt-policy", "overlap"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--srt-policy", "overlap"])
     assert rc == 0
     assert captured["srt_policy"] == "overlap"
+
+
+def test_run_convert_defaults_to_llama_server(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    captured: dict[str, object] = {}
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="gpu",
+        )
+
+    def fake_ensure_local_model(model_id, models_dir=None):
+        nonlocal called
+        called = True
+        return tmp_path / "unused"
+
+    monkeypatch.setattr(model_store, "ensure_local_model", fake_ensure_local_model)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet"])
+
+    assert rc == 0
+    assert called is False
+    assert captured["engine"] == "llama-server"
+    assert captured["local_files_only"] is False
+    assert captured["models_dir"] is None
+
+
+def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--runtime-profile",
+            "cpu",
+            "--runtime-port",
+            "19005",
+            "--threads",
+            "12",
+            "--threads-batch",
+            "8",
+            "--gpu-layers",
+            "0",
+            "--no-mmproj-offload",
+            "--startup-timeout-sec",
+            "30",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["engine"] == "llama-server"
+    assert captured["runtime_profile"] == "cpu"
+    assert captured["runtime_port"] == 19005
+    assert captured["runtime_threads"] == 12
+    assert captured["runtime_threads_batch"] == 8
+    assert captured["runtime_gpu_layers"] == 0
+    assert captured["runtime_no_mmproj_offload"] is True
+    assert captured["runtime_startup_timeout_sec"] == 30.0
 
 
 def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
@@ -320,7 +404,7 @@ def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, 
     monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: tmp_path)
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--model-id", "org/model"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--model-id", "org/model"])
     assert rc == 1
     assert called is False
 
@@ -347,7 +431,7 @@ def test_run_convert_existing_output_force_overwrites(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: model_dir)
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--model-id", "org/model", "--force"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--model-id", "org/model", "--force"])
     assert rc == 0
     assert captured["output_srt"] == output_srt.resolve()
 
@@ -377,7 +461,7 @@ def test_run_convert_existing_output_prompt_yes(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: model_dir)
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--model-id", "org/model"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--model-id", "org/model"])
     assert rc == 0
     assert called is True
 
@@ -404,7 +488,7 @@ def test_run_convert_existing_output_prompt_no_cancels(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(model_store, "ensure_local_model", lambda model_id, models_dir=None: tmp_path)
     monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
 
-    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--model-id", "org/model"])
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--model-id", "org/model"])
     assert rc == 1
     assert called is False
 

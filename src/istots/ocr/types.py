@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
 from PIL import Image
@@ -32,6 +33,17 @@ class OCRBackendConfig:
     device: str = "cpu"
     max_new_tokens: int = 256
     local_files_only: bool = True
+    models_dir: Path | None = None
+    role: str = "ocr"
+    profile: str = "auto"
+    binary_path: Path | None = None
+    host: str = "127.0.0.1"
+    port: int | None = None
+    threads: int | None = None
+    threads_batch: int | None = None
+    gpu_layers: int | None = None
+    no_mmproj_offload: bool | None = None
+    startup_timeout_sec: float = 120.0
 
 
 @runtime_checkable

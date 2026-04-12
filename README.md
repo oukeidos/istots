@@ -53,12 +53,21 @@ Global flags:
 
 `convert` flags:
 
+- `--engine {llama-server,hf}`: choose the OCR engine. Default is `llama-server`. Use `hf` for the explicit fallback path.
 - `--device {auto,cpu,gpu}`: choose the inference device. `auto` prefers GPU and falls back to CPU.
-- `--model-id MODEL_ID`: model ID or local model path. If a model ID is given, it must already exist in local cache from `istots setup`.
+- `--model-id MODEL_ID`: HF model ID or local HF model path for `--engine hf`.
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
 - `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
 - `--batch-size BATCH_SIZE`: OCR batch size. Default is `1`. If GPU OOM occurs, `istots` reduces the batch size and retries.
+- `--runtime-profile {auto,cpu,memory}`: retained `llama-server` runtime profile. Default is `auto`.
+- `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
+- `--runtime-port PORT`: override the retained `llama-server` port for convert.
+- `--threads N`: override `llama-server` thread count.
+- `--threads-batch N`: override `llama-server` batch thread count.
+- `--gpu-layers N`: override `llama-server` GPU layer count.
+- `--no-mmproj-offload`: disable `mmproj` offload for `llama-server`.
+- `--startup-timeout-sec SECONDS`: `llama-server` startup timeout.
 - `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
 - `--srt-policy {safe,overlap}`: SRT output policy. `safe` merges simultaneous windows into one cue. `overlap` keeps overlapping cues separate.
 - `--quiet`: suppress progress logs.

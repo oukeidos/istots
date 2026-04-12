@@ -11,6 +11,17 @@ def create_ocr_backend(config: OCRBackendConfig) -> OCRBackend:
         device=config.device,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
+        models_dir=config.models_dir,
+        role=config.role,
+        profile=config.profile,
+        binary_path=config.binary_path,
+        host=config.host,
+        port=config.port,
+        threads=config.threads,
+        threads_batch=config.threads_batch,
+        gpu_layers=config.gpu_layers,
+        no_mmproj_offload=config.no_mmproj_offload,
+        startup_timeout_sec=config.startup_timeout_sec,
     )
     if engine is OCREngine.HF:
         return _create_hf_backend(normalized)
@@ -31,7 +42,20 @@ def _create_hf_backend(config: OCRBackendConfig) -> OCRBackend:
 
 
 def _create_llama_server_backend(config: OCRBackendConfig) -> OCRBackend:
-    raise NotImplementedError(
-        "The llama-server OCR backend is not implemented yet. "
-        "Step 1 only introduces the engine boundary."
+    from .llama_server_backend import LlamaServerOCRBackend
+
+    return LlamaServerOCRBackend(
+        device=config.device,
+        max_new_tokens=config.max_new_tokens,
+        models_dir=config.models_dir,
+        role=config.role,
+        profile=config.profile,
+        binary_path=config.binary_path,
+        host=config.host,
+        port=config.port,
+        threads=config.threads,
+        threads_batch=config.threads_batch,
+        gpu_layers=config.gpu_layers,
+        no_mmproj_offload=config.no_mmproj_offload,
+        startup_timeout_sec=config.startup_timeout_sec,
     )

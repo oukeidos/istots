@@ -78,6 +78,12 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("input_sup", type=Path, help="Input .sup file")
     parser.add_argument("output_srt", type=Path, help="Output .srt file")
     parser.add_argument(
+        "--engine",
+        choices=("llama-server", "hf"),
+        default="llama-server",
+        help="OCR engine selection (default: llama-server)",
+    )
+    parser.add_argument(
         "--device",
         choices=("auto", "cpu", "gpu"),
         default="auto",
@@ -87,8 +93,8 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         "--model-id",
         default=DEFAULT_MODEL_ID,
         help=(
-            "Model ID or local model path. If model ID is given, it must already "
-            "exist in local cache from `istots setup`."
+            "HF model ID or local HF model path for `--engine hf`. "
+            "If a model ID is given, it must already exist in local cache from `istots setup`."
         ),
     )
     parser.add_argument(
@@ -117,6 +123,53 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=1,
         help="OCR batch size (default: 1)",
+    )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=("auto", "cpu", "memory"),
+        default="auto",
+        help="llama-server runtime profile when using `--engine llama-server` (default: auto)",
+    )
+    parser.add_argument(
+        "--llama-server-path",
+        type=Path,
+        default=None,
+        help="Explicit llama-server binary path for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--runtime-port",
+        type=int,
+        default=None,
+        help="Override the retained llama-server port for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Override llama-server thread count for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--threads-batch",
+        type=int,
+        default=None,
+        help="Override llama-server batch thread count for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=None,
+        help="Override llama-server GPU layer count for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--no-mmproj-offload",
+        action="store_true",
+        help="Disable mmproj offload for `--engine llama-server`",
+    )
+    parser.add_argument(
+        "--startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="llama-server startup timeout in seconds for `--engine llama-server`",
     )
     parser.add_argument(
         "--quiet",
@@ -536,30 +589,48 @@ def run_convert(args: argparse.Namespace) -> int:
     from istots.model_store import ensure_local_model
     from istots.pipeline import convert_sup_to_srt
 
-    try:
-        model_path = ensure_local_model(
-            model_id=args.model_id,
-            models_dir=args.models_dir,
+    model_id = args.model_id
+    if args.engine == "hf":
+        try:
+            model_path = ensure_local_model(
+                model_id=args.model_id,
+                models_dir=args.models_dir,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).error("model check failed: %s", exc)
+            return 1
+        model_id = str(model_path)
+        if not args.quiet:
+            logging.getLogger(__name__).info("using HF fallback model: %s", model_path)
+    elif not args.quiet:
+        logging.getLogger(__name__).info(
+            "using primary OCR engine: %s (profile=%s)",
+            args.engine,
+            args.runtime_profile,
         )
-    except Exception as exc:
-        logging.getLogger(__name__).error("model check failed: %s", exc)
-        return 1
-
-    if not args.quiet:
-        logging.getLogger(__name__).info("using local model: %s", model_path)
 
     try:
         result = convert_sup_to_srt(
             input_sup=input_sup,
             output_srt=output_srt,
             preferred_device=args.device,
-            model_id=str(model_path),
+            engine=args.engine,
+            model_id=model_id,
+            models_dir=args.models_dir,
             max_items=args.max_items,
             batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
-            local_files_only=True,
+            local_files_only=args.engine == "hf",
             enable_furigana_mask=args.furigana_mask,
             srt_policy=args.srt_policy,
+            runtime_profile=args.runtime_profile,
+            runtime_binary_path=args.llama_server_path,
+            runtime_port=args.runtime_port,
+            runtime_threads=args.threads,
+            runtime_threads_batch=args.threads_batch,
+            runtime_gpu_layers=args.gpu_layers,
+            runtime_no_mmproj_offload=True if args.no_mmproj_offload else None,
+            runtime_startup_timeout_sec=args.startup_timeout_sec,
             verbose=not args.quiet,
         )
     except Exception as exc:

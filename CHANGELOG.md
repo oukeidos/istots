@@ -10,6 +10,9 @@
 - Step 3: added a product-owned `llama-server` runtime-management layer with retained launch profiles, per-role asset resolution, and launch-command construction.
 - Added `istots doctor --engine llama-server` with retained readiness checks for binary discovery, asset presence, port readiness, launch readiness, and minimal smoke requests.
 - Added reusable explicit llama OpenAI sampling defaults and regression coverage for runtime management and doctor flows.
+- Step 4: switched the default `convert` OCR path to the retained `llama-server` runtime while keeping `HF` as an explicit fallback engine.
+- Added a product-owned `llama-server` OCR backend that validates retained runtime assets, launches the retained OCR role, serves OCR requests, and shuts the runtime down cleanly after conversion.
+- Exposed retained `convert` runtime overrides for profile, port, threads, GPU layers, mmproj offload, and startup timeout, and added regression coverage for CLI routing, backend construction, and OCR backend lifecycle.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

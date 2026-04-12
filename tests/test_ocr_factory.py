@@ -47,6 +47,17 @@ def test_create_ocr_backend_routes_hf(monkeypatch) -> None:
     )
 
 
-def test_create_ocr_backend_rejects_unimplemented_llama_server() -> None:
-    with pytest.raises(NotImplementedError, match="llama-server OCR backend is not implemented yet"):
-        create_ocr_backend(OCRBackendConfig(engine=OCREngine.LLAMA_SERVER, model_id="unused"))
+def test_create_ocr_backend_routes_llama_server(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_create_llama_backend(config: OCRBackendConfig):
+        captured["config"] = config
+        return sentinel
+
+    monkeypatch.setattr(factory, "_create_llama_server_backend", fake_create_llama_backend)
+
+    result = create_ocr_backend(OCRBackendConfig(engine=OCREngine.LLAMA_SERVER, model_id="unused"))
+
+    assert result is sentinel
+    assert captured["config"].engine is OCREngine.LLAMA_SERVER
