@@ -13,7 +13,7 @@ Implement the experimentally validated feature set into the product code without
 - Step 5. Optional Faster OCR Path: completed
 - Step 6. Default Detector Integration: completed
 - Step 7. Conservative Correction Integration: completed
-- Step 8. `HF` Optional Fallback Wiring: pending
+- Step 8. `HF` Optional Fallback Wiring: completed
 - Step 9. Minimal Regression Probe Wiring: pending
 - Step 10. Final Documentation Pass: pending
 
@@ -27,4 +27,5 @@ Implement the experimentally validated feature set into the product code without
 - Step 5 completed: added the retained optional faster OCR mode with non-tall `ocr-fast` routing, tall retained `ocr` routing, batch-by-branch execution, and original-order restoration before SRT assembly.
 - Step 6 completed: added retained hybrid detector manifest generation with non-tall `ocr-fast` alternate-read comparisons, tall `detector` repeat-drift comparisons, and disagreement labeling for correction-ready downstream use.
 - Step 7 completed: added opt-in conservative correction on `convert`, retained anchor-only merge behavior, local Qwen correction wiring, and Gemini tall-row prompt gating on top of the retained hybrid detector trigger surface.
-- Next focus: Step 8 `HF` optional fallback wiring.
+- Step 8 completed: moved the heavyweight HF runtime behind an explicit optional dependency contract while keeping `hf` as a simple explicit fallback engine.
+- Next focus: Step 9 minimal regression probe wiring.

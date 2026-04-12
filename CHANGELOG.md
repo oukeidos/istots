@@ -22,6 +22,8 @@
 - Step 7: added opt-in conservative correction on `convert` using the retained hybrid detector as the default disagreement trigger surface.
 - Ported the retained anchor-only merge logic into product code, added local Qwen correction wiring with the retained strict runtime recipe, and added Gemini tall-row prompt gating.
 - Added correction manifest export and regression coverage for anchor merge, correction CLI validation, and detector-to-correction pipeline composition.
+- Step 8: moved the heavyweight HF runtime behind an explicit optional dependency contract while keeping `hf` as the explicit fallback engine.
+- Updated HF-facing CLI and runtime messaging to point users to the optional HF install path and added packaging regression coverage for the retained fallback dependency posture.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

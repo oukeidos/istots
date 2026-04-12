@@ -81,7 +81,7 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         "--engine",
         choices=("llama-server", "hf"),
         default="llama-server",
-        help="OCR engine selection (default: llama-server)",
+        help="OCR engine selection (default: llama-server). `hf` is the explicit optional fallback path.",
     )
     parser.add_argument(
         "--device",
@@ -94,7 +94,8 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MODEL_ID,
         help=(
             "HF model ID or local HF model path for `--engine hf`. "
-            "If a model ID is given, it must already exist in local cache from `istots setup`."
+            "If a model ID is given, it must already exist in local cache from `istots setup`. "
+            "The HF engine also requires the optional HF runtime."
         ),
     )
     parser.add_argument(

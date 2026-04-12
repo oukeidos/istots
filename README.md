@@ -14,7 +14,13 @@
 uv sync
 ```
 
-Download model once:
+Install the optional HF fallback runtime only if you plan to use `--engine hf`:
+
+```bash
+uv sync --extra hf
+```
+
+Download retained runtime assets once:
 
 ```bash
 uv run istots setup
@@ -26,6 +32,8 @@ This prepares the retained local setup assets:
 - the GGUF OCR runtime model
 - the base GGUF mmproj
 - the derived `min_pixels=32768` GGUF mmproj
+
+`uv sync` prepares the retained primary `llama-server` path. The `hf` engine remains available as an explicit optional fallback and requires `uv sync --extra hf`.
 
 ## Usage
 
@@ -58,6 +66,7 @@ Global flags:
 `convert` flags:
 
 - `--engine {llama-server,hf}`: choose the OCR engine. Default is `llama-server`. Use `hf` for the explicit fallback path.
+- `--engine hf` requires the optional HF runtime from `uv sync --extra hf`.
 - `--device {auto,cpu,gpu}`: choose the inference device. `auto` prefers GPU and falls back to CPU.
 - `--model-id MODEL_ID`: HF model ID or local HF model path for `--engine hf`.
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
@@ -146,6 +155,12 @@ The doctor checks:
 - `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
 - `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
 - `uv run istots setup` does not provision local corrector assets or Gemini credentials. Local Qwen model/mmproj paths and Gemini API access remain explicit user-supplied inputs.
+
+## HF Fallback
+
+- `llama-server` remains the primary OCR path.
+- `hf` remains an explicit optional fallback engine rather than an automatic routing mode.
+- The `hf` engine requires the optional HF runtime: `uv sync --extra hf`.
 
 ## Language Support
 

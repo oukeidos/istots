@@ -27,7 +27,7 @@ class HFPaddleOCRVLBackend:
         except Exception as exc:
             raise RuntimeError(
                 "transformers/torch are required for OCR inference. "
-                "Install project dependencies first."
+                "Install the optional HF runtime first, for example: `uv sync --extra hf`."
             ) from exc
 
         # PaddleOCR-VL models can emit a known RoPE validation warning

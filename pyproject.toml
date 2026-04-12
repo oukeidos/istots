@@ -11,6 +11,10 @@ dependencies = [
     "huggingface-hub",
     "numpy>=1.26.0",
     "Pillow>=10.4.0",
+]
+
+[project.optional-dependencies]
+hf = [
     "torch>=2.6.0",
     "transformers>=5.0.0",
 ]
