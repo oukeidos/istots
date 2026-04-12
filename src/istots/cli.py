@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from istots import __version__
-from istots.model_store import DEFAULT_MODEL_ID
+from istots.model_store import DEFAULT_GGUF_MODEL_ID, DEFAULT_MODEL_ID
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -56,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.register_subcommand_parser(setup)
     _add_setup_arguments(setup)
+
+    materialize_mmproj = subparsers.add_parser(
+        "materialize-mmproj",
+        help="Create a min_pixels-tuned llama.cpp mmproj GGUF from an official base mmproj",
+    )
+    parser.register_subcommand_parser(materialize_mmproj)
+    _add_materialize_mmproj_arguments(materialize_mmproj)
 
     return parser
 
@@ -131,7 +138,15 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--model-id",
         default=DEFAULT_MODEL_ID,
-        help=f"Model ID to download (default: {DEFAULT_MODEL_ID})",
+        help=f"HF model ID to download for the retained fallback path (default: {DEFAULT_MODEL_ID})",
+    )
+    parser.add_argument(
+        "--gguf-model-id",
+        default=DEFAULT_GGUF_MODEL_ID,
+        help=(
+            "GGUF model ID to download for the llama.cpp path "
+            f"(default: {DEFAULT_GGUF_MODEL_ID})"
+        ),
     )
     parser.add_argument(
         "--models-dir",
@@ -145,7 +160,92 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Re-download even when local cache already exists",
+        help="Re-download and re-materialize even when local cache already exists",
+    )
+    parser.add_argument(
+        "--support-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Local support cache root for pinned gguf-py snapshot fallback "
+            "(default: ~/.cache/istots/support or ISTOTS_SUPPORT_DIR)."
+        ),
+    )
+    parser.add_argument(
+        "--gguf-py-base-url",
+        default=None,
+        help=(
+            "Override source root for the pinned gguf-py snapshot fallback. "
+            "Accepts an exact raw URL root or a local directory for offline setup."
+        ),
+    )
+    parser.add_argument(
+        "--gguf-source-mode",
+        choices=("auto-download", "installed", "auto"),
+        default="auto",
+        help=(
+            "How setup should source the known-good gguf implementation while "
+            "materializing the derived mmproj: auto (default), installed, or auto-download."
+        ),
+    )
+    parser.add_argument(
+        "--min-pixels",
+        type=int,
+        default=32768,
+        help="clip.vision.image_min_pixels value for the derived llama.cpp mmproj (default: 32768)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs",
+    )
+
+
+def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("base_mmproj", type=Path, help="Official base mmproj GGUF path")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Derived mmproj output path (default: alongside base as *.minpix32768.gguf)",
+    )
+    parser.add_argument(
+        "--min-pixels",
+        type=int,
+        default=32768,
+        help="clip.vision.image_min_pixels value for the derived mmproj (default: 32768)",
+    )
+    parser.add_argument(
+        "--support-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Local support cache root for pinned gguf-py snapshot "
+            "(default: ~/.cache/istots/support or ISTOTS_SUPPORT_DIR)."
+        ),
+    )
+    parser.add_argument(
+        "--gguf-py-base-url",
+        default=None,
+        help=(
+            "Override source root for the pinned gguf-py snapshot. "
+            "Accepts an exact raw URL root or a local directory for offline setup."
+        ),
+    )
+    parser.add_argument(
+        "--gguf-source-mode",
+        choices=("auto-download", "installed", "auto"),
+        default="auto",
+        help=(
+            "How to source the known-good gguf implementation: "
+            "auto (default: installed first, then exact pinned auto-download fallback), "
+            "installed, or auto-download."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the derived mmproj if it already exists",
     )
     parser.add_argument(
         "--quiet",
@@ -158,7 +258,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return argv
 
-    known_commands = {"convert", "setup"}
+    known_commands = {"convert", "setup", "materialize-mmproj"}
     first = argv[0]
     if first in known_commands or first.startswith("-"):
         return argv
@@ -175,6 +275,8 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "setup":
         return run_setup(args)
+    if args.command == "materialize-mmproj":
+        return run_materialize_mmproj(args)
     if args.command == "convert":
         return run_convert(args)
 
@@ -185,20 +287,66 @@ def run(argv: Sequence[str] | None = None) -> int:
 def run_setup(args: argparse.Namespace) -> int:
     configure_logging(verbose=not args.quiet)
 
-    from istots.model_store import download_model
+    from istots.model_store import setup_default_runtime_assets
 
     try:
-        path = download_model(
-            model_id=args.model_id,
+        artifacts = setup_default_runtime_assets(
+            hf_model_id=args.model_id,
+            gguf_model_id=args.gguf_model_id,
             models_dir=args.models_dir,
             force=args.force,
+            support_dir=args.support_dir,
+            gguf_py_base_url=args.gguf_py_base_url,
+            gguf_source_mode=args.gguf_source_mode,
+            min_pixels=args.min_pixels,
         )
     except Exception as exc:
         logging.getLogger(__name__).error("setup failed: %s", exc)
         return 1
 
     if not args.quiet:
-        logging.getLogger(__name__).info("model downloaded to: %s", path)
+        logging.getLogger(__name__).info("HF fallback model downloaded to: %s", artifacts.hf_model_dir)
+        logging.getLogger(__name__).info("GGUF runtime assets downloaded to: %s", artifacts.gguf_model_dir)
+        logging.getLogger(__name__).info("GGUF model path: %s", artifacts.gguf_model_path)
+        logging.getLogger(__name__).info("GGUF base mmproj path: %s", artifacts.gguf_mmproj_path)
+        logging.getLogger(__name__).info(
+            "GGUF derived mmproj path: %s",
+            artifacts.gguf_mmproj_minpix32768_path,
+        )
+    return 0
+
+
+def run_materialize_mmproj(args: argparse.Namespace) -> int:
+    configure_logging(verbose=not args.quiet)
+
+    from istots.llama_mmproj import materialize_mmproj, read_mmproj_min_pixels
+
+    try:
+        output = materialize_mmproj(
+            base_mmproj=args.base_mmproj,
+            output_path=args.output,
+            min_pixels=args.min_pixels,
+            support_dir=args.support_dir,
+            gguf_py_base_url=args.gguf_py_base_url,
+            gguf_source_mode=args.gguf_source_mode,
+            force=args.force,
+        )
+        applied_value = read_mmproj_min_pixels(
+            output,
+            support_dir=args.support_dir,
+            gguf_py_base_url=args.gguf_py_base_url,
+            gguf_source_mode=args.gguf_source_mode,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error("mmproj materialization failed: %s", exc)
+        return 1
+
+    if not args.quiet:
+        logging.getLogger(__name__).info(
+            "materialized mmproj: %s (clip.vision.image_min_pixels=%s)",
+            output,
+            applied_value,
+        )
     return 0
 
 

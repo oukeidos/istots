@@ -41,6 +41,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--furigana-mask" in captured.out
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
+    assert "--min-pixels MIN_PIXELS" in captured.out
     assert "--force" in captured.out
 
 
@@ -52,6 +53,100 @@ def test_run_routes_setup(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "run_setup", fake_setup)
     assert cli.run(["setup", "--model-id", "abc/def"]) == 11
+
+
+def test_run_routes_materialize_mmproj(monkeypatch) -> None:
+    def fake_materialize(args) -> int:
+        assert args.command == "materialize-mmproj"
+        assert args.base_mmproj == Path("base.gguf")
+        assert args.min_pixels == 32768
+        assert args.gguf_source_mode == "auto"
+        return 17
+
+    monkeypatch.setattr(cli, "run_materialize_mmproj", fake_materialize)
+    assert cli.run(["materialize-mmproj", "base.gguf"]) == 17
+
+
+def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> None:
+    artifacts = SimpleNamespace(
+        hf_model_dir=tmp_path / "hf_model",
+        gguf_model_dir=tmp_path / "gguf_model",
+        gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
+        gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
+        gguf_mmproj_minpix32768_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_setup_default_runtime_assets(**kwargs):
+        captured.update(kwargs)
+        return artifacts
+
+    monkeypatch.setattr(
+        model_store,
+        "setup_default_runtime_assets",
+        fake_setup_default_runtime_assets,
+    )
+
+    rc = cli.run(
+        [
+            "setup",
+            "--model-id",
+            "hf/model",
+            "--gguf-model-id",
+            "gguf/model",
+            "--models-dir",
+            str(tmp_path),
+            "--gguf-source-mode",
+            "installed",
+            "--min-pixels",
+            "32768",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["hf_model_id"] == "hf/model"
+    assert captured["gguf_model_id"] == "gguf/model"
+    assert captured["models_dir"] == tmp_path
+    assert captured["gguf_source_mode"] == "installed"
+    assert captured["min_pixels"] == 32768
+
+
+def test_run_materialize_mmproj_applies_requested_value(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    output = tmp_path / "derived.gguf"
+
+    def fake_materialize_mmproj(**kwargs):
+        captured["materialize"] = kwargs
+        return output
+
+    def fake_read_mmproj_min_pixels(*args, **kwargs):
+        captured["read"] = {"args": args, "kwargs": kwargs}
+        return 32768
+
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    monkeypatch.setattr("istots.llama_mmproj.materialize_mmproj", fake_materialize_mmproj)
+    monkeypatch.setattr("istots.llama_mmproj.read_mmproj_min_pixels", fake_read_mmproj_min_pixels)
+
+    rc = cli.run(
+        [
+            "materialize-mmproj",
+            "base.gguf",
+            "--output",
+            str(output),
+            "--min-pixels",
+            "32768",
+            "--gguf-source-mode",
+            "installed",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["materialize"]["base_mmproj"] == Path("base.gguf")
+    assert captured["materialize"]["output_path"] == output
+    assert captured["materialize"]["gguf_source_mode"] == "installed"
+    assert captured["read"]["args"] == (output,)
 
 
 def test_run_routes_legacy_convert(monkeypatch) -> None:

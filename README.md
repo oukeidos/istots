@@ -20,6 +20,13 @@ Download model once:
 uv run istots setup
 ```
 
+This prepares the retained local setup assets:
+
+- the HF fallback OCR model
+- the GGUF OCR runtime model
+- the base GGUF mmproj
+- the derived `min_pixels=32768` GGUF mmproj
+
 ## Usage
 
 ```bash
@@ -53,9 +60,14 @@ Global flags:
 
 `setup` flags:
 
-- `--model-id MODEL_ID`: model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5`.
+- `--model-id MODEL_ID`: HF fallback model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5`.
+- `--gguf-model-id GGUF_MODEL_ID`: GGUF model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5-GGUF`.
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
-- `--force`: re-download even when the local cache already exists.
+- `--support-dir SUPPORT_DIR`: local support cache root for pinned gguf snapshot fallback. Default is `~/.cache/istots/support` or `ISTOTS_SUPPORT_DIR`.
+- `--gguf-py-base-url GGUF_PY_BASE_URL`: override source root for the pinned gguf snapshot fallback.
+- `--gguf-source-mode {auto-download,installed,auto}`: choose whether setup uses an installed pinned `gguf` package or the pinned snapshot fallback.
+- `--min-pixels MIN_PIXELS`: `clip.vision.image_min_pixels` value for the derived GGUF mmproj. Default is `32768`.
+- `--force`: re-download and re-materialize even when local assets already exist.
 - `--quiet`: suppress progress logs.
 
 Optional environment variables:
@@ -63,6 +75,9 @@ Optional environment variables:
 ```bash
 # Override model cache root
 export ISTOTS_MODELS_DIR="$HOME/.cache/istots/models"
+
+# Override support cache root for pinned gguf snapshot fallback
+export ISTOTS_SUPPORT_DIR="$HOME/.cache/istots/support"
 ```
 
 ## Language Support
