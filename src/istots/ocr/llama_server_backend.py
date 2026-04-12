@@ -125,21 +125,19 @@ class LlamaServerOCRBackend:
         )
 
     def recognize(self, image: Image.Image) -> str:
-        return self.recognize_batch([image])[0]
-
-    def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
-        if not images:
-            return []
-        texts = [
+        return normalize_ocr_text(
             request_llama_server_ocr(
                 self._launch_spec,
                 image,
                 max_new_tokens=self.max_new_tokens,
                 prompt_text=self.prompt_text,
             )
-            for image in images
-        ]
-        return [normalize_ocr_text(text) for text in texts]
+        )
+
+    def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
+        if not images:
+            return []
+        return [self.recognize(image) for image in images]
 
     def clear_device_cache(self) -> None:
         return None

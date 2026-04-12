@@ -91,7 +91,7 @@ Global flags:
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
 - `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
-- `--batch-size BATCH_SIZE`: OCR batch size. Default is `1`. If GPU OOM occurs, `istots` reduces the batch size and retries.
+- OCR requests run sequentially, one subtitle image at a time.
 - `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
 - `--runtime-profile {auto,cpu,memory}`: retained `llama-server` runtime profile. Default is `auto`.
 - `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
@@ -110,7 +110,7 @@ Global flags:
 - `--corrector-port PORT`: override the retained corrector port for `--corrector qwen-local`.
 - `--corrector-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
 - `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
-- `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current process environment.
+- `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current shell environment.
 - `--corrector-thinking-level LEVEL`: optional Gemini thinking level for `--corrector gemini`.
 - `--corrector-media-resolution LEVEL`: optional Gemini media resolution level for `--corrector gemini`.
 - `--corrector-cache-dir PATH`: optional cache directory for `--corrector gemini`.
@@ -163,7 +163,7 @@ Credential resolution order for `--corrector gemini` is:
 
 1. local keyring
 2. the configured `.env` file path
-3. the current process environment
+3. the current shell environment
 
 Recommended `.env` template:
 

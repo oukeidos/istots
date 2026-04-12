@@ -53,34 +53,24 @@ class HFPaddleOCRVLBackend:
         self._model.eval()
 
     def recognize(self, image: Image.Image) -> str:
-        return self.recognize_batch([image])[0]
-
-    def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
-        if not images:
-            return []
-
         prompt = OCR_PROMPT
 
-        conversations = [
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ]
-            for image in images
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
         ]
 
         inputs = self._processor.apply_chat_template(
-            conversations,
+            [conversation],
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            padding=True,
         )
 
         model_inputs = {}
@@ -99,8 +89,13 @@ class HFPaddleOCRVLBackend:
 
         prompt_len = model_inputs["input_ids"].shape[-1]
         generated_tokens = output_tokens[:, prompt_len:]
-        texts = self._processor.batch_decode(generated_tokens, skip_special_tokens=True)
-        return [normalize_ocr_text(text) for text in texts]
+        text = self._processor.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+        return normalize_ocr_text(text)
+
+    def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
+        if not images:
+            return []
+        return [self.recognize(image) for image in images]
 
     def clear_device_cache(self) -> None:
         if self._torch_device != "cuda" or not hasattr(self, "_torch") or not hasattr(self._torch, "cuda"):

@@ -38,7 +38,6 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
     assert "Subcommand Details:" in captured.out
-    assert "--batch-size BATCH_SIZE" in captured.out
     assert "--engine {llama-server,hf}" in captured.out
     assert "--ocr-mode {default,fast}" in captured.out
     assert "--furigana-mask" in captured.out
@@ -998,6 +997,7 @@ def test_run_auth_status_prints_source_summary(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "keyring: configured (test.backend)" in captured.out
     assert ".env path: configured (/tmp/test.env)" in captured.out
+    assert "shell env: missing" in captured.out
     assert "effective source: keyring" in captured.out
 
 

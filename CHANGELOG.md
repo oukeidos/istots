@@ -37,6 +37,8 @@
 - Added regression coverage for managed stale-runtime cleanup, managed state teardown, and reserved-port conflict detection, and verified the real Qwen local correction slice leaves no `llama-server` process behind after completion.
 - Post-plan credential/setup expansion: added opt-in `setup --with-qwen-corrector` provisioning for the retained default Qwen corrector asset pair from `unsloth/Qwen3.5-35B-A3B-GGUF`.
 - Added `auth gemini` key management with hidden-input keyring storage, configured `.env` fallback paths, keyring-first credential resolution, and regression coverage for the new setup/auth surfaces.
+- Post-plan OCR execution cleanup: removed the product batch-execution surface and now run OCR sequentially per subtitle image across convert, smoke, detector, and corrector flows.
+- Removed the `--batch-size` CLI surface, simplified the OCR pipeline and backend execution path, and added regression coverage for the sequential-only behavior.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

@@ -13,23 +13,6 @@ from istots.corrector import CorrectorConfig, CorrectorMode
 from istots.ocr import OCRBackendConfig, OCREngine
 
 
-def test_is_oom_error_detects_common_message() -> None:
-    exc = RuntimeError("CUDA out of memory. Tried to allocate 1.00 GiB")
-    assert pipeline._is_oom_error(exc)  # noqa: SLF001
-
-
-def test_is_oom_error_detects_exception_name() -> None:
-    class FakeOutOfMemoryError(Exception):
-        pass
-
-    assert pipeline._is_oom_error(FakeOutOfMemoryError("boom"))  # noqa: SLF001
-
-
-def test_is_oom_error_ignores_unrelated_error() -> None:
-    exc = RuntimeError("model input shape mismatch")
-    assert not pipeline._is_oom_error(exc)  # noqa: SLF001
-
-
 def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     output_srt = tmp_path / "output.srt"
@@ -120,7 +103,6 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
         pipeline.convert_sup_to_srt(
             input_sup=input_sup,
             output_srt=output_srt,
-            batch_size=1,
             verbose=False,
         )
 
@@ -498,7 +480,6 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
         output_srt=output_srt,
         engine=OCREngine.LLAMA_SERVER,
         ocr_mode="fast",
-        batch_size=4,
         srt_policy="overlap",
         verbose=False,
     )
@@ -506,7 +487,8 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
     assert result.processed_count == 3
     assert created_roles == ["ocr-fast", "ocr"]
     assert branch_calls == [
-        ("ocr-fast", [(20, 2), (30, 3)]),
+        ("ocr-fast", [(20, 2)]),
+        ("ocr-fast", [(30, 3)]),
         ("ocr", [(2, 20)]),
     ]
     assert [entry.text for entry in written_entries] == ["fast-1", "default-1", "fast-2"]
@@ -567,12 +549,14 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
             self.role = role
             live_count += 1
             max_live_count = max(max_live_count, live_count)
+            self.calls = 0
 
         def recognize_batch(self, images):
+            self.calls += 1
             if self.role == "ocr":
-                return ["CTRL", "BASE-WIDE", "BASE-TALL"]
+                return [["CTRL"], ["BASE-WIDE"], ["BASE-TALL"]][self.calls - 1]
             if self.role == "ocr-fast":
-                return ["CTRL", "ALT-WIDE"]
+                return [["CTRL"], ["ALT-WIDE"]][self.calls - 1]
             if self.role == "detector":
                 return ["ALT-TALL"]
             raise AssertionError(f"unexpected role {self.role}")
@@ -604,7 +588,6 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
         output_srt=output_srt,
         engine=OCREngine.LLAMA_SERVER,
         detector_output=detector_output,
-        batch_size=4,
         srt_policy="overlap",
         verbose=False,
     )
@@ -722,7 +705,6 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
             local_model_path=tmp_path / "qwen.gguf",
             local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
         ),
-        batch_size=4,
         srt_policy="overlap",
         verbose=False,
     )
@@ -820,7 +802,6 @@ def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_p
             mode=CorrectorMode.GEMINI,
             output_path=corrector_output,
         ),
-        batch_size=4,
         srt_policy="overlap",
         verbose=False,
     )

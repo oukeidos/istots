@@ -154,12 +154,6 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Max generated tokens per subtitle image",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="OCR batch size (default: 1)",
-    )
-    parser.add_argument(
         "--ocr-mode",
         choices=("default", "fast"),
         default="default",
@@ -345,12 +339,6 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=256,
         help="Max generated tokens per subtitle image",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1,
-        help="OCR batch size (default: 1)",
     )
     parser.add_argument(
         "--ocr-mode",
@@ -904,9 +892,9 @@ def run_auth(args: argparse.Namespace) -> int:
             else:
                 print(".env path: missing")
             if status.process_env_configured:
-                print(f"process env: configured ({status.process_env_name})")
+                print(f"shell env: configured ({status.process_env_name})")
             else:
-                print("process env: missing")
+                print("shell env: missing")
             print(f"effective source: {status.effective_source or 'missing'}")
             return 0
         if args.auth_action == "env-file":
@@ -1015,8 +1003,6 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--max-items must be a positive integer")
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be a positive integer")
-    if args.batch_size <= 0:
-        parser.error("--batch-size must be a positive integer")
     if args.ocr_mode == "fast" and args.engine != "llama-server":
         parser.error("--ocr-mode fast requires --engine llama-server")
     if args.ocr_mode == "fast" and args.runtime_port is not None:
@@ -1083,7 +1069,6 @@ def run_smoke(args: argparse.Namespace) -> int:
         models_dir=args.models_dir,
         max_items=None,
         max_new_tokens=args.max_new_tokens,
-        batch_size=args.batch_size,
         ocr_mode=args.ocr_mode,
         runtime_profile=args.runtime_profile,
         llama_server_path=args.llama_server_path,
@@ -1231,7 +1216,6 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             model_id=model_id,
             models_dir=args.models_dir,
             max_items=args.max_items,
-            batch_size=args.batch_size,
             max_new_tokens=args.max_new_tokens,
             local_files_only=args.engine == "hf",
             enable_furigana_mask=args.furigana_mask,

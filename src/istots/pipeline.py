@@ -78,7 +78,6 @@ def convert_sup_to_srt(
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     models_dir: Path | None = None,
     max_items: int | None = None,
-    batch_size: int = 1,
     max_new_tokens: int = 256,
     local_files_only: bool = True,
     enable_furigana_mask: bool = False,
@@ -132,7 +131,6 @@ def convert_sup_to_srt(
 
     if verbose:
         logger.info("ocr mode: %s", normalized_ocr_mode)
-        logger.info("requested OCR batch size: %d", batch_size)
         logger.info("furigana masking: %s", "enabled" if enable_furigana_mask else "disabled")
         logger.info("srt policy: %s", srt_policy)
 
@@ -143,7 +141,6 @@ def convert_sup_to_srt(
             preferred_device=preferred_device,
             backend_config=backend_config,
             max_items=max_items,
-            batch_size=batch_size,
             enable_furigana_mask=enable_furigana_mask,
             srt_policy=srt_policy,
             verbose=verbose,
@@ -157,12 +154,17 @@ def convert_sup_to_srt(
             detector_output=detector_output,
             corrector_config=corrector_config,
             max_items=max_items,
-            batch_size=batch_size,
             enable_furigana_mask=enable_furigana_mask,
             srt_policy=srt_policy,
             verbose=verbose,
         )
 
+    prepared_inputs = _collect_prepared_ocr_inputs(
+        input_sup,
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        verbose=verbose,
+    )
     with _managed_ocr_backend(
         backend_config,
         preferred_device=preferred_device,
@@ -170,117 +172,29 @@ def convert_sup_to_srt(
     ) as (active_backend, device):
         if verbose:
             logger.info("using device: %s", device)
-        segments: list[_WindowTextSegment] = []
-        processed = 0
-        total = 0
-        effective_batch_size = max(1, batch_size)
-        frame_buffer = []
-        prepared_images = None
-
-        def on_total(count: int) -> None:
-            nonlocal total
-            total = count
-            if verbose:
-                logger.info("parsed SUP OCR inputs: total=%d", total)
-
-        def flush_buffer() -> None:
-            nonlocal processed, effective_batch_size, frame_buffer
-            pending = list(frame_buffer)
-            frame_buffer = []
-
-            while pending:
-                chunk_size = min(effective_batch_size, len(pending))
-                chunk = pending[:chunk_size]
-
-                start_index = processed + 1
-                end_index = processed + len(chunk)
-                if verbose:
-                    logger.info(
-                        "OCR batch started: %s batch=%d",
-                        _progress_span_label(start_index, end_index, total),
-                        chunk_size,
-                    )
-
-                ocr_started = time.monotonic()
-                try:
-                    if prepared_images is not None:
-                        start_offset = start_index - 1
-                        images = prepared_images[start_offset : start_offset + len(chunk)]
-                    else:
-                        images = [frame.image for frame in chunk]
-                    texts = active_backend.recognize_batch(images)
-                except Exception as exc:
-                    if _is_oom_error(exc) and chunk_size > 1:
-                        reduced = max(1, chunk_size // 2)
-                        effective_batch_size = min(effective_batch_size, reduced)
-                        logger.warning(
-                            "OCR OOM at batch=%d. Retrying with batch=%d.",
-                            chunk_size,
-                            effective_batch_size,
-                        )
-                        active_backend.clear_device_cache()
-                        continue
-                    raise
-
-                ocr_elapsed = time.monotonic() - ocr_started
-                if len(texts) != len(chunk):
-                    raise RuntimeError(
-                        "OCR backend returned mismatched result count: "
-                        f"expected={len(chunk)} actual={len(texts)}"
-                    )
-
-                for frame, text in zip(chunk, texts):
-                    processed += 1
-                    if not text:
-                        if verbose:
-                            logger.info("OCR finished: %s skipped (empty)", _progress_label(processed, total))
-                        continue
-
-                    segment = _build_window_text_segment(frame, text)
-                    if segment is not None:
-                        segments.append(segment)
-
-                    if verbose:
-                        logger.info("OCR finished: %s accepted", _progress_label(processed, total))
-
-                if verbose:
-                    logger.info(
-                        "OCR batch finished: %s batch=%d elapsed=%.2fs",
-                        _progress_label(processed, total),
-                        chunk_size,
-                        ocr_elapsed,
-                    )
-                pending = pending[chunk_size:]
-
-        if enable_furigana_mask:
-            frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
-            if verbose:
-                logger.info("building furigana mask statistics by orientation")
-            prepared_images = [result.image for result in build_furigana_masks([frame.image for frame in frames])]
-            frame_iterable = frames
-        else:
-            frame_iterable = iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total)
-
-        for frame in frame_iterable:
-            frame_buffer.append(frame)
-            if len(frame_buffer) >= effective_batch_size:
-                flush_buffer()
-
-        if frame_buffer:
-            flush_buffer()
-
+        texts = _recognize_prepared_inputs(
+            prepared_inputs,
+            backend=active_backend,
+            verbose=verbose,
+            branch_label="default",
+        )
+        segments = [
+            segment
+            for item, text in zip(prepared_inputs, texts, strict=True)
+            if (segment := _build_window_text_segment(item.frame, text)) is not None
+        ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
         write_srt(entries, output_srt)
         if verbose:
             logger.info(
                 "conversion finished: processed=%d written=%d output=%s",
-                processed,
+                len(prepared_inputs),
                 len(entries),
                 output_srt,
             )
         return ConversionResult(
             output_srt=output_srt,
-            processed_count=processed,
+            processed_count=len(prepared_inputs),
             written_count=len(entries),
             device_used=device,
         )
@@ -293,7 +207,6 @@ def _convert_sup_to_srt_fast(
     preferred_device: str,
     backend_config: OCRBackendConfig,
     max_items: int | None,
-    batch_size: int,
     enable_furigana_mask: bool,
     srt_policy: str,
     verbose: bool,
@@ -346,7 +259,6 @@ def _convert_sup_to_srt_fast(
             branch_texts = _recognize_prepared_inputs(
                 branch_inputs,
                 backend=backend,
-                batch_size=batch_size,
                 verbose=verbose,
                 branch_label=branch_label,
             )
@@ -384,7 +296,6 @@ def _convert_sup_to_srt_default_with_detector(
     detector_output: Path | None,
     corrector_config: CorrectorConfig | None,
     max_items: int | None,
-    batch_size: int,
     enable_furigana_mask: bool,
     srt_policy: str,
     verbose: bool,
@@ -405,7 +316,6 @@ def _convert_sup_to_srt_default_with_detector(
         baseline_texts = _recognize_prepared_inputs(
             prepared_inputs,
             backend=baseline_backend,
-            batch_size=batch_size,
             verbose=verbose,
             branch_label="default",
         )
@@ -414,7 +324,6 @@ def _convert_sup_to_srt_default_with_detector(
         prepared_inputs,
         baseline_texts,
         detector_backend_config=replace(backend_config, device=device),
-        batch_size=batch_size,
         verbose=verbose,
     )
     if detector_output is not None:
@@ -431,7 +340,6 @@ def _convert_sup_to_srt_default_with_detector(
             current_device=device,
             runtime_binary_path=backend_config.binary_path,
             runtime_host=backend_config.host,
-            batch_size=batch_size,
             verbose=verbose,
         )
         for record in correction_records:
@@ -575,7 +483,6 @@ def _recognize_prepared_inputs(
     prepared_inputs: list[_PreparedOCRInput],
     *,
     backend: Any,
-    batch_size: int,
     verbose: bool,
     branch_label: str,
 ) -> list[str]:
@@ -583,72 +490,42 @@ def _recognize_prepared_inputs(
         return []
 
     recognized: list[str] = []
-    processed = 0
-    effective_batch_size = max(1, batch_size)
-    pending = list(prepared_inputs)
     total = len(prepared_inputs)
-
-    while pending:
-        chunk_size = min(effective_batch_size, len(pending))
-        chunk = pending[:chunk_size]
-
-        start_index = processed + 1
-        end_index = processed + len(chunk)
+    for processed, item in enumerate(prepared_inputs, start=1):
         if verbose:
             logger.info(
-                "OCR batch started: branch=%s %s batch=%d",
-                branch_label,
-                _progress_span_label(start_index, end_index, total),
-                chunk_size,
-            )
-
-        ocr_started = time.monotonic()
-        try:
-            texts = backend.recognize_batch([item.image for item in chunk])
-        except Exception as exc:
-            if _is_oom_error(exc) and chunk_size > 1:
-                reduced = max(1, chunk_size // 2)
-                effective_batch_size = min(effective_batch_size, reduced)
-                logger.warning(
-                    "OCR OOM at branch=%s batch=%d. Retrying with batch=%d.",
-                    branch_label,
-                    chunk_size,
-                    effective_batch_size,
-                )
-                backend.clear_device_cache()
-                continue
-            raise
-
-        ocr_elapsed = time.monotonic() - ocr_started
-        if len(texts) != len(chunk):
-            raise RuntimeError(
-                "OCR backend returned mismatched result count: "
-                f"expected={len(chunk)} actual={len(texts)}"
-            )
-
-        for text in texts:
-            processed += 1
-            if verbose:
-                state = "accepted" if text else "skipped (empty)"
-                logger.info(
-                    "OCR finished: branch=%s %s %s",
-                    branch_label,
-                    _progress_label(processed, total),
-                    state,
-                )
-        recognized.extend(texts)
-
-        if verbose:
-            logger.info(
-                "OCR batch finished: branch=%s %s batch=%d elapsed=%.2fs",
+                "OCR started: branch=%s %s",
                 branch_label,
                 _progress_label(processed, total),
-                chunk_size,
-                ocr_elapsed,
             )
-        pending = pending[chunk_size:]
+        ocr_started = time.monotonic()
+        text = _recognize_single_image(backend, item.image)
+        recognized.append(text)
+        if verbose:
+            state = "accepted" if text else "skipped (empty)"
+            logger.info(
+                "OCR finished: branch=%s %s %s elapsed=%.2fs",
+                branch_label,
+                _progress_label(processed, total),
+                state,
+                time.monotonic() - ocr_started,
+            )
 
     return recognized
+
+
+def _recognize_single_image(backend: Any, image: Image.Image) -> str:
+    if hasattr(backend, "recognize"):
+        return backend.recognize(image)
+    if hasattr(backend, "recognize_batch"):
+        texts = backend.recognize_batch([image])
+        if len(texts) != 1:
+            raise RuntimeError(
+                "OCR backend returned mismatched result count for single-image recognition: "
+                f"expected=1 actual={len(texts)}"
+            )
+        return texts[0]
+    raise RuntimeError("OCR backend does not provide recognize() or recognize_batch().")
 
 
 def _build_hybrid_detector_records(
@@ -656,7 +533,6 @@ def _build_hybrid_detector_records(
     baseline_texts: list[str],
     *,
     detector_backend_config: OCRBackendConfig,
-    batch_size: int,
     verbose: bool,
 ) -> list[HybridDetectorRecord]:
     wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
@@ -696,7 +572,6 @@ def _build_hybrid_detector_records(
             option_texts = _recognize_prepared_inputs(
                 branch_inputs,
                 backend=backend,
-                batch_size=batch_size,
                 verbose=verbose,
                 branch_label=f"detector-{branch_name}",
             )
@@ -736,7 +611,6 @@ def _apply_conservative_corrections(
     current_device: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
-    batch_size: int,
     verbose: bool,
 ) -> list[ConservativeCorrectionRecord]:
     if not detector_records:
@@ -751,7 +625,6 @@ def _apply_conservative_corrections(
             current_device=current_device,
             runtime_binary_path=runtime_binary_path,
             runtime_host=runtime_host,
-            batch_size=batch_size,
             verbose=verbose,
         )
     if corrector_config.mode is CorrectorMode.GEMINI:
@@ -773,7 +646,6 @@ def _apply_local_qwen_corrections(
     current_device: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
-    batch_size: int,
     verbose: bool,
 ) -> list[ConservativeCorrectionRecord]:
     if corrector_config.local_model_path is None or corrector_config.local_mmproj_path is None:
@@ -811,7 +683,6 @@ def _apply_local_qwen_corrections(
         corrector_texts = _recognize_prepared_inputs(
             correction_inputs,
             backend=corrector_backend,
-            batch_size=batch_size,
             verbose=verbose,
             branch_label="corrector-qwen-local",
         )
@@ -1054,23 +925,3 @@ def _progress_label(current: int, total: int) -> str:
         return f"{current}/{total} ({_percent(current, total):.1f}%)"
     return f"{current}"
 
-
-def _progress_span_label(start: int, end: int, total: int) -> str:
-    if total > 0:
-        return f"{start}-{end}/{total}"
-    return f"{start}-{end}"
-
-
-def _is_oom_error(exc: Exception) -> bool:
-    name = type(exc).__name__.lower()
-    if "outofmemory" in name:
-        return True
-
-    message = str(exc).lower()
-    patterns = (
-        "out of memory",
-        "cuda out of memory",
-        "cublas_status_alloc_failed",
-        "hip error out of memory",
-    )
-    return any(pattern in message for pattern in patterns)
