@@ -1,298 +1,425 @@
 # IStoTS: Image Subtitles to Text Subtitles
 
-`istots` converts Blu-ray `SUP` subtitles into `SRT` using OCR with
-`PaddleOCR-VL-1.5`. Supports preprocessing for masking furigana in Japanese subtitles.
+`istots` converts Blu-ray `SUP` subtitles into `SRT`. The main stack is
+PaddleOCR-VL GGUF through `llama-server`, with an optional Hugging Face OCR
+fallback, an optional local Qwen3.5 correction route, and an optional cloud
+Gemini correction route.
 
-## Requirements
-
-- Python 3.11+
-- `uv`
+Beyond plain OCR, two features matter most. First, `istots` can detect likely
+error groups and send only those rows to a stronger, more expensive correction
+model instead of rewriting the whole subtitle stream. Second, it can apply a
+furigana masking pass before OCR to suppress small ruby-like side annotations
+that often become noise in downstream text workflows such as translation or
+other subtitle reformatting.
 
 ## Setup
+
+Start by cloning the repository and entering the project directory:
+
+```bash
+git clone https://github.com/oukeidos/istots.git
+cd istots
+```
+
+You then need Python 3.11 or newer and `uv`. For the primary OCR path, you
+also need a working `llama-server` binary on the host system. `istots` does
+not install `llama-server` for you. It looks for the binary from
+`--llama-server-path`, `ISTOTS_LLAMA_SERVER_PATH`, `PATH`, and a fallback
+local path in that order. For `llama-server` installation, follow the official
+`llama.cpp` documentation. The project README covers the main install paths,
+including prebuilt binaries and source builds, and the wiki includes platform
+notes:
+
+- <https://github.com/ggml-org/llama.cpp>
+- <https://github.com/ggml-org/llama.cpp/wiki>
+
+With the repository checked out, install the Python dependencies:
 
 ```bash
 uv sync
 ```
 
-Install the optional HF fallback runtime only if you plan to use `--engine hf`:
+Then prepare the default local runtime assets:
+
+```bash
+uv run istots setup
+```
+
+This installs the core Python dependencies and prepares the default local
+runtime assets. The setup command downloads the retained PaddleOCR-VL GGUF
+model, the base mmproj, the derived `min_pixels=32768` mmproj used by the
+fast OCR branch, and the local files needed for the optional Hugging Face
+fallback.
+
+If you want to run actual OCR inference through `--engine hf`, install the HF
+runtime dependencies as well:
 
 ```bash
 uv sync --extra hf
 ```
 
-Download retained runtime assets once:
+The HF route does not depend on `llama.cpp` or `llama-server` for OCR
+execution. It is useful as a fallback when you want a pure HF runtime, but it
+is usually much slower than the primary `llama-server` path. It also does not
+support the full feature surface: detector and correction features remain tied
+to the `llama-server` route.
+
+If you want `istots` to provision the default local Qwen corrector assets, run
+setup with:
 
 ```bash
-uv run istots setup
 uv run istots setup --with-qwen-corrector
 ```
 
-This prepares the retained local setup assets:
+The current default local Qwen corrector assets are
+`unsloth/Qwen3.5-35B-A3B-GGUF`, with
+`Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` as the model file and
+`mmproj-BF16.gguf` as the default mmproj file.
 
-- the HF fallback OCR model
-- the GGUF OCR runtime model
-- the base GGUF mmproj
-- the derived `min_pixels=32768` GGUF mmproj
-- optionally, the retained local Qwen corrector GGUF and mmproj assets
+Gemini API key setup is handled separately through `istots auth gemini`. A
+typical first step for the cloud corrector is:
 
-`uv sync` prepares the retained primary `llama-server` path. The `hf` engine remains available as an explicit optional fallback and requires `uv sync --extra hf`.
+```bash
+uv run istots auth gemini set
+```
 
-`uv run istots setup` covers the retained primary OCR path, the optional faster OCR path, the default detector path, and the explicit HF fallback assets. Add `--with-qwen-corrector` to also provision the retained local Qwen corrector assets from `unsloth/Qwen3.5-35B-A3B-GGUF` using `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` and `mmproj-BF16.gguf`. Gemini credentials are managed separately through `istots auth gemini ...`.
+## Basic Use
 
-## Quick Start
+The simplest conversion command is:
 
 ```bash
 uv run istots input.sup output.srt
 ```
 
-Runtime preflight:
+This runs the default PaddleOCR-VL `llama-server` path, reads subtitle images
+from `input.sup`, and writes a plain `SRT` file to `output.srt`. By default,
+the run does not enable detector manifests, correction, or furigana masking.
+
+If you want the fallback HF OCR route instead, run:
 
 ```bash
-uv run istots doctor runtime paddle
+uv run istots input.sup output.srt --engine hf
 ```
 
-Quick validation on the retained default sample:
+## Core Features
+
+### OCR
+
+`llama-server` is the default OCR route. `--engine hf` remains in the project
+mainly as a fallback for users who do not want to install or manage the
+`llama.cpp` runtime. It is useful for accessibility and easier setup on some
+systems, but it is not the preferred route. In the retained personal
+experiment notes, `llama-server` was consistently faster, with roughly a `2x`
+to `3x` advantage over HF on GPU and about a `4x` to `5x` advantage over HF
+`float32` on CPU. For practical CPU-only use, `llama-server` is therefore
+strongly recommended. The HF route also remains a reduced fallback surface:
+detector and correction features stay on the `llama-server` path.
+
+The fast OCR mode works by changing the image budget, not the prompt. The key
+knob is `min_pixels`. On the `llama-server` route, the wide-row fast branch
+uses a derived `min_pixels=32768` mmproj. On the HF route, it uses a
+processor-side `min_pixels=32768` override. Tall rows stay on the default path
+because the lower `min_pixels` setting is much less reliable there. In the
+retained experiment notes, the adopted hybrid branch rule was about `1.35x`
+faster than the all-default path while staying close to parity in the reviewed
+slice. These figures come from personal experiment notes, not from a broad
+benchmark.
 
 ```bash
-uv run istots smoke
-uv run istots smoke --output-dir ./artifacts/smoke
-uv run istots smoke --ocr-mode fast
-uv run istots smoke --corrector qwen-local
-uv run istots smoke --corrector qwen-local --qwen-no-mmproj-offload
-uv run istots smoke --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
+uv run istots input.sup output.srt --ocr-mode fast
+uv run istots input.sup output.srt --engine hf --ocr-mode fast
+```
+
+### Automatic Error Correction
+
+The correction workflow is deliberately narrow. Instead of sending the whole
+subtitle stream to a stronger model, `istots` repeats OCR on the same base
+model and uses the disagreements as a detector. In practice, this means
+rerunning the same OCR path under slightly different conditions, then sending
+only the differing rows to a stronger but more expensive local or cloud model
+for re-OCR. The final merge is conservative and tries to replace only the
+ambiguous segment instead of rewriting the whole row.
+
+The detector exists because repeated OCR reads are not perfectly stable.
+Under `llama-server`, repeating the default read or switching to the lower
+`min_pixels` read can produce drift. In small-sample tests, that drift was not
+mostly random. Many rows kept falling into the same small set of alternate
+readings, often just a two-way split. On one 100-row sample, `22 / 100` rows
+drifted under repeated `temp=0.0` reads, but only `5 / 100` were meaningfully
+different, and most of the drifted rows collapsed into simple binary variants.
+The same pattern appeared again on a larger 238-row drift-focused set, where
+most drifting rows still collapsed into recurring binary variants. That is the
+core idea behind the detector: treat recurring disagreement as a signal that a
+row is uncertain enough to justify escalation. In small-scale tests, this
+worked well enough to be useful rather than theoretical. On a reviewed default
+correction set, the baseline output was accepted on `66.2%` of rows, while the
+same rows rose to `91.5%` with local Qwen3.5-35B-A3B and `100%` with Gemini 3.1 Pro Preview.
+These figures come from small reviewed slices, not from a broad benchmark.
+
+In normal use, you enable a corrector and let `istots` handle the detector
+stage automatically. The local corrector path uses a retained Qwen3.5 recipe
+through `llama-server`. The current default local model is
+`Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` from
+`unsloth/Qwen3.5-35B-A3B-GGUF`:
+
+```bash
+uv run istots input.sup output.srt --corrector qwen-local
+```
+
+If the default Qwen assets are not installed, you can point at explicit local
+files:
+
+```bash
+uv run istots input.sup output.srt \
+  --corrector qwen-local \
+  --corrector-model-path /path/to/qwen.gguf \
+  --corrector-mmproj-path /path/to/qwen-mmproj.gguf
+```
+
+The Gemini path uses the same detector-triggered structure, but the actual
+correction request goes to the Gemini API. The current default Gemini model is
+`gemini-3.1-pro-preview`:
+
+```bash
 uv run istots auth gemini set
-uv run istots smoke --corrector gemini
+uv run istots input.sup output.srt --corrector gemini
 ```
 
-Common convert examples:
+The detector has two main scopes. The default scope is narrower and is the
+recommended everyday setting. The wider scope adds one more repeat-read
+surface, so it catches more uncertain rows at the cost of more correction
+work. In the reviewed notes, widening the detector increased the reviewed row
+count from `71` to `87`, or about `1.23x`. On those added rows, both Qwen and
+Gemini still performed well, so the wider mode is useful when recall matters
+more than cost.
+
+There is also an optional dominant-family add-on. This is a kanji-specific
+feature, not a general text rule. It looks for a repeated kanji confusion
+family and then expands the detector to include more rows from that family. It
+was designed that way because the idea works best when the script has a large
+character inventory, as kanji does. If the character set is much smaller, the
+same strategy would likely push too many weak candidates into the detector and
+produce noisy over-expansion. Even with kanji, the trade-off is much steeper.
+In the reviewed notes, turning the add-on on expanded the reviewed row count
+from `87` to `205`, or about `2.36x`, so the correction workload grows much
+faster than the extra recall. That is why it remains an optional recall-heavy
+mode rather than part of the default detector.
+
+```bash
+uv run istots input.sup output.srt \
+  --detector-mode wider \
+  --detector-family-addon
+```
+
+The local Qwen route uses a comparatively large model, so it may require a
+host with enough VRAM or RAM and, on some systems, host-specific runtime
+settings. If local correction fails to start cleanly, check the Qwen runtime
+options before assuming the correction path itself is broken.
+
+### Furigana Masking
+
+Japanese Blu-ray subtitles often contain small side annotations that are
+useful for a viewer but can become noise once the subtitle text is reused in
+other workflows such as translation, editing, or format conversion.
+`--furigana-mask` runs an image heuristic before OCR and tries to suppress
+those regions. Concretely, it binarizes the subtitle image, extracts connected
+components, estimates whether the text flow is mainly horizontal or vertical,
+groups components into line-like clusters, and then looks for thinner
+side-aligned fragments that resemble furigana rather than main subtitle text.
+Those selected regions are masked before OCR. It is an image heuristic, not a
+linguistic parser, so it is not guaranteed to help on every file. The
+practical way to use it is comparative: run the same subtitle set with and
+without masking and keep the result that is more useful for the downstream
+text workflow you care about.
 
 ```bash
 uv run istots input.sup output.srt --furigana-mask
-uv run istots input.sup output.srt --srt-policy overlap
-uv run istots input.sup output.srt --ocr-mode fast
-uv run istots input.sup output.srt --detector-output detector.jsonl
-uv run istots input.sup output.srt --detector-output detector.jsonl --detector-family-addon
-uv run istots input.sup output.srt --corrector qwen-local
-uv run istots input.sup output.srt --corrector qwen-local --detector-family-addon
-uv run istots input.sup output.srt --corrector qwen-local --qwen-no-mmproj-offload
-uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
-uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
 
-For the full CLI surface, run `uv run istots --help`.
+## Validation and Support Tools
 
-Global flags:
-
-- `--help`: show CLI help, including subcommand details.
-- `--version`: show the installed `istots` version.
-
-`convert` flags:
-
-- `--engine {llama-server,hf}`: choose the OCR engine. Default is `llama-server`. Use `hf` for the explicit fallback path.
-- `--engine hf` requires the optional HF runtime from `uv sync --extra hf`.
-- `--hf-device {auto,cpu,gpu}`: HF-only device selection. `auto` prefers CUDA when available and otherwise uses CPU.
-- `--hf-dtype {auto,float32,float16,bfloat16}`: HF-only torch dtype policy. `auto` prefers BF16 on supported GPU or CPU paths and otherwise falls back conservatively.
-- `--model-id MODEL_ID`: HF model ID or local HF model path for `--engine hf`.
-- `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
-- `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
-- `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
-- OCR requests run sequentially, one subtitle image at a time.
-- `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path.
-- `--engine llama-server --ocr-mode fast`: uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
-- `--engine hf --ocr-mode fast`: uses retained default HF reading on tall rows and retained `min_pixels=32768` only on non-tall rows.
-- `--paddle-profile {auto,cpu}`: PaddleOCR-VL `llama-server` runtime profile. Default is `auto`.
-- `--paddle-profile auto` leaves low-level hardware selection to `llama-server`.
-- `--paddle-profile cpu` forces PaddleOCR-VL `llama-server` CPU execution.
-- `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
-- `--paddle-port PORT`: override the shared PaddleOCR-VL `llama-server` port used by `convert` or `smoke`.
-- `--paddle-threads N`: override PaddleOCR-VL `llama-server` thread count.
-- `--paddle-threads-batch N`: override PaddleOCR-VL `llama-server` batch thread count.
-- `--paddle-gpu-layers N`: override PaddleOCR-VL `llama-server` GPU layer count.
-- `--paddle-no-mmproj-offload`: disable `mmproj` offload for PaddleOCR-VL `llama-server`.
-- `--paddle-startup-timeout-sec SECONDS`: PaddleOCR-VL `llama-server` startup timeout.
-- `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
-- `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
-- `--detector-family-addon`: opt into the retained dominant-family agreement-row add-on on top of the default detector surface. Requires `--engine llama-server`, `--ocr-mode default`, and either `--detector-output` or `--corrector`.
-- `--corrector {off,qwen-local,gemini}`: attach the retained conservative anchor-only corrector to `convert`. Requires `--engine llama-server` with `--ocr-mode default`.
-- `--corrector-output CORRECTOR_OUTPUT`: optional JSONL path for conservative correction records.
-- `--corrector-model-path CORRECTOR_MODEL_PATH`: optional explicit local GGUF corrector model path override for `--corrector qwen-local`.
-- `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: optional explicit local GGUF corrector mmproj path override for `--corrector qwen-local`.
-- `--qwen-profile {auto,cpu}`: Qwen3.5 `llama-server` runtime profile for `--corrector qwen-local`.
-- `--qwen-port PORT`: override the Qwen3.5 `llama-server` port for `--corrector qwen-local`.
-- `--qwen-threads N`: override Qwen3.5 `llama-server` thread count.
-- `--qwen-threads-batch N`: override Qwen3.5 `llama-server` batch thread count.
-- `--qwen-gpu-layers N`: override Qwen3.5 `llama-server` GPU layer count.
-- `--qwen-no-mmproj-offload`: force `--no-mmproj-offload` for `--corrector qwen-local`.
-- `--qwen-ctx-size N`: override Qwen3.5 `llama-server` context size.
-- `--qwen-n-predict N`: override Qwen3.5 `llama-server` `-n` value.
-- `--qwen-reasoning MODE`: override the Qwen3.5 `llama-server` reasoning mode.
-- `--qwen-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
-- `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
-- `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current shell environment.
-- `--corrector-thinking-level LEVEL`: optional Gemini thinking level for `--corrector gemini`.
-- `--corrector-media-resolution LEVEL`: optional Gemini media resolution level for `--corrector gemini`.
-- `--corrector-cache-dir PATH`: optional cache directory for `--corrector gemini`.
-- `--srt-policy {safe,overlap}`: SRT output policy. `safe` merges simultaneous windows into one cue. `overlap` keeps overlapping cues separate.
-- `--quiet`: suppress progress logs.
-- `--force`: overwrite an existing output `.srt` file without prompting.
-
-`setup` flags:
-
-- `--model-id MODEL_ID`: HF fallback model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5`.
-- `--gguf-model-id GGUF_MODEL_ID`: GGUF model ID to download. Default is `PaddlePaddle/PaddleOCR-VL-1.5-GGUF`.
-- `--with-qwen-corrector`: also download the retained local Qwen corrector assets.
-- `--qwen-corrector-model-id MODEL_ID`: Qwen corrector model repository. Default is `unsloth/Qwen3.5-35B-A3B-GGUF`.
-- `--qwen-corrector-model-filename FILENAME`: Qwen GGUF filename to download. Default is `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf`.
-- `--qwen-corrector-mmproj-filename FILENAME`: Qwen mmproj filename to download. Default is `mmproj-BF16.gguf`.
-- `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
-- `--support-dir SUPPORT_DIR`: local support cache root for pinned gguf snapshot fallback. Default is `~/.cache/istots/support` or `ISTOTS_SUPPORT_DIR`.
-- `--gguf-py-base-url GGUF_PY_BASE_URL`: override source root for the pinned gguf snapshot fallback.
-- `--gguf-source-mode {auto-download,installed,auto}`: choose whether setup uses an installed pinned `gguf` package or the pinned snapshot fallback.
-- `--min-pixels MIN_PIXELS`: `clip.vision.image_min_pixels` value for the derived GGUF mmproj. Default is `32768`.
-- `--force`: re-download and re-materialize even when local assets already exist.
-- `--quiet`: suppress progress logs.
-
-Optional environment variables:
+`doctor` is structured around the actual product surfaces. `doctor runtime
+paddle` checks the retained PaddleOCR-VL runtime family. `doctor runtime qwen`
+checks the local Qwen corrector runtime family. `doctor auth gemini` checks
+Gemini API key availability without printing the key. `doctor workflow ...` runs a
+real workflow smoke on an input SUP file that you specify explicitly.
 
 ```bash
-# Override model cache root
-export ISTOTS_MODELS_DIR="$HOME/.cache/istots/models"
-
-# Override support cache root for pinned gguf snapshot fallback
-export ISTOTS_SUPPORT_DIR="$HOME/.cache/istots/support"
-
-# Override the local auth config path that stores the configured Gemini .env file path
-export ISTOTS_AUTH_CONFIG_PATH="$HOME/.config/istots/auth.json"
+uv run istots doctor runtime paddle
+uv run istots doctor runtime qwen
+uv run istots doctor auth gemini
+uv run istots doctor workflow default --input-sup /path/to/input.sup
+uv run istots doctor workflow corrector-gemini --input-sup /path/to/input.sup
 ```
 
-## Gemini Auth
+`smoke` is a convenience wrapper over the same retained product surfaces used
+by `convert`. It writes an SRT and, when relevant, detector and correction
+manifests into a temporary directory or a directory you choose.
 
-Use `auth gemini` to manage Gemini credentials without printing the API key in the terminal.
+```bash
+uv run istots smoke --input-sup /path/to/input.sup
+uv run istots smoke --input-sup /path/to/input.sup --ocr-mode fast
+uv run istots smoke --input-sup /path/to/input.sup --corrector qwen-local
+```
+
+Gemini API keys are managed through `auth gemini`. The recommended default is
+keyring-backed storage, because the key is kept out of shell history and out
+of project files. The simplest setup is:
 
 ```bash
 uv run istots auth gemini set
-uv run istots auth gemini delete
 uv run istots auth gemini status
-uv run istots auth gemini env-file set /path/to/.env
-uv run istots auth gemini env-file clear
 ```
 
-Credential resolution order for `--corrector gemini` is:
-
-1. local keyring
-2. the configured `.env` file path
-3. the current shell environment
-
-Recommended `.env` template:
+If you prefer an `.env` file, create one with the standard key name:
 
 ```dotenv
-GEMINI_API_KEY=your-gemini-api-key-here
+GEMINI_API_KEY=your_api_key_here
 ```
 
-`GEMINI_API_KEY` is the standard key name. `GOOGLE_API_KEY` remains accepted as a compatibility alias when the default key name is in use.
+Then point `istots` at that file:
 
-## Quick Validation
+```bash
+uv run istots auth gemini env-file set /path/to/.env
+uv run istots auth gemini status
+```
 
-Use `smoke` when you want the retained fast regression path instead of a full manual convert command.
+This is useful when you already manage local secrets through `.env` files or
+when keyring is unavailable on the host.
 
-- `smoke` defaults to `../test/sample.sup`, which is the retained minimum sample for required smoke tests.
-- If `--output-dir` is omitted, `istots` writes smoke artifacts to a temporary directory.
-- The default smoke path writes a smoke SRT plus the retained hybrid detector manifest.
-- `--detector-family-addon` extends the default smoke detector surface with the retained dominant-family kanji add-on.
-- `uv run istots smoke --ocr-mode fast` exercises the optional faster OCR path on the same sample.
-- `--corrector qwen-local` or `--corrector gemini` adds a correction manifest alongside the smoke SRT.
+You can also provide the key through the current shell environment instead of
+storing it through `istots`. For a one-off shell session:
 
-Recommended order for a new machine or runtime profile:
+```bash
+export GEMINI_API_KEY=your_api_key_here
+uv run istots input.sup output.srt --corrector gemini
+```
 
-1. `uv sync`
-2. `uv run istots setup`
-3. `uv run istots doctor runtime paddle`
-4. `uv run istots smoke`
-5. `uv run istots input.sup output.srt`
+For a more persistent shell setup on `bash`, add the same export line to
+`~/.bashrc` or `~/.profile`, then reload the shell:
 
-## Runtime Doctor
+```bash
+echo 'export GEMINI_API_KEY=your_api_key_here' >> ~/.bashrc
+source ~/.bashrc
+```
 
-Use `doctor` when you need structured runtime, auth, or workflow validation:
+If you do not want to use the default variable name, `--corrector-api-key-env`
+lets you point `istots` at a different environment variable.
 
-- `uv run istots doctor runtime paddle`
-- `uv run istots doctor runtime qwen --qwen-no-mmproj-offload`
-- `uv run istots doctor auth gemini`
-- `uv run istots doctor workflow default --input-sup /path/to/input.sup`
-- `uv run istots doctor workflow wider --input-sup /path/to/input.sup`
-- `uv run istots doctor workflow corrector-qwen --input-sup /path/to/input.sup`
-- `uv run istots doctor workflow corrector-gemini --input-sup /path/to/input.sup`
+Gemini API key resolution for `--corrector gemini` currently follows this
+order: local keyring first, configured `.env` file second, and current shell
+environment last.
 
-Structured doctor scopes:
+## Command Reference
 
-- `runtime paddle`: checks the retained PaddleOCR-VL runtime family used by `ocr`, `ocr-fast`, and `detector`.
-- `runtime qwen`: checks the retained local Qwen corrector runtime family.
-- `auth gemini`: checks Gemini credential availability without printing the key.
-- `workflow ...`: runs a real retained workflow smoke on the input SUP you provide.
+This section is intentionally later in the document. The earlier sections
+explain the product model first. For exact syntax, `uv run istots --help`
+remains the authoritative CLI reference.
 
-Workflow doctor intentionally has no built-in default SUP. Pass `--input-sup` explicitly.
+### `convert`
 
-## Runtime Profiles
+`convert` is the main command. The positional arguments are `input.sup` and
+`output.srt`. The most important switches are `--engine` for backend choice,
+`--ocr-mode` for default versus fast OCR scheduling, `--furigana-mask` for
+pre-OCR masking, `--detector-output` and `--detector-mode` for disagreement
+inspection, `--detector-family-addon` for the recall-oriented kanji-family
+surface, `--corrector` and `--corrector-output` for conservative correction,
+and `--srt-policy`, `--max-items`, `--max-new-tokens`, `--force`, and
+`--quiet` for execution control.
 
-- `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
-- `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
+The `llama-server` path exposes model-family runtime overrides rather than a
+single global low-level surface. PaddleOCR-VL tuning uses `--paddle-profile`,
+`--paddle-port`, `--paddle-threads`, `--paddle-threads-batch`,
+`--paddle-gpu-layers`, `--paddle-no-mmproj-offload`, and
+`--paddle-startup-timeout-sec`. Qwen corrector tuning uses `--qwen-profile`,
+`--qwen-port`, `--qwen-threads`, `--qwen-threads-batch`,
+`--qwen-gpu-layers`, `--qwen-no-mmproj-offload`, `--qwen-ctx-size`,
+`--qwen-n-predict`, `--qwen-reasoning`, and
+`--qwen-startup-timeout-sec`. Shared runtime infrastructure still uses
+`--llama-server-path`.
 
-Advanced `llama-server` overrides remain available on `convert` and `smoke` through model-family surfaces:
+The HF path has its own explicit hardware controls. `--hf-device` selects
+`auto`, `cpu`, or `gpu`. `--hf-dtype` selects `auto`, `float32`, `float16`,
+or `bfloat16`. `--model-id` selects the HF model or a local HF model path.
 
-- PaddleOCR-VL: `--paddle-profile`, `--paddle-port`, `--paddle-threads`, `--paddle-threads-batch`, `--paddle-gpu-layers`, `--paddle-no-mmproj-offload`, `--paddle-startup-timeout-sec`
-- Qwen3.5: `--qwen-profile`, `--qwen-port`, `--qwen-threads`, `--qwen-threads-batch`, `--qwen-gpu-layers`, `--qwen-no-mmproj-offload`, `--qwen-ctx-size`, `--qwen-n-predict`, `--qwen-reasoning`, `--qwen-startup-timeout-sec`
-- Shared infrastructure: `--llama-server-path`
-- The structured `doctor` surface uses the same model-family override shapes.
+### `setup`
 
-## Host Patterns
+`setup` prepares local model artifacts. In common use, the important flags are
+`--with-qwen-corrector` when you also want the default local Qwen assets,
+`--model-id` for the HF fallback model, `--gguf-model-id` for the primary
+Paddle GGUF repository, and `--models-dir` or `--support-dir` when you want
+custom local storage locations. The more technical flags
+`--gguf-py-base-url`, `--gguf-source-mode`, `--min-pixels`, and `--force`
+exist for reproducibility and explicit materialization control.
 
-- GPU-capable host: start with the default `auto` profile and let `llama-server` choose its own hardware path.
-- CPU-only host: use `--paddle-profile cpu`. If you also use `--corrector qwen-local`, set `--qwen-profile cpu` separately.
+### `smoke`
 
-## OCR Modes
+`smoke` is a thin convenience layer over the same retained product surfaces
+used by `convert`. It accepts `--input-sup`, `--output-dir`, `--ocr-mode`,
+`--no-detector`, `--detector-mode`, `--detector-family-addon`,
+`--corrector`, `--furigana-mask`, `--srt-policy`, `--force`, and `--quiet`,
+plus the same Paddle and Qwen runtime override families used by `convert`.
 
-- `default`: the retained primary OCR path. All rows use the retained `ocr` runtime role.
-- `fast`: the retained optional faster OCR path. `istots` partitions rows by image ratio, sends non-tall rows to `ocr-fast`, sends tall rows to retained `ocr`, and restores the original row order before SRT assembly.
-- On `--engine hf`, `fast` uses the same partition rule but applies retained `min_pixels=32768` only on the non-tall branch while keeping tall rows on the default HF read.
-- The retained experiment evidence treated HF `min_pixels=32768` as a conditional speed knob because tall / vertical rows can collapse, so the product HF fast path keeps the tall/default gate.
+### `doctor`
 
-## Detector Output
+`doctor` uses a structured two-part form. The runtime targets are `paddle` and
+`qwen`. The auth target is `gemini`. The workflow targets are `default`,
+`wider`, `corrector-qwen`, and `corrector-gemini`, and all workflow checks
+require `--input-sup`. Structured doctor runs also accept the relevant Paddle
+or Qwen model-family runtime overrides and `--api-key-env` for Gemini auth and
+workflow checks.
 
-- `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
-- `--detector-mode default|wider`: keeps the default detector surface by default, or adds a wider default-repeat detector slice when `wider` is selected.
-- Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
-- Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
-- `--detector-family-addon` keeps the selected detector surface intact and then adds an opt-in dominant-family recall layer on top of it.
-- The add-on only considers repeated single-character kanji families observed in the currently selected detector disagreements.
-- For add-on rows, `alternate_text` is a synthetic family-pair swap rather than an extra OCR read, and the manifest marks it as `alternate_source_kind = family_pair_swap`.
-- In the first-wave product surface, detector behavior is retained on the `llama-server` path and is not mirrored onto the explicit `hf` fallback path.
+### `auth`
 
-## Conservative Correction
+`auth gemini` manages Gemini API keys through `set`, `delete`, `status`,
+`env-file set`, and `env-file clear`. The command is intentionally narrow: it
+stores or clears the API key, reports whether a usable key source exists, and
+does not print the key itself.
 
-- Correction remains convert-attached, opt-in, and conservative anchor-only.
-- The retained hybrid detector disagreement surface is the default correction trigger surface.
-- `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
-- If the retained local Qwen corrector assets were provisioned with `uv run istots setup --with-qwen-corrector`, `--corrector qwen-local` can run without explicit model or mmproj path overrides.
-- `--qwen-no-mmproj-offload` is available as an opt-in Qwen local override and is not forced by default.
-- `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
-- `uv run istots auth gemini set` stores the Gemini API key in the local keyring, and `uv run istots auth gemini env-file set /path/to/.env` configures the fallback `.env` path.
+### `materialize-mmproj`
 
-## HF Fallback
+`materialize-mmproj` exists for direct control of the derived Paddle mmproj
+artifact. Most users do not need it because `istots setup` already runs the
+materializer. The command takes a positional `base_mmproj` path and uses
+`--output`, `--min-pixels`, `--support-dir`, `--gguf-py-base-url`,
+`--gguf-source-mode`, `--force`, and `--quiet` for explicit low-level control.
 
-- `llama-server` remains the primary OCR path.
-- `hf` remains an explicit optional fallback engine rather than an automatic routing mode.
-- The `hf` engine requires the optional HF runtime: `uv sync --extra hf`.
+## Environment Variables
+
+The most relevant environment variables are `ISTOTS_LLAMA_SERVER_PATH` for the
+`llama-server` binary, `ISTOTS_MODELS_DIR` for the local model cache root,
+`ISTOTS_SUPPORT_DIR` for the pinned `gguf` support cache,
+`ISTOTS_AUTH_CONFIG_PATH` for the local Gemini auth config file, and
+`GEMINI_API_KEY` for shell-based Gemini API key resolution.
 
 ## Language Support
 
-The default OCR model is multilingual. PaddleOCR officially documents the
-PaddleOCR-VL model series as supporting 109 languages.
+Language support should be read in two layers. The main OCR engine and the
+correction models do not serve the same role. PaddleOCR-VL is the primary OCR
+engine and is responsible for the first-pass subtitle read. Qwen3.5 and
+Gemini are used only as narrow correction models on detector-selected rows, so
+their language coverage matters as multilingual correction capability rather
+than as the primary OCR guarantee.
 
-For the full official language coverage list, see:
-https://www.paddleocr.ai/main/en/version3.x/algorithm/PaddleOCR-VL/PaddleOCR-VL.html
+For the main OCR engine, PaddleOCR documents PaddleOCR-VL as supporting 109
+languages. Its published list covers a broad mix of Latin, Cyrillic, Arabic,
+Devanagari, and East Asian languages, including English, Chinese, Korean,
+Japanese, Thai, Arabic, Hindi, French, German, Spanish, Portuguese, Russian,
+and many others.
 
-## Japanese Furigana Handling
+The local Qwen3.5 corrector belongs to the multilingual Qwen3.5 family, which
+Qwen describes as supporting 201 languages and dialects. In this project,
+that broad coverage is useful as multilingual correction support, not as a
+replacement for the primary OCR engine.
 
-- This is a Japanese-specific text cleanup issue.
-- `istots` provides an optional pre-OCR furigana masking mode via `--furigana-mask`.
-- The furigana masking path is heuristic and disabled by default.
-- Recommended workflow: compare OCR results with and without `--furigana-mask` on your subtitle set.
+Gemini should be read the same way. Google documents Gemini as trained to work
+with 38 languages, including English, Chinese, Korean, Japanese, Arabic,
+Hindi, French, German, Spanish, Portuguese, Russian, Thai, Turkish,
+Ukrainian, Vietnamese, and others. Here too, the role is correction on
+detector-selected rows, not the first OCR pass.
+
+Official references:
+
+- PaddleOCR-VL language list: <https://www.paddleocr.ai/main/en/version3.x/algorithm/PaddleOCR-VL/PaddleOCR-VL.html>
+- Qwen3.5 multilingual support: <https://qwen.ai/blog?id=qwen3.5>
+- Gemini model language support: <https://ai.google.dev/gemini-api/docs/models>
