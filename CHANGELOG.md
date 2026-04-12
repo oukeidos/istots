@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] - 2026-04-12
+- Step 1: introduced an OCR engine boundary with shared backend contracts and a factory that separates engine selection from the conversion pipeline while keeping the current HF runtime behavior intact.
+- Generalized the product-facing compute surface from `cuda/cpu` to `gpu/cpu`, with backend-specific device mapping handled internally.
+- Added regression coverage for OCR engine selection, backend initialization fallback, device mapping, and CLI help output.
+
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.
 - Implemented a multi-window PGS subtitle pipeline with window-aware OCR, debug/export tooling, GUI inspection, and selectable `safe`/`overlap` SRT output policies.

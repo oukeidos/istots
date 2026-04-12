@@ -7,7 +7,7 @@ from typing import Sequence
 
 from PIL import Image
 
-from istots.device import pick_torch_dtype
+from istots.device import pick_torch_dtype, to_torch_device
 
 OCR_PROMPT = "OCR:"
 ROPE_WARNING_LOGGER = "transformers.modeling_rope_utils"
@@ -39,6 +39,7 @@ class HFPaddleOCRVLBackend:
             self.model_id,
             local_files_only=self.local_files_only,
         )
+        self._torch_device = to_torch_device(self.device)
         if hasattr(self._processor, "tokenizer") and hasattr(self._processor.tokenizer, "padding_side"):
             self._processor.tokenizer.padding_side = "left"
         elif hasattr(self._processor, "padding_side"):
@@ -48,7 +49,7 @@ class HFPaddleOCRVLBackend:
             dtype=pick_torch_dtype(self.device),
             local_files_only=self.local_files_only,
         )
-        self._model.to(self.device)
+        self._model.to(self._torch_device)
         self._model.eval()
 
     def recognize(self, image: Image.Image) -> str:
@@ -102,7 +103,7 @@ class HFPaddleOCRVLBackend:
         return [normalize_ocr_text(text) for text in texts]
 
     def clear_device_cache(self) -> None:
-        if self.device != "cuda" or not hasattr(self, "_torch") or not hasattr(self._torch, "cuda"):
+        if self._torch_device != "cuda" or not hasattr(self, "_torch") or not hasattr(self._torch, "cuda"):
             return
         if hasattr(self._torch.cuda, "empty_cache"):
             self._torch.cuda.empty_cache()

@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 
 from istots import pipeline
+from istots.ocr import OCRBackendConfig, OCREngine
 
 
 def test_is_oom_error_detects_common_message() -> None:
@@ -57,7 +58,7 @@ def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: P
         path.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
-    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
 
@@ -109,7 +110,7 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
         return iter([frame])
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
-    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
 
@@ -164,7 +165,7 @@ def test_convert_sup_to_srt_applies_furigana_mask_when_enabled(monkeypatch, tmp_
         return iter([frame])
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
-    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
     monkeypatch.setattr(
@@ -228,7 +229,7 @@ def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_p
         return [SimpleNamespace(image=image) for image in images]
 
     monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
-    monkeypatch.setattr(pipeline, "HFPaddleOCRVLBackend", FakeBackend)
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
     monkeypatch.setattr(pipeline, "build_furigana_masks", fake_build)
@@ -242,6 +243,116 @@ def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_p
 
     assert calls["count"] == 0
     assert FakeBackend.captured[0] is original
+
+
+def test_convert_sup_to_srt_builds_hf_backend_config(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    captured: list[OCRBackendConfig] = []
+
+    class FakeBackend:
+        def recognize_batch(self, images):
+            return []
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](0)
+        return iter([])
+
+    def fake_create_backend(config: OCRBackendConfig):
+        captured.append(config)
+        return FakeBackend()
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        model_id="org/model",
+        max_new_tokens=99,
+        local_files_only=False,
+        verbose=False,
+    )
+
+    assert captured == [
+        OCRBackendConfig(
+            engine=OCREngine.HF,
+            model_id="org/model",
+            device="cpu",
+            max_new_tokens=99,
+            local_files_only=False,
+        )
+    ]
+
+
+def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    calls: list[OCRBackendConfig] = []
+
+    class FakeBackend:
+        def recognize_batch(self, images):
+            return []
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](0)
+        return iter([])
+
+    def fake_create_backend(config: OCRBackendConfig):
+        calls.append(config)
+        if len(calls) == 1:
+            raise RuntimeError("GPU init failed")
+        return FakeBackend()
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "gpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        preferred_device="auto",
+        verbose=False,
+    )
+
+    assert result.device_used == "cpu"
+    assert calls == [
+        OCRBackendConfig(
+            engine=OCREngine.HF,
+            model_id="PaddlePaddle/PaddleOCR-VL-1.5",
+            device="gpu",
+            max_new_tokens=256,
+            local_files_only=True,
+        ),
+        OCRBackendConfig(
+            engine=OCREngine.HF,
+            model_id="PaddlePaddle/PaddleOCR-VL-1.5",
+            device="cpu",
+            max_new_tokens=256,
+            local_files_only=True,
+        ),
+    ]
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:

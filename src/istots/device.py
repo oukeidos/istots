@@ -5,20 +5,22 @@ from typing import Any
 
 def resolve_device(preferred: str) -> str:
     requested = preferred.lower()
-    if requested not in {"auto", "cpu", "cuda"}:
+    if requested == "cuda":
+        requested = "gpu"
+    if requested not in {"auto", "cpu", "gpu"}:
         raise ValueError(f"Unsupported device: {preferred}")
 
     if requested == "cpu":
         return "cpu"
-    if requested == "cuda":
-        if not has_cuda():
-            raise RuntimeError("CUDA device requested but no CUDA GPU is available.")
-        return "cuda"
+    if requested == "gpu":
+        if not has_gpu():
+            raise RuntimeError("GPU device requested but no compatible GPU is available.")
+        return "gpu"
 
-    return "cuda" if has_cuda() else "cpu"
+    return "gpu" if has_gpu() else "cpu"
 
 
-def has_cuda() -> bool:
+def has_gpu() -> bool:
     try:
         import torch
     except Exception:
@@ -29,10 +31,21 @@ def has_cuda() -> bool:
         return False
 
 
+def to_torch_device(device: str) -> str:
+    normalized = device.lower()
+    if normalized == "cuda":
+        normalized = "gpu"
+    if normalized == "gpu":
+        return "cuda"
+    if normalized == "cpu":
+        return "cpu"
+    raise ValueError(f"Unsupported torch device mapping: {device}")
+
+
 def pick_torch_dtype(device: str) -> Any:
     import torch
 
-    if device == "cuda":
+    if to_torch_device(device) == "cuda":
         if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
             return torch.bfloat16
         return torch.float16

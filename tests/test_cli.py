@@ -40,6 +40,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--batch-size BATCH_SIZE" in captured.out
     assert "--furigana-mask" in captured.out
     assert "--srt-policy {safe,overlap}" in captured.out
+    assert "--device {auto,cpu,gpu}" in captured.out
     assert "--force" in captured.out
 
 

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import time
 
 from istots.device import resolve_device
 from istots.furigana_mask import build_furigana_masks
-from istots.ocr.hf_backend import HFPaddleOCRVLBackend
+from istots.ocr import OCRBackendConfig, OCREngine, create_ocr_backend, normalize_ocr_engine
 from istots.srt_writer import SubtitleEntry, write_srt
 from istots.sup_reader import iter_sup_window_frames
 
@@ -39,6 +39,7 @@ def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
     preferred_device: str = "auto",
+    engine: str | OCREngine = OCREngine.HF,
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     max_items: int | None = None,
     batch_size: int = 1,
@@ -53,28 +54,36 @@ def convert_sup_to_srt(
 
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
     device = resolve_device(preferred_device)
+    backend_config = OCRBackendConfig(
+        engine=normalize_ocr_engine(engine),
+        model_id=model_id,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        local_files_only=local_files_only,
+    )
     backend = None
 
     try:
-        logger.info("loading OCR model: %s (device=%s)", model_id, device)
-        backend = HFPaddleOCRVLBackend(
-            model_id=model_id,
-            device=device,
-            max_new_tokens=max_new_tokens,
-            local_files_only=local_files_only,
+        logger.info(
+            "loading OCR backend: engine=%s model=%s device=%s",
+            backend_config.engine,
+            model_id,
+            device,
         )
+        backend = create_ocr_backend(backend_config)
     except Exception as exc:
-        if preferred_device == "auto" and device == "cuda":
+        if preferred_device.lower() == "auto" and device == "gpu":
             if verbose:
-                logger.warning("CUDA init failed (%s). Retrying with CPU.", exc)
+                logger.warning("GPU init failed (%s). Retrying with CPU.", exc)
             device = "cpu"
-            logger.info("loading OCR model: %s (device=%s)", model_id, device)
-            backend = HFPaddleOCRVLBackend(
-                model_id=model_id,
-                device=device,
-                max_new_tokens=max_new_tokens,
-                local_files_only=local_files_only,
+            backend_config = replace(backend_config, device=device)
+            logger.info(
+                "loading OCR backend: engine=%s model=%s device=%s",
+                backend_config.engine,
+                model_id,
+                device,
             )
+            backend = create_ocr_backend(backend_config)
         else:
             raise
 

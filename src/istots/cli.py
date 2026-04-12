@@ -65,7 +65,7 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("output_srt", type=Path, help="Output .srt file")
     parser.add_argument(
         "--device",
-        choices=("auto", "cpu", "cuda"),
+        choices=("auto", "cpu", "gpu"),
         default="auto",
         help="Device selection (default: auto)",
     )
