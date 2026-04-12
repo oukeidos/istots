@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from istots import pipeline
+from istots.corrector import CorrectorConfig, CorrectorMode
 from istots.ocr import OCRBackendConfig, OCREngine
 
 
@@ -610,6 +611,205 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
         "meaningful_difference",
         "meaningful_difference",
     ]
+
+
+def test_convert_sup_to_srt_correction_requires_llama_server(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    with pytest.raises(ValueError, match="correction requires the llama-server engine"):
+        pipeline.convert_sup_to_srt(
+            input_sup=input_sup,
+            output_srt=output_srt,
+            engine=OCREngine.HF,
+            corrector_config=CorrectorConfig(mode=CorrectorMode.GEMINI),
+            verbose=False,
+        )
+
+
+def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        )
+    ]
+
+    created_configs: list[OCRBackendConfig] = []
+    closed_roles: list[str] = []
+    written_entries = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            if self.role == "ocr":
+                return ["ABC"]
+            if self.role == "ocr-fast":
+                return ["ADC"]
+            if self.role == "corrector":
+                return ["AECZ"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            closed_roles.append(self.role)
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_configs.append(config)
+        return FakeBackend(config.role)
+
+    def fake_write_srt(entries, path):
+        written_entries.extend(entries)
+        path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.QWEN_LOCAL,
+            output_path=corrector_output,
+            local_model_path=tmp_path / "qwen.gguf",
+            local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
+        ),
+        batch_size=4,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in corrector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 1
+    assert result.correction_record_count == 1
+    assert result.correction_applied_count == 1
+    assert [config.role for config in created_configs] == ["ocr", "ocr-fast", "corrector"]
+    assert created_configs[2].prompt_text == (
+        "Transcribe only the visible subtitle text in the image. Output only the text. "
+        "Preserve line breaks. Do not explain."
+    )
+    assert created_configs[2].reasoning == "off"
+    assert created_configs[2].ctx_size == 4096
+    assert created_configs[2].no_mmproj_offload is True
+    assert [entry.text for entry in written_entries] == ["AEC"]
+    assert closed_roles == ["ocr-fast", "corrector", "ocr"]
+    assert manifest[0]["corrector_prompt_style"] == "strict_ocr_v1"
+    assert manifest[0]["conservative_merged_text"] == "AEC"
+    assert manifest[0]["applied_op_count"] == 1
+
+
+def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "gemini.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (2, 20), "white"),
+        )
+    ]
+
+    created_roles: list[str] = []
+    written_entries = []
+    gemini_calls: list[str] = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            if self.role == "ocr":
+                return ["ABC"]
+            if self.role == "detector":
+                return ["ADC"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_roles.append(config.role)
+        return FakeBackend(config.role)
+
+    def fake_write_srt(entries, path):
+        written_entries.extend(entries)
+        path.write_text("", encoding="utf-8")
+
+    def fake_request_gemini_correction(*, config, image, shape):
+        gemini_calls.append(shape)
+        return "AECZ", "general_vertical_hint_v1", ""
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.GEMINI,
+            output_path=corrector_output,
+        ),
+        batch_size=4,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in corrector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 1
+    assert result.correction_record_count == 1
+    assert result.correction_applied_count == 1
+    assert created_roles == ["ocr", "detector"]
+    assert gemini_calls == ["tall"]
+    assert [entry.text for entry in written_entries] == ["AEC"]
+    assert manifest[0]["corrector_prompt_style"] == "general_vertical_hint_v1"
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:

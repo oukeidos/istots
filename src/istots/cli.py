@@ -200,6 +200,71 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--corrector",
+        choices=("off", "qwen-local", "gemini"),
+        default="off",
+        help=(
+            "Attach the retained conservative corrector to convert. "
+            "Requires `--engine llama-server` with `--ocr-mode default`."
+        ),
+    )
+    parser.add_argument(
+        "--corrector-output",
+        type=Path,
+        default=None,
+        help="Optional JSONL path for retained conservative correction records.",
+    )
+    parser.add_argument(
+        "--corrector-model-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector model path for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-mmproj-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector mmproj path for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-port",
+        type=int,
+        default=None,
+        help="Override the retained corrector port for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="llama-server startup timeout in seconds for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-model",
+        default="gemini-3.1-pro-preview",
+        help="Gemini model id for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-api-key-env",
+        default="GEMINI_API_KEY",
+        help="Environment variable name holding the Gemini API key.",
+    )
+    parser.add_argument(
+        "--corrector-thinking-level",
+        default="low",
+        help="Optional Gemini thinking level for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-media-resolution",
+        default=None,
+        help="Optional Gemini media resolution level for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory for `--corrector gemini` requests.",
+    )
+    parser.add_argument(
         "--srt-policy",
         choices=("safe", "overlap"),
         default="safe",
@@ -590,12 +655,29 @@ def run_convert(args: argparse.Namespace) -> int:
         parser.error("--detector-output requires --engine llama-server")
     if args.detector_output is not None and args.ocr_mode != "default":
         parser.error("--detector-output requires --ocr-mode default")
+    if args.corrector != "off" and args.engine != "llama-server":
+        parser.error("--corrector requires --engine llama-server")
+    if args.corrector != "off" and args.ocr_mode != "default":
+        parser.error("--corrector requires --ocr-mode default")
+    if args.corrector == "off" and args.corrector_output is not None:
+        parser.error("--corrector-output requires --corrector")
+    if args.corrector == "qwen-local":
+        if args.corrector_model_path is None or args.corrector_mmproj_path is None:
+            parser.error("--corrector qwen-local requires --corrector-model-path and --corrector-mmproj-path")
+    if args.corrector == "gemini":
+        if args.corrector_model_path is not None or args.corrector_mmproj_path is not None:
+            parser.error("--corrector-model-path and --corrector-mmproj-path are only valid with --corrector qwen-local")
+        if args.corrector_port is not None:
+            parser.error("--corrector-port is only valid with --corrector qwen-local")
 
     configure_logging(verbose=not args.quiet)
 
     input_sup = args.input_sup.expanduser().resolve()
     output_srt = args.output_srt.expanduser().resolve()
     detector_output = args.detector_output.expanduser().resolve() if args.detector_output is not None else None
+    corrector_output = (
+        args.corrector_output.expanduser().resolve() if args.corrector_output is not None else None
+    )
 
     if output_srt.exists() and output_srt.is_dir():
         parser.error("output_srt must be a file path, not an existing directory")
@@ -603,6 +685,8 @@ def run_convert(args: argparse.Namespace) -> int:
         parser.error("input_sup and output_srt must be different paths")
     if detector_output is not None and detector_output.exists() and detector_output.is_dir():
         parser.error("detector_output must be a file path, not an existing directory")
+    if corrector_output is not None and corrector_output.exists() and corrector_output.is_dir():
+        parser.error("corrector_output must be a file path, not an existing directory")
     if output_srt.exists() and not args.force:
         if _can_prompt_for_overwrite():
             if not _confirm_overwrite(output_srt):
@@ -617,6 +701,36 @@ def run_convert(args: argparse.Namespace) -> int:
 
     from istots.model_store import ensure_local_model
     from istots.pipeline import convert_sup_to_srt
+
+    corrector_config = None
+    if args.corrector != "off":
+        from istots.corrector import CorrectorConfig, CorrectorMode
+
+        corrector_config = CorrectorConfig(
+            mode=CorrectorMode(args.corrector),
+            output_path=corrector_output,
+            local_model_path=(
+                args.corrector_model_path.expanduser().resolve()
+                if args.corrector_model_path is not None
+                else None
+            ),
+            local_mmproj_path=(
+                args.corrector_mmproj_path.expanduser().resolve()
+                if args.corrector_mmproj_path is not None
+                else None
+            ),
+            port=args.corrector_port,
+            startup_timeout_sec=args.corrector_startup_timeout_sec,
+            api_key_env=args.corrector_api_key_env,
+            gemini_model=args.corrector_gemini_model,
+            thinking_level=args.corrector_thinking_level,
+            media_resolution=args.corrector_media_resolution,
+            cache_dir=(
+                args.corrector_cache_dir.expanduser().resolve()
+                if args.corrector_cache_dir is not None
+                else None
+            ),
+        )
 
     model_id = args.model_id
     if args.engine == "hf":
@@ -638,6 +752,8 @@ def run_convert(args: argparse.Namespace) -> int:
             args.ocr_mode,
             args.runtime_profile,
         )
+        if corrector_config is not None:
+            logging.getLogger(__name__).info("using conservative corrector: %s", corrector_config.mode)
 
     try:
         result = convert_sup_to_srt(
@@ -647,6 +763,7 @@ def run_convert(args: argparse.Namespace) -> int:
             engine=args.engine,
             ocr_mode=args.ocr_mode,
             detector_output=detector_output,
+            corrector_config=corrector_config,
             model_id=model_id,
             models_dir=args.models_dir,
             max_items=args.max_items,
@@ -682,6 +799,14 @@ def run_convert(args: argparse.Namespace) -> int:
                 detector_output,
                 result.detector_record_count,
             )
+        if corrector_config is not None:
+            logging.getLogger(__name__).info(
+                "conservative correction: rows=%d applied=%d",
+                result.correction_record_count,
+                result.correction_applied_count,
+            )
+            if corrector_output is not None:
+                logging.getLogger(__name__).info("corrector manifest: %s", corrector_output)
     return 0
 
 

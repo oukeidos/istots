@@ -12,7 +12,7 @@ Implement the experimentally validated feature set into the product code without
 - Step 4. Primary OCR Convert Flow: completed
 - Step 5. Optional Faster OCR Path: completed
 - Step 6. Default Detector Integration: completed
-- Step 7. Conservative Correction Integration: pending
+- Step 7. Conservative Correction Integration: completed
 - Step 8. `HF` Optional Fallback Wiring: pending
 - Step 9. Minimal Regression Probe Wiring: pending
 - Step 10. Final Documentation Pass: pending
@@ -26,4 +26,5 @@ Implement the experimentally validated feature set into the product code without
 - Step 4 completed: switched the baseline convert path to the retained `llama-server` OCR runtime while preserving the HF path as an explicit fallback engine and exposing retained runtime overrides on the CLI.
 - Step 5 completed: added the retained optional faster OCR mode with non-tall `ocr-fast` routing, tall retained `ocr` routing, batch-by-branch execution, and original-order restoration before SRT assembly.
 - Step 6 completed: added retained hybrid detector manifest generation with non-tall `ocr-fast` alternate-read comparisons, tall `detector` repeat-drift comparisons, and disagreement labeling for correction-ready downstream use.
-- Next focus: Step 7 conservative correction integration on top of the retained hybrid detector output.
+- Step 7 completed: added opt-in conservative correction on `convert`, retained anchor-only merge behavior, local Qwen correction wiring, and Gemini tall-row prompt gating on top of the retained hybrid detector trigger surface.
+- Next focus: Step 8 `HF` optional fallback wiring.

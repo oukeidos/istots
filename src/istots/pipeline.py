@@ -9,6 +9,21 @@ from typing import Any
 
 from PIL import Image
 
+from istots.anchor_merge import apply_union_anchor_merge, build_focus_context
+from istots.corrector import (
+    LOCAL_QWEN_CTX_SIZE,
+    LOCAL_QWEN_MAX_NEW_TOKENS,
+    LOCAL_QWEN_THREADS,
+    LOCAL_QWEN_THREADS_BATCH,
+    STRICT_OCR_V1_PROMPT,
+    ConservativeCorrectionRecord,
+    CorrectorConfig,
+    CorrectorMode,
+    corrector_name_for_config,
+    corrector_prompt_for_shape,
+    request_gemini_correction,
+    write_correction_records,
+)
 from istots.detector import HybridDetectorRecord, write_hybrid_detector_records
 from istots.device import resolve_device
 from istots.furigana_mask import build_furigana_masks
@@ -28,6 +43,8 @@ class ConversionResult:
     written_count: int
     device_used: str
     detector_record_count: int = 0
+    correction_record_count: int = 0
+    correction_applied_count: int = 0
 
 
 @dataclass
@@ -56,6 +73,7 @@ def convert_sup_to_srt(
     engine: str | OCREngine = OCREngine.HF,
     ocr_mode: str = "default",
     detector_output: Path | None = None,
+    corrector_config: CorrectorConfig | None = None,
     model_id: str = "PaddlePaddle/PaddleOCR-VL-1.5",
     models_dir: Path | None = None,
     max_items: int | None = None,
@@ -88,6 +106,10 @@ def convert_sup_to_srt(
         raise ValueError("detector output requires the llama-server engine")
     if detector_output is not None and normalized_ocr_mode != "default":
         raise ValueError("detector output requires the default OCR mode")
+    if corrector_config is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
+        raise ValueError("correction requires the llama-server engine")
+    if corrector_config is not None and normalized_ocr_mode != "default":
+        raise ValueError("correction requires the default OCR mode")
     backend_config = OCRBackendConfig(
         engine=normalized_engine,
         model_id=model_id,
@@ -125,13 +147,14 @@ def convert_sup_to_srt(
             srt_policy=srt_policy,
             verbose=verbose,
         )
-    if detector_output is not None:
+    if detector_output is not None or corrector_config is not None:
         return _convert_sup_to_srt_default_with_detector(
             input_sup=input_sup,
             output_srt=output_srt,
             preferred_device=preferred_device,
             backend_config=backend_config,
             detector_output=detector_output,
+            corrector_config=corrector_config,
             max_items=max_items,
             batch_size=batch_size,
             enable_furigana_mask=enable_furigana_mask,
@@ -374,7 +397,8 @@ def _convert_sup_to_srt_default_with_detector(
     output_srt: Path,
     preferred_device: str,
     backend_config: OCRBackendConfig,
-    detector_output: Path,
+    detector_output: Path | None,
+    corrector_config: CorrectorConfig | None,
     max_items: int | None,
     batch_size: int,
     enable_furigana_mask: bool,
@@ -404,11 +428,6 @@ def _convert_sup_to_srt_default_with_detector(
             verbose=verbose,
             branch_label="default",
         )
-        segments = [
-            segment
-            for item, text in zip(prepared_inputs, baseline_texts, strict=True)
-            if (segment := _build_window_text_segment(item.frame, text)) is not None
-        ]
         detector_records = _build_hybrid_detector_records(
             prepared_inputs,
             baseline_texts,
@@ -416,16 +435,42 @@ def _convert_sup_to_srt_default_with_detector(
             batch_size=batch_size,
             verbose=verbose,
         )
-        write_hybrid_detector_records(detector_output, detector_records)
+        if detector_output is not None:
+            write_hybrid_detector_records(detector_output, detector_records)
 
+        correction_records: list[ConservativeCorrectionRecord] = []
+        final_texts = list(baseline_texts)
+        if corrector_config is not None:
+            correction_records = _apply_conservative_corrections(
+                prepared_inputs=prepared_inputs,
+                detector_records=detector_records,
+                corrector_config=corrector_config,
+                preferred_device=preferred_device,
+                current_device=device,
+                runtime_binary_path=backend_config.binary_path,
+                runtime_host=backend_config.host,
+                batch_size=batch_size,
+                verbose=verbose,
+            )
+            for record in correction_records:
+                final_texts[record.index] = record.conservative_merged_text
+            if corrector_config.output_path is not None:
+                write_correction_records(corrector_config.output_path, correction_records)
+
+        segments = [
+            segment
+            for item, text in zip(prepared_inputs, final_texts, strict=True)
+            if (segment := _build_window_text_segment(item.frame, text)) is not None
+        ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
         write_srt(entries, output_srt)
         if verbose:
             logger.info(
-                "conversion finished: processed=%d written=%d detector_disagreements=%d output=%s",
+                "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d output=%s",
                 len(prepared_inputs),
                 len(entries),
                 len(detector_records),
+                len(correction_records),
                 output_srt,
             )
         return ConversionResult(
@@ -434,6 +479,10 @@ def _convert_sup_to_srt_default_with_detector(
             written_count=len(entries),
             device_used=device,
             detector_record_count=len(detector_records),
+            correction_record_count=len(correction_records),
+            correction_applied_count=sum(
+                1 for record in correction_records if record.merged_changed
+            ),
         )
     finally:
         _close_ocr_backends(active_backends, verbose=verbose)
@@ -692,6 +741,192 @@ def _build_hybrid_detector_records(
         return detector_records
     finally:
         _close_ocr_backends(active_backends, verbose=verbose)
+
+
+def _apply_conservative_corrections(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    detector_records: list[HybridDetectorRecord],
+    corrector_config: CorrectorConfig,
+    preferred_device: str,
+    current_device: str,
+    runtime_binary_path: Path | None,
+    runtime_host: str,
+    batch_size: int,
+    verbose: bool,
+) -> list[ConservativeCorrectionRecord]:
+    if not detector_records:
+        return []
+
+    if corrector_config.mode is CorrectorMode.QWEN_LOCAL:
+        return _apply_local_qwen_corrections(
+            prepared_inputs=prepared_inputs,
+            detector_records=detector_records,
+            corrector_config=corrector_config,
+            preferred_device=preferred_device,
+            current_device=current_device,
+            runtime_binary_path=runtime_binary_path,
+            runtime_host=runtime_host,
+            batch_size=batch_size,
+            verbose=verbose,
+        )
+    if corrector_config.mode is CorrectorMode.GEMINI:
+        return _apply_gemini_corrections(
+            prepared_inputs=prepared_inputs,
+            detector_records=detector_records,
+            corrector_config=corrector_config,
+            verbose=verbose,
+        )
+    raise AssertionError(f"unhandled corrector mode: {corrector_config.mode}")
+
+
+def _apply_local_qwen_corrections(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    detector_records: list[HybridDetectorRecord],
+    corrector_config: CorrectorConfig,
+    preferred_device: str,
+    current_device: str,
+    runtime_binary_path: Path | None,
+    runtime_host: str,
+    batch_size: int,
+    verbose: bool,
+) -> list[ConservativeCorrectionRecord]:
+    if corrector_config.local_model_path is None or corrector_config.local_mmproj_path is None:
+        raise RuntimeError("qwen-local correction requires explicit corrector model and mmproj paths")
+
+    correction_inputs = [prepared_inputs[record.index] for record in detector_records]
+    corrector_backend_config = OCRBackendConfig(
+        engine=OCREngine.LLAMA_SERVER,
+        model_id=str(corrector_config.local_model_path),
+        model_path=corrector_config.local_model_path,
+        mmproj_path=corrector_config.local_mmproj_path,
+        device=current_device,
+        max_new_tokens=LOCAL_QWEN_MAX_NEW_TOKENS,
+        local_files_only=True,
+        role="corrector",
+        prompt_text=STRICT_OCR_V1_PROMPT,
+        profile="auto",
+        binary_path=runtime_binary_path,
+        host=runtime_host,
+        port=corrector_config.port,
+        threads=LOCAL_QWEN_THREADS,
+        threads_batch=LOCAL_QWEN_THREADS_BATCH,
+        ctx_size=LOCAL_QWEN_CTX_SIZE,
+        n_predict=LOCAL_QWEN_MAX_NEW_TOKENS,
+        reasoning="off",
+        gpu_layers=None,
+        no_mmproj_offload=True,
+        startup_timeout_sec=corrector_config.startup_timeout_sec,
+    )
+    active_backends: list[Any] = []
+    try:
+        active_backends, _ = _create_ocr_backends(
+            [corrector_backend_config],
+            preferred_device=preferred_device,
+            verbose=verbose,
+        )
+        corrector_texts = _recognize_prepared_inputs(
+            correction_inputs,
+            backend=active_backends[0],
+            batch_size=batch_size,
+            verbose=verbose,
+            branch_label="corrector-qwen-local",
+        )
+    finally:
+        _close_ocr_backends(active_backends, verbose=verbose)
+
+    corrector_name = corrector_name_for_config(corrector_config)
+    records: list[ConservativeCorrectionRecord] = []
+    for detector_record, corrector_text in zip(detector_records, corrector_texts, strict=True):
+        prompt_style = corrector_prompt_for_shape(corrector_config, detector_record.shape)[1]
+        records.append(
+            _build_correction_record(
+                detector_record=detector_record,
+                corrector_name=corrector_name,
+                corrector_prompt_style=prompt_style,
+                corrector_text=corrector_text,
+                corrector_reasoning_content="",
+            )
+        )
+    return records
+
+
+def _apply_gemini_corrections(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    detector_records: list[HybridDetectorRecord],
+    corrector_config: CorrectorConfig,
+    verbose: bool,
+) -> list[ConservativeCorrectionRecord]:
+    prepared_by_index = {item.index: item for item in prepared_inputs}
+    corrector_name = corrector_name_for_config(corrector_config)
+    records: list[ConservativeCorrectionRecord] = []
+    for detector_record in detector_records:
+        if verbose:
+            logger.info(
+                "running Gemini corrector: row=%s branch=%s shape=%s",
+                detector_record.index,
+                detector_record.detector_branch,
+                detector_record.shape,
+            )
+        prepared = prepared_by_index[detector_record.index]
+        corrector_text, prompt_style, reasoning_content = request_gemini_correction(
+            config=corrector_config,
+            image=prepared.image,
+            shape=detector_record.shape,
+        )
+        records.append(
+            _build_correction_record(
+                detector_record=detector_record,
+                corrector_name=corrector_name,
+                corrector_prompt_style=prompt_style,
+                corrector_text=corrector_text,
+                corrector_reasoning_content=reasoning_content,
+            )
+        )
+    return records
+
+
+def _build_correction_record(
+    *,
+    detector_record: HybridDetectorRecord,
+    corrector_name: str,
+    corrector_prompt_style: str,
+    corrector_text: str,
+    corrector_reasoning_content: str,
+) -> ConservativeCorrectionRecord:
+    anchor_rows = build_focus_context(detector_record.baseline_text, detector_record.option_text)
+    merged = apply_union_anchor_merge(
+        detector_record.baseline_text,
+        corrector_text,
+        anchor_rows,
+    )
+    return ConservativeCorrectionRecord(
+        index=detector_record.index,
+        raw_index=detector_record.raw_index,
+        window_id=detector_record.window_id,
+        start_ms=detector_record.start_ms,
+        end_ms=detector_record.end_ms,
+        detector_branch=detector_record.detector_branch,
+        shape=detector_record.shape,
+        ratio=detector_record.ratio,
+        option_role=detector_record.option_role,
+        baseline_text=detector_record.baseline_text,
+        option_text=detector_record.option_text,
+        diff_label=detector_record.diff_label,
+        meaningful=detector_record.meaningful,
+        char_error_rate=detector_record.char_error_rate,
+        anchor_count=len(anchor_rows),
+        corrector_name=corrector_name,
+        corrector_prompt_style=corrector_prompt_style,
+        corrector_text=corrector_text,
+        conservative_merged_text=merged.merged_text,
+        applied_op_count=len(merged.applied_ops),
+        raw_changed=corrector_text != detector_record.baseline_text,
+        merged_changed=merged.merged_text != detector_record.baseline_text,
+        corrector_reasoning_content=corrector_reasoning_content,
+    )
 
 
 def _is_tall_subtitle_image(image: Image.Image) -> bool:

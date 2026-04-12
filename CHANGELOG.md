@@ -19,6 +19,9 @@
 - Step 6: added retained hybrid detector manifest generation on `convert` for the default disagreement surface.
 - Added non-tall alternate-read detector routing through `ocr-fast`, tall repeat-drift routing through the retained `detector` role, and disagreement labeling for correction-ready downstream use.
 - Added regression coverage for detector CLI validation, detector manifest generation, and detector text-difference assessment.
+- Step 7: added opt-in conservative correction on `convert` using the retained hybrid detector as the default disagreement trigger surface.
+- Ported the retained anchor-only merge logic into product code, added local Qwen correction wiring with the retained strict runtime recipe, and added Gemini tall-row prompt gating.
+- Added correction manifest export and regression coverage for anchor merge, correction CLI validation, and detector-to-correction pipeline composition.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

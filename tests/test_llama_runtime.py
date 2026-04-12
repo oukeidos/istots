@@ -64,6 +64,39 @@ def test_build_llama_server_command_applies_cpu_profile_and_overrides() -> None:
     ]
 
 
+def test_build_llama_server_command_appends_context_and_reasoning_flags() -> None:
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.CORRECTOR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="127.0.0.1",
+        port=18083,
+        ctx_size=4096,
+        n_predict=128,
+        reasoning="off",
+    )
+
+    assert llama_runtime.build_llama_server_command(spec) == [
+        "/tmp/llama-server",
+        "-m",
+        "/tmp/model.gguf",
+        "--mmproj",
+        "/tmp/mmproj.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18083",
+        "-c",
+        "4096",
+        "-n",
+        "128",
+        "--reasoning",
+        "off",
+    ]
+
+
 def test_resolve_llama_server_role_assets_uses_derived_mmproj_for_fast_role(monkeypatch, tmp_path: Path) -> None:
     gguf_dir = tmp_path / "PaddlePaddle__PaddleOCR-VL-1.5-GGUF"
     monkeypatch.setattr(llama_runtime, "resolve_local_model_path", lambda model_id, models_dir=None: gguf_dir)

@@ -7,6 +7,7 @@ import pytest
 
 from istots import __version__, cli
 from istots import model_store, pipeline
+from istots.corrector import CorrectorMode
 
 
 def test_normalize_argv_keeps_subcommand() -> None:
@@ -42,6 +43,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--ocr-mode {default,fast}" in captured.out
     assert "--furigana-mask" in captured.out
     assert "--detector-output DETECTOR_OUTPUT" in captured.out
+    assert "--corrector {off,qwen-local,gemini}" in captured.out
+    assert "--corrector-output CORRECTOR_OUTPUT" in captured.out
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
     assert "--min-pixels MIN_PIXELS" in captured.out
@@ -453,6 +456,93 @@ def test_run_convert_passes_detector_output(monkeypatch, tmp_path: Path) -> None
     assert captured["detector_output"] == detector_output
 
 
+def test_run_convert_passes_qwen_local_corrector_config(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--corrector-output",
+            str(corrector_output),
+            "--corrector-port",
+            "19083",
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.QWEN_LOCAL
+    assert config.local_model_path == model_path.resolve()
+    assert config.local_mmproj_path == mmproj_path.resolve()
+    assert config.output_path == corrector_output.resolve()
+    assert config.port == 19083
+
+
+def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    cache_dir = tmp_path / "cache"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "gemini",
+            "--corrector-gemini-model",
+            "gemini-test",
+            "--corrector-thinking-level",
+            "low",
+            "--corrector-cache-dir",
+            str(cache_dir),
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.GEMINI
+    assert config.gemini_model == "gemini-test"
+    assert config.thinking_level == "low"
+    assert config.cache_dir == cache_dir.resolve()
+
+
 def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
@@ -646,6 +736,40 @@ def test_run_convert_rejects_detector_output_for_fast_mode(tmp_path: Path) -> No
                 "--detector-output",
                 str(detector_output),
             ]
-        )
+    )
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_corrector_for_hf(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--corrector", "gemini"])
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_qwen_local_without_paths(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run([str(input_sup), str(output_srt), "--quiet", "--corrector", "qwen-local"])
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_corrector_output_without_corrector(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run([str(input_sup), str(output_srt), "--quiet", "--corrector-output", str(corrector_output)])
 
     assert excinfo.value.code == 2

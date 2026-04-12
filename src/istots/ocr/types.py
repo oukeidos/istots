@@ -30,17 +30,24 @@ def normalize_ocr_engine(engine: str | OCREngine) -> OCREngine:
 class OCRBackendConfig:
     engine: OCREngine = OCREngine.HF
     model_id: str = ""
+    model_path: Path | None = None
+    mmproj_path: Path | None = None
     device: str = "cpu"
     max_new_tokens: int = 256
     local_files_only: bool = True
     models_dir: Path | None = None
     role: str = "ocr"
+    prompt_text: str = "OCR:"
     profile: str = "auto"
     binary_path: Path | None = None
     host: str = "127.0.0.1"
     port: int | None = None
     threads: int | None = None
     threads_batch: int | None = None
+    ctx_size: int | None = None
+    n_predict: int | None = None
+    reasoning: str | None = None
+    reasoning_budget: int | None = None
     gpu_layers: int | None = None
     no_mmproj_offload: bool | None = None
     startup_timeout_sec: float = 120.0

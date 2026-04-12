@@ -83,6 +83,10 @@ class LlamaServerLaunchSpec:
     device: str | None = None
     threads: int | None = None
     threads_batch: int | None = None
+    ctx_size: int | None = None
+    n_predict: int | None = None
+    reasoning: str | None = None
+    reasoning_budget: int | None = None
     gpu_layers: int | None = None
     no_mmproj_offload: bool = False
     prompt_text: str = "OCR:"
@@ -227,6 +231,14 @@ def build_llama_server_command(spec: LlamaServerLaunchSpec) -> list[str]:
         command.extend(["-t", str(spec.threads)])
     if spec.threads_batch is not None:
         command.extend(["-tb", str(spec.threads_batch)])
+    if spec.ctx_size is not None:
+        command.extend(["-c", str(spec.ctx_size)])
+    if spec.n_predict is not None:
+        command.extend(["-n", str(spec.n_predict)])
+    if spec.reasoning is not None:
+        command.extend(["--reasoning", str(spec.reasoning)])
+    if spec.reasoning_budget is not None:
+        command.extend(["--reasoning-budget", str(spec.reasoning_budget)])
     if no_mmproj_offload:
         command.append("--no-mmproj-offload")
 

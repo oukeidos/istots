@@ -46,6 +46,8 @@ uv run istots input.sup output.srt --furigana-mask
 uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
 uv run istots input.sup output.srt --detector-output detector.jsonl
+uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
+uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
 
 Global flags:
@@ -73,6 +75,17 @@ Global flags:
 - `--startup-timeout-sec SECONDS`: `llama-server` startup timeout.
 - `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
 - `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
+- `--corrector {off,qwen-local,gemini}`: attach the retained conservative anchor-only corrector to `convert`. Requires `--engine llama-server` with `--ocr-mode default`.
+- `--corrector-output CORRECTOR_OUTPUT`: optional JSONL path for conservative correction records.
+- `--corrector-model-path CORRECTOR_MODEL_PATH`: explicit local GGUF corrector model path for `--corrector qwen-local`.
+- `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: explicit local GGUF corrector mmproj path for `--corrector qwen-local`.
+- `--corrector-port PORT`: override the retained corrector port for `--corrector qwen-local`.
+- `--corrector-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
+- `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
+- `--corrector-api-key-env ENV`: environment variable name holding the Gemini API key.
+- `--corrector-thinking-level LEVEL`: optional Gemini thinking level for `--corrector gemini`.
+- `--corrector-media-resolution LEVEL`: optional Gemini media resolution level for `--corrector gemini`.
+- `--corrector-cache-dir PATH`: optional cache directory for `--corrector gemini`.
 - `--srt-policy {safe,overlap}`: SRT output policy. `safe` merges simultaneous windows into one cue. `overlap` keeps overlapping cues separate.
 - `--quiet`: suppress progress logs.
 - `--force`: overwrite an existing output `.srt` file without prompting.
@@ -125,6 +138,14 @@ The doctor checks:
 - `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
 - Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
 - Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
+
+## Conservative Correction
+
+- Correction remains convert-attached, opt-in, and conservative anchor-only.
+- The retained hybrid detector disagreement surface is the default correction trigger surface.
+- `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
+- `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
+- `uv run istots setup` does not provision local corrector assets or Gemini credentials. Local Qwen model/mmproj paths and Gemini API access remain explicit user-supplied inputs.
 
 ## Language Support
 
