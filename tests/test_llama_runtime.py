@@ -182,6 +182,46 @@ def test_run_llama_server_doctor_runs_smoke_on_ready_runtime(monkeypatch, tmp_pa
     assert stopped == [process]
 
 
+def test_run_llama_server_launch_spec_doctor_runs_smoke_on_ready_runtime(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "llama-server"
+    model = tmp_path / "model.gguf"
+    mmproj = tmp_path / "mmproj.gguf"
+    process = object()
+    binary.write_text("", encoding="utf-8")
+    model.write_text("", encoding="utf-8")
+    mmproj.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(tmp_path / "llama.lock"))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(tmp_path / "llama-state.json"))
+
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.CORRECTOR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=binary,
+        model_path=model,
+        mmproj_path=mmproj,
+        host="127.0.0.1",
+        port=18083,
+        prompt_text="STRICT",
+    )
+
+    monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
+    monkeypatch.setattr(llama_runtime, "start_llama_server", lambda spec, startup_timeout_sec: process)
+    monkeypatch.setattr(llama_runtime, "request_llama_server_smoke", lambda spec: "STRICT-OK")
+
+    stopped: list[object] = []
+    monkeypatch.setattr(llama_runtime, "stop_llama_server", lambda proc: stopped.append(proc))
+
+    report = llama_runtime.run_llama_server_launch_spec_doctor(spec)
+
+    assert report.ok is True
+    assert report.role is llama_runtime.LlamaServerRole.CORRECTOR
+    assert report.smoke_response == "STRICT-OK"
+    assert stopped == [process]
+
+
 class _FakePopen:
     def __init__(self, pid: int) -> None:
         self.pid = pid

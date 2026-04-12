@@ -48,7 +48,7 @@ uv run istots input.sup output.srt
 Runtime preflight:
 
 ```bash
-uv run istots doctor --engine llama-server --role ocr
+uv run istots doctor runtime paddle
 ```
 
 Quick validation on the retained default sample:
@@ -206,25 +206,30 @@ Recommended order for a new machine or runtime profile:
 
 1. `uv sync`
 2. `uv run istots setup`
-3. `uv run istots doctor --engine llama-server --role ocr`
+3. `uv run istots doctor runtime paddle`
 4. `uv run istots smoke`
 5. `uv run istots input.sup output.srt`
 
 ## Runtime Doctor
 
-Use `doctor` before switching to retained `llama-server` runtime roles:
+Use `doctor` when you need structured runtime, auth, or workflow validation:
 
-- `uv run istots doctor --engine llama-server --role ocr`
-- `uv run istots doctor --engine llama-server --role ocr-fast --profile cpu`
-- `uv run istots doctor --engine llama-server --role detector`
+- `uv run istots doctor runtime paddle`
+- `uv run istots doctor runtime qwen --qwen-no-mmproj-offload`
+- `uv run istots doctor auth gemini`
+- `uv run istots doctor workflow default --input-sup /path/to/input.sup`
+- `uv run istots doctor workflow wider --input-sup /path/to/input.sup`
+- `uv run istots doctor workflow corrector-qwen --input-sup /path/to/input.sup`
+- `uv run istots doctor workflow corrector-gemini --input-sup /path/to/input.sup`
 
-The doctor checks:
+Structured doctor scopes:
 
-- `llama-server` binary presence
-- required model and mmproj assets for the selected role
-- likely port conflicts
-- launch readiness
-- minimal OpenAI-compatible smoke response
+- `runtime paddle`: checks the retained PaddleOCR-VL runtime family used by `ocr`, `ocr-fast`, and `detector`.
+- `runtime qwen`: checks the retained local Qwen corrector runtime family.
+- `auth gemini`: checks Gemini credential availability without printing the key.
+- `workflow ...`: runs a real retained workflow smoke on the input SUP you provide.
+
+Workflow doctor intentionally has no built-in default SUP. Pass `--input-sup` explicitly.
 
 ## Runtime Profiles
 
@@ -236,7 +241,7 @@ Advanced `llama-server` overrides remain available on `convert` and `smoke` thro
 - PaddleOCR-VL: `--paddle-profile`, `--paddle-port`, `--paddle-threads`, `--paddle-threads-batch`, `--paddle-gpu-layers`, `--paddle-no-mmproj-offload`, `--paddle-startup-timeout-sec`
 - Qwen3.5: `--qwen-profile`, `--qwen-port`, `--qwen-threads`, `--qwen-threads-batch`, `--qwen-gpu-layers`, `--qwen-no-mmproj-offload`, `--qwen-ctx-size`, `--qwen-n-predict`, `--qwen-reasoning`, `--qwen-startup-timeout-sec`
 - Shared infrastructure: `--llama-server-path`
-- `doctor` remains the role-level diagnostic surface with direct single-role overrides.
+- The structured `doctor` surface uses the same model-family override shapes.
 
 ## Host Patterns
 

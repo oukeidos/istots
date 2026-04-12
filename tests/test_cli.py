@@ -53,10 +53,11 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--min-pixels MIN_PIXELS" in captured.out
     assert "--paddle-profile {auto,cpu}" in captured.out
     assert "--qwen-profile {auto,cpu}" in captured.out
-    assert "--profile {auto,cpu}" in captured.out
     assert "--output-dir OUTPUT_DIR" in captured.out
     assert "--no-detector" in captured.out
     assert "--force" in captured.out
+    assert "{runtime,auth,workflow}" in captured.out
+    assert "--input-sup INPUT_SUP" in captured.out
 
 
 def test_run_routes_setup(monkeypatch) -> None:
@@ -84,11 +85,12 @@ def test_run_routes_materialize_mmproj(monkeypatch) -> None:
 def test_run_routes_doctor(monkeypatch) -> None:
     def fake_doctor(args) -> int:
         assert args.command == "doctor"
-        assert args.engine == "llama-server"
+        assert args.doctor_category == "runtime"
+        assert args.doctor_target == "paddle"
         return 19
 
     monkeypatch.setattr(cli, "run_doctor", fake_doctor)
-    assert cli.run(["doctor"]) == 19
+    assert cli.run(["doctor", "runtime", "paddle"]) == 19
 
 
 def test_run_routes_smoke(monkeypatch) -> None:
@@ -237,44 +239,127 @@ def test_run_materialize_mmproj_applies_requested_value(monkeypatch, tmp_path: P
     assert captured["read"]["args"] == (output,)
 
 
-def test_run_doctor_passes_runtime_overrides(monkeypatch, tmp_path: Path) -> None:
+def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
-    def fake_run_llama_server_doctor(**kwargs):
+    def fake_run_paddle_runtime_doctor(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(ok=True, role="ocr", profile="cpu", launch_spec=None, smoke_response=None)
+        return SimpleNamespace(category="runtime", target="paddle", ok=True, checks=())
 
-    monkeypatch.setattr("istots.llama_runtime.run_llama_server_doctor", fake_run_llama_server_doctor)
+    monkeypatch.setattr("istots.doctor.run_paddle_runtime_doctor", fake_run_paddle_runtime_doctor)
 
     rc = cli.run(
         [
             "doctor",
-            "--role",
-            "ocr-fast",
-            "--profile",
-            "cpu",
+            "runtime",
+            "paddle",
             "--models-dir",
             str(tmp_path),
-            "--port",
+            "--paddle-profile",
+            "cpu",
+            "--paddle-port",
             "19001",
-            "--threads",
+            "--paddle-threads",
             "12",
-            "--threads-batch",
+            "--paddle-threads-batch",
             "8",
-            "--no-mmproj-offload",
+            "--paddle-no-mmproj-offload",
             "--quiet",
         ]
     )
 
     assert rc == 0
-    assert captured["role"] == "ocr-fast"
     assert captured["models_dir"] == tmp_path
     overrides = captured["overrides"]
-    assert overrides.profile.value == "cpu"
+    assert overrides.profile == "cpu"
     assert overrides.port == 19001
     assert overrides.threads == 12
     assert overrides.threads_batch == 8
     assert overrides.no_mmproj_offload is True
+
+
+def test_run_doctor_runtime_qwen_passes_family_overrides(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_qwen_runtime_doctor(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(category="runtime", target="qwen", ok=True, checks=())
+
+    monkeypatch.setattr("istots.doctor.run_qwen_runtime_doctor", fake_run_qwen_runtime_doctor)
+
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "mmproj.gguf"
+    rc = cli.run(
+        [
+            "doctor",
+            "runtime",
+            "qwen",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--qwen-profile",
+            "cpu",
+            "--qwen-no-mmproj-offload",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    overrides = captured["overrides"]
+    assert overrides.profile == "cpu"
+    assert overrides.no_mmproj_offload is True
+    assert captured["explicit_model_path"] == model_path
+    assert captured["explicit_mmproj_path"] == mmproj_path
+
+
+def test_run_doctor_auth_gemini_routes_api_key_env(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_gemini_auth_doctor(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(category="auth", target="gemini", ok=True, checks=())
+
+    monkeypatch.setattr("istots.doctor.run_gemini_auth_doctor", fake_run_gemini_auth_doctor)
+
+    rc = cli.run(["doctor", "auth", "gemini", "--api-key-env", "GOOGLE_API_KEY", "--quiet"])
+
+    assert rc == 0
+    assert captured["api_key_env"] == "GOOGLE_API_KEY"
+
+
+def test_run_doctor_workflow_requires_explicit_input_sup(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+
+    with pytest.raises(SystemExit):
+        cli.run(["doctor", "workflow", "default", "--quiet"])
+
+
+def test_run_doctor_workflow_passes_input_sup(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_workflow_doctor(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(category="workflow", target="wider", ok=True, checks=())
+
+    monkeypatch.setattr("istots.doctor.run_workflow_doctor", fake_run_workflow_doctor)
+
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    rc = cli.run(
+        [
+            "doctor",
+            "workflow",
+            "wider",
+            "--input-sup",
+            str(input_sup),
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["workflow"] == "wider"
+    assert captured["input_sup"] == input_sup.resolve()
 
 
 def test_run_routes_legacy_convert(monkeypatch) -> None:

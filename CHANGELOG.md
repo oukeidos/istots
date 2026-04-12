@@ -56,6 +56,8 @@
 - Added regression coverage for pure-row preference, over-broad family rejection, and the richer add-on family metrics written into detector manifests.
 - Post-plan wider detector expansion: added an explicit `--detector-mode wider` surface that layers a wider default-repeat detector slice on top of the default detector surface without changing the default behavior.
 - Added regression coverage for wider-surface row union, overlap provenance retention, and dominant-family add-on attachment on top of the wider detector surface.
+- Post-plan doctor restructuring: replaced the old single-role doctor surface with structured `runtime`, `auth`, and `workflow` checks aligned to PaddleOCR-VL, Qwen, Gemini auth, and explicit input-SUP workflow validation.
+- Added regression coverage for structured doctor CLI routing, explicit workflow input requirements, and shared launch-spec doctor execution.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

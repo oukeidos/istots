@@ -16,6 +16,7 @@ from istots.model_store import (
     DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
     DEFAULT_QWEN_CORRECTOR_MODEL_ID,
 )
+from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -74,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser(
         "doctor",
-        help="Run runtime preflight checks for retained runtime roles",
+        help="Run structured runtime, auth, and workflow doctor checks",
     )
     parser.register_subcommand_parser(doctor)
     _add_doctor_arguments(doctor)
@@ -105,6 +106,12 @@ def _build_convert_parser() -> argparse.ArgumentParser:
 def _build_smoke_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="istots smoke")
     _add_smoke_arguments(parser)
+    return parser
+
+
+def _build_doctor_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="istots doctor")
+    _add_doctor_arguments(parser)
     return parser
 
 
@@ -818,22 +825,23 @@ def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--engine",
-        choices=("llama-server",),
-        default="llama-server",
-        help="Runtime engine to validate (default: llama-server)",
+        "doctor_category",
+        nargs="?",
+        choices=("runtime", "auth", "workflow"),
+        default=None,
+        help=(
+            "Structured doctor category. Use `runtime`, `auth`, or `workflow`."
+        ),
     )
     parser.add_argument(
-        "--role",
-        choices=("ocr", "ocr-fast", "detector", "corrector"),
-        default="ocr",
-        help="Retained runtime role to validate (default: ocr)",
-    )
-    parser.add_argument(
-        "--profile",
-        choices=("auto", "cpu"),
-        default="auto",
-        help="Runtime launch profile (default: auto)",
+        "doctor_target",
+        nargs="?",
+        default=None,
+        help=(
+            "Structured doctor target. "
+            "`runtime`: `paddle` or `qwen`; `auth`: `gemini`; "
+            "`workflow`: `default`, `wider`, `corrector-qwen`, or `corrector-gemini`."
+        ),
     )
     parser.add_argument(
         "--models-dir",
@@ -862,39 +870,126 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         help="Host to bind or probe (default: 127.0.0.1)",
     )
     parser.add_argument(
-        "--port",
-        type=int,
+        "--input-sup",
+        type=Path,
         default=None,
-        help="Override the retained default port for the selected role",
+        help="Input .sup path for `doctor workflow ...`. Required for workflow doctor runs.",
     )
     parser.add_argument(
-        "--threads",
-        type=int,
-        default=None,
-        help="Override llama-server thread count",
+        "--api-key-env",
+        default="GEMINI_API_KEY",
+        help="Gemini API key environment variable name for doctor auth/workflow checks.",
     )
     parser.add_argument(
-        "--threads-batch",
-        type=int,
-        default=None,
-        help="Override llama-server batch thread count",
+        "--paddle-profile",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="PaddleOCR-VL runtime profile for `doctor runtime paddle` and `doctor workflow ...`.",
     )
     parser.add_argument(
-        "--gpu-layers",
+        "--paddle-port",
         type=int,
         default=None,
-        help="Override llama-server GPU layer count",
+        help="Override the shared PaddleOCR-VL llama-server port for structured doctor runs.",
     )
     parser.add_argument(
-        "--no-mmproj-offload",
+        "--paddle-threads",
+        type=int,
+        default=None,
+        help="Override PaddleOCR-VL llama-server thread count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--paddle-threads-batch",
+        type=int,
+        default=None,
+        help="Override PaddleOCR-VL llama-server batch thread count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--paddle-gpu-layers",
+        type=int,
+        default=None,
+        help="Override PaddleOCR-VL llama-server GPU layer count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--paddle-no-mmproj-offload",
         action="store_true",
-        help="Disable mmproj offload for the doctor launch",
+        help="Disable mmproj offload for PaddleOCR-VL structured doctor runs.",
     )
     parser.add_argument(
-        "--startup-timeout-sec",
+        "--paddle-startup-timeout-sec",
         type=float,
         default=120.0,
-        help="llama-server startup timeout in seconds",
+        help="PaddleOCR-VL llama-server startup timeout for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--corrector-model-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector model path for `doctor runtime qwen` or `doctor workflow corrector-qwen`.",
+    )
+    parser.add_argument(
+        "--corrector-mmproj-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector mmproj path for `doctor runtime qwen` or `doctor workflow corrector-qwen`.",
+    )
+    parser.add_argument(
+        "--qwen-profile",
+        choices=("auto", "cpu"),
+        default="auto",
+        help="Qwen3.5 runtime profile for `doctor runtime qwen` and `doctor workflow corrector-qwen`.",
+    )
+    parser.add_argument(
+        "--qwen-port",
+        type=int,
+        default=None,
+        help="Override the Qwen3.5 llama-server port for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-threads",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server thread count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-threads-batch",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server batch thread count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-gpu-layers",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server GPU layer count for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-no-mmproj-offload",
+        action="store_true",
+        help="Force `--no-mmproj-offload` for structured Qwen doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-ctx-size",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server context size for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-n-predict",
+        type=int,
+        default=None,
+        help="Override Qwen3.5 llama-server `-n` value for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-reasoning",
+        default=None,
+        help="Override Qwen3.5 llama-server reasoning mode for structured doctor runs.",
+    )
+    parser.add_argument(
+        "--qwen-startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="Qwen3.5 llama-server startup timeout for structured doctor runs.",
     )
     parser.add_argument(
         "--quiet",
@@ -1089,53 +1184,143 @@ def run_materialize_mmproj(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_doctor(args: argparse.Namespace) -> int:
-    configure_logging(verbose=not args.quiet)
+def _validate_doctor_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
+    category = args.doctor_category
+    target = args.doctor_target
+    if category is None:
+        parser.error("doctor requires a category: runtime, auth, or workflow")
 
-    if args.engine != "llama-server":
-        logging.getLogger(__name__).error("unsupported doctor engine: %s", args.engine)
-        return 1
+    if target is None:
+        parser.error("doctor category requires a target")
 
-    from istots.llama_runtime import LlamaServerOverrides, LlamaServerProfile, run_llama_server_doctor
+    normalized_target = str(target).strip().lower()
+    allowed_targets = {
+        "runtime": {"paddle", "qwen"},
+        "auth": {"gemini"},
+        "workflow": {"default", "wider", "corrector-qwen", "corrector-gemini"},
+    }
+    if normalized_target not in allowed_targets[category]:
+        joined = ", ".join(sorted(allowed_targets[category]))
+        parser.error(f"unsupported doctor target for {category}: {target!r}. Expected one of: {joined}")
 
-    overrides = LlamaServerOverrides(
-        profile=LlamaServerProfile(args.profile),
-        threads=args.threads,
-        threads_batch=args.threads_batch,
-        port=args.port,
-        gpu_layers=args.gpu_layers,
-        no_mmproj_offload=True if args.no_mmproj_offload else None,
+    if category == "workflow" and args.input_sup is None:
+        parser.error("doctor workflow requires --input-sup")
+
+    return category, normalized_target
+
+
+def _build_doctor_paddle_runtime_overrides(args: argparse.Namespace) -> PaddleOCRVLRuntimeOverrides:
+    return PaddleOCRVLRuntimeOverrides(
+        profile=args.paddle_profile,
+        port=args.paddle_port,
+        threads=args.paddle_threads,
+        threads_batch=args.paddle_threads_batch,
+        gpu_layers=args.paddle_gpu_layers,
+        no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
+        startup_timeout_sec=args.paddle_startup_timeout_sec,
     )
 
-    report = run_llama_server_doctor(
-        role=args.role,
-        models_dir=args.models_dir,
-        min_pixels=args.min_pixels,
-        explicit_binary_path=args.llama_server_path,
-        host=args.host,
-        overrides=overrides,
-        startup_timeout_sec=args.startup_timeout_sec,
+
+def _build_doctor_qwen_runtime_overrides(args: argparse.Namespace) -> Qwen35RuntimeOverrides:
+    return Qwen35RuntimeOverrides(
+        profile=args.qwen_profile,
+        port=args.qwen_port,
+        threads=args.qwen_threads,
+        threads_batch=args.qwen_threads_batch,
+        gpu_layers=args.qwen_gpu_layers,
+        no_mmproj_offload=True if args.qwen_no_mmproj_offload else None,
+        startup_timeout_sec=args.qwen_startup_timeout_sec,
+        ctx_size=args.qwen_ctx_size,
+        n_predict=args.qwen_n_predict,
+        reasoning=args.qwen_reasoning,
     )
 
+
+def _format_doctor_details(details: tuple[tuple[str, str], ...]) -> str:
+    return " ".join(f"{key}={value}" for key, value in details)
+
+
+def _log_doctor_suite_result(
+    result,
+    *,
+    quiet: bool,
+) -> int:
     logger = logging.getLogger(__name__)
-    if report.ok:
-        if not args.quiet and report.launch_spec is not None:
-            logger.info(
-                "doctor passed: role=%s profile=%s binary=%s model=%s mmproj=%s port=%s",
-                report.role,
-                report.profile,
-                report.launch_spec.binary_path,
-                report.launch_spec.model_path,
-                report.launch_spec.mmproj_path,
-                report.launch_spec.port,
-            )
-            if report.smoke_response is not None:
-                logger.info("doctor smoke response: %s", report.smoke_response)
+    if result.ok:
+        if not quiet:
+            logger.info("doctor passed: category=%s target=%s", result.category, result.target)
+            for check in result.checks:
+                logger.info("doctor passed: check=%s %s", check.name, _format_doctor_details(check.details))
         return 0
 
-    for issue in report.issues:
-        logger.error("doctor failed [%s]: %s", issue.code, issue.message)
+    for check in result.checks:
+        if check.ok:
+            if not quiet:
+                logger.info("doctor passed: check=%s %s", check.name, _format_doctor_details(check.details))
+            continue
+        for issue in check.issues:
+            logger.error("doctor failed: check=%s [%s] %s", check.name, issue.code, issue.message)
+        if not quiet and check.details:
+            logger.error("doctor context: check=%s %s", check.name, _format_doctor_details(check.details))
     return 1
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    parser = _build_doctor_parser()
+    category, target = _validate_doctor_mode(parser, args)
+    configure_logging(verbose=not args.quiet)
+
+    from istots.doctor import run_gemini_auth_doctor, run_paddle_runtime_doctor, run_qwen_runtime_doctor, run_workflow_doctor
+
+    paddle_overrides = _build_doctor_paddle_runtime_overrides(args)
+    qwen_overrides = _build_doctor_qwen_runtime_overrides(args)
+
+    if category == "runtime" and target == "paddle":
+        result = run_paddle_runtime_doctor(
+            models_dir=args.models_dir,
+            min_pixels=args.min_pixels,
+            explicit_binary_path=args.llama_server_path,
+            host=args.host,
+            overrides=paddle_overrides,
+            startup_timeout_sec=args.paddle_startup_timeout_sec,
+        )
+        return _log_doctor_suite_result(result, quiet=args.quiet)
+
+    if category == "runtime" and target == "qwen":
+        result = run_qwen_runtime_doctor(
+            models_dir=args.models_dir,
+            explicit_binary_path=args.llama_server_path,
+            host=args.host,
+            overrides=qwen_overrides,
+            explicit_model_path=args.corrector_model_path,
+            explicit_mmproj_path=args.corrector_mmproj_path,
+            startup_timeout_sec=args.qwen_startup_timeout_sec,
+        )
+        return _log_doctor_suite_result(result, quiet=args.quiet)
+
+    if category == "auth" and target == "gemini":
+        result = run_gemini_auth_doctor(api_key_env=args.api_key_env)
+        return _log_doctor_suite_result(result, quiet=args.quiet)
+
+    if category == "workflow" and target is not None:
+        result = run_workflow_doctor(
+            workflow=target,
+            input_sup=args.input_sup.expanduser().resolve(),
+            models_dir=args.models_dir,
+            min_pixels=args.min_pixels,
+            explicit_binary_path=args.llama_server_path,
+            host=args.host,
+            paddle_overrides=paddle_overrides,
+            qwen_overrides=qwen_overrides,
+            explicit_qwen_model_path=args.corrector_model_path,
+            explicit_qwen_mmproj_path=args.corrector_mmproj_path,
+            api_key_env=args.api_key_env,
+            startup_timeout_sec=max(args.paddle_startup_timeout_sec, args.qwen_startup_timeout_sec),
+        )
+        return _log_doctor_suite_result(result, quiet=args.quiet)
+
+    parser.error("unsupported doctor mode")
+    return 2
 
 
 def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

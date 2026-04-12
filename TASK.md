@@ -53,7 +53,7 @@ Implement the experimentally validated feature set into the product code without
 - User-facing outcome:
   - removed the remaining misleading global low-level `llama-server` override surface from `convert` and `smoke`
   - replaced it with explicit structured override families for PaddleOCR-VL and Qwen3.5
-  - preserved `doctor` as a single-role inspection tool with direct role-level override input
+  - aligned `doctor` with the same model-family posture through structured `runtime`, `auth`, and `workflow` checks
 - Proposed internal contract:
   - introduce product-owned structured override objects for `PaddleOCRVLRuntimeOverrides` and `Qwen35RuntimeOverrides`
   - resolve those family-level objects into final launch specs through internal role-local defaults

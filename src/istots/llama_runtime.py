@@ -551,6 +551,86 @@ def request_llama_server_ocr(
     return str(parsed["choices"][0]["message"]["content"]).strip()
 
 
+def run_llama_server_launch_spec_doctor(
+    spec: LlamaServerLaunchSpec,
+    *,
+    startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
+) -> LlamaServerDoctorReport:
+    issues: list[LlamaServerDoctorIssue] = []
+
+    for code, path in (
+        ("missing_binary", spec.binary_path),
+        ("missing_model", spec.model_path),
+        ("missing_mmproj", spec.mmproj_path),
+    ):
+        if not path.exists():
+            issues.append(
+                LlamaServerDoctorIssue(
+                    code=code,
+                    message=f"required runtime asset is missing: {path}",
+                )
+            )
+
+    manager_lock = _acquire_llama_server_manager_lock()
+    try:
+        _cleanup_stale_llama_server_manager_state()
+        try:
+            port_in_use = is_port_in_use(spec.host, spec.port)
+        except OSError as exc:
+            issues.append(
+                LlamaServerDoctorIssue(
+                    code="port_probe_failed",
+                    message=f"failed to probe port readiness: {exc}",
+                )
+            )
+            port_in_use = False
+    finally:
+        _release_llama_server_manager_lock(manager_lock)
+
+    if port_in_use:
+        issues.append(
+            LlamaServerDoctorIssue(
+                code="port_in_use",
+                message=f"requested port is already in use: {spec.host}:{spec.port}",
+            )
+        )
+
+    if issues:
+        return LlamaServerDoctorReport(
+            role=spec.role,
+            profile=spec.profile,
+            launch_spec=spec,
+            issues=tuple(issues),
+        )
+
+    process = start_llama_server(spec, startup_timeout_sec=startup_timeout_sec)
+    try:
+        smoke_response = request_llama_server_smoke(spec)
+    except Exception as exc:
+        issues.append(
+            LlamaServerDoctorIssue(
+                code="smoke_failed",
+                message=str(exc),
+            )
+        )
+        return LlamaServerDoctorReport(
+            role=spec.role,
+            profile=spec.profile,
+            launch_spec=spec,
+            issues=tuple(issues),
+        )
+    finally:
+        stop_llama_server(process)
+
+    return LlamaServerDoctorReport(
+        role=spec.role,
+        profile=spec.profile,
+        launch_spec=spec,
+        issues=tuple(),
+        smoke_response=smoke_response,
+    )
+
+
 def run_llama_server_doctor(
     *,
     role: str | LlamaServerRole,
@@ -603,78 +683,9 @@ def run_llama_server_doctor(
             issues=tuple(issues),
         )
 
-    for code, path in (
-        ("missing_model", launch_spec.model_path),
-        ("missing_mmproj", launch_spec.mmproj_path),
-    ):
-        if not path.exists():
-            issues.append(
-                LlamaServerDoctorIssue(
-                    code=code,
-                    message=f"required runtime asset is missing: {path}",
-                )
-            )
-
-    manager_lock = _acquire_llama_server_manager_lock()
-    try:
-        _cleanup_stale_llama_server_manager_state()
-        try:
-            port_in_use = is_port_in_use(launch_spec.host, launch_spec.port)
-        except OSError as exc:
-            issues.append(
-                LlamaServerDoctorIssue(
-                    code="port_probe_failed",
-                    message=f"failed to probe port readiness: {exc}",
-                )
-            )
-            port_in_use = False
-    finally:
-        _release_llama_server_manager_lock(manager_lock)
-
-    if port_in_use:
-        issues.append(
-            LlamaServerDoctorIssue(
-                code="port_in_use",
-                message=(
-                    "requested port is already in use: "
-                    f"{launch_spec.host}:{launch_spec.port}"
-                ),
-            )
-        )
-
-    if issues:
-        return LlamaServerDoctorReport(
-            role=normalized_role,
-            profile=normalized_overrides.profile,
-            launch_spec=launch_spec,
-            issues=tuple(issues),
-        )
-
-    process = start_llama_server(launch_spec, startup_timeout_sec=startup_timeout_sec)
-    try:
-        smoke_response = request_llama_server_smoke(launch_spec)
-    except Exception as exc:
-        issues.append(
-            LlamaServerDoctorIssue(
-                code="smoke_failed",
-                message=str(exc),
-            )
-        )
-        return LlamaServerDoctorReport(
-            role=normalized_role,
-            profile=normalized_overrides.profile,
-            launch_spec=launch_spec,
-            issues=tuple(issues),
-        )
-    finally:
-        stop_llama_server(process)
-
-    return LlamaServerDoctorReport(
-        role=normalized_role,
-        profile=normalized_overrides.profile,
-        launch_spec=launch_spec,
-        issues=tuple(),
-        smoke_response=smoke_response,
+    return run_llama_server_launch_spec_doctor(
+        launch_spec,
+        startup_timeout_sec=startup_timeout_sec,
     )
 
 
