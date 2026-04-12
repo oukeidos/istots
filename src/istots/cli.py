@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 from pathlib import Path
 from typing import Sequence
 
@@ -71,6 +72,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.register_subcommand_parser(doctor)
     _add_doctor_arguments(doctor)
 
+    smoke = subparsers.add_parser(
+        "smoke",
+        help="Run quick validation against the retained sample SUP",
+    )
+    parser.register_subcommand_parser(smoke)
+    _add_smoke_arguments(smoke)
+
+    return parser
+
+
+def _build_convert_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="istots convert")
+    _add_convert_arguments(parser)
+    return parser
+
+
+def _build_smoke_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="istots smoke")
+    _add_smoke_arguments(parser)
     return parser
 
 
@@ -275,6 +295,189 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         "--force",
         action="store_true",
         help="Overwrite output file without prompting",
+    )
+
+
+def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--input-sup",
+        type=Path,
+        default=None,
+        help="Quick-validation SUP path (default: ../test/sample.sup)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for smoke artifacts (default: a temporary directory)",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Device selection (default: auto)",
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Local model cache root (default: ~/.cache/istots/models "
+            "or ISTOTS_MODELS_DIR)."
+        ),
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=256,
+        help="Max generated tokens per subtitle image",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="OCR batch size (default: 1)",
+    )
+    parser.add_argument(
+        "--ocr-mode",
+        choices=("default", "fast"),
+        default="default",
+        help=(
+            "Quick-validation OCR mode for the retained primary engine "
+            "(default: default)"
+        ),
+    )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=("auto", "cpu", "memory"),
+        default="auto",
+        help="llama-server runtime profile for smoke validation (default: auto)",
+    )
+    parser.add_argument(
+        "--llama-server-path",
+        type=Path,
+        default=None,
+        help="Explicit llama-server binary path for smoke validation",
+    )
+    parser.add_argument(
+        "--runtime-port",
+        type=int,
+        default=None,
+        help="Override the retained llama-server port for smoke validation",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Override llama-server thread count for smoke validation",
+    )
+    parser.add_argument(
+        "--threads-batch",
+        type=int,
+        default=None,
+        help="Override llama-server batch thread count for smoke validation",
+    )
+    parser.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=None,
+        help="Override llama-server GPU layer count for smoke validation",
+    )
+    parser.add_argument(
+        "--no-mmproj-offload",
+        action="store_true",
+        help="Disable mmproj offload for smoke validation",
+    )
+    parser.add_argument(
+        "--startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="llama-server startup timeout in seconds for smoke validation",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs",
+    )
+    parser.add_argument(
+        "--furigana-mask",
+        action="store_true",
+        help="Enable optional furigana masking before OCR (default: disabled)",
+    )
+    parser.add_argument(
+        "--no-detector",
+        action="store_true",
+        help="Skip the retained hybrid detector manifest in smoke validation",
+    )
+    parser.add_argument(
+        "--corrector",
+        choices=("off", "qwen-local", "gemini"),
+        default="off",
+        help=(
+            "Attach the retained conservative corrector to smoke validation. "
+            "Requires `--ocr-mode default`."
+        ),
+    )
+    parser.add_argument(
+        "--corrector-model-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector model path for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-mmproj-path",
+        type=Path,
+        default=None,
+        help="Explicit local GGUF corrector mmproj path for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-port",
+        type=int,
+        default=None,
+        help="Override the retained corrector port for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-startup-timeout-sec",
+        type=float,
+        default=120.0,
+        help="llama-server startup timeout in seconds for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-model",
+        default="gemini-3.1-pro-preview",
+        help="Gemini model id for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-api-key-env",
+        default="GEMINI_API_KEY",
+        help="Environment variable name holding the Gemini API key.",
+    )
+    parser.add_argument(
+        "--corrector-thinking-level",
+        default="low",
+        help="Optional Gemini thinking level for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-media-resolution",
+        default=None,
+        help="Optional Gemini media resolution level for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional cache directory for `--corrector gemini` requests.",
+    )
+    parser.add_argument(
+        "--srt-policy",
+        choices=("safe", "overlap"),
+        default="safe",
+        help="SRT output policy: merge simultaneous windows safely or keep overlapping cues",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite generated smoke artifacts without prompting",
     )
 
 
@@ -495,7 +698,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return argv
 
-    known_commands = {"convert", "setup", "materialize-mmproj", "doctor"}
+    known_commands = {"convert", "setup", "materialize-mmproj", "doctor", "smoke"}
     first = argv[0]
     if first in known_commands or first.startswith("-"):
         return argv
@@ -516,6 +719,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         return run_materialize_mmproj(args)
     if args.command == "doctor":
         return run_doctor(args)
+    if args.command == "smoke":
+        return run_smoke(args)
     if args.command == "convert":
         return run_convert(args)
 
@@ -639,9 +844,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 1
 
 
-def run_convert(args: argparse.Namespace) -> int:
-    parser = build_parser()
-
+def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.max_items is not None and args.max_items <= 0:
         parser.error("--max-items must be a positive integer")
     if args.max_new_tokens <= 0:
@@ -670,6 +873,82 @@ def run_convert(args: argparse.Namespace) -> int:
             parser.error("--corrector-model-path and --corrector-mmproj-path are only valid with --corrector qwen-local")
         if args.corrector_port is not None:
             parser.error("--corrector-port is only valid with --corrector qwen-local")
+
+
+def _default_smoke_input_sup() -> Path:
+    return (Path(__file__).resolve().parents[3] / "test" / "sample.sup").resolve()
+
+
+def run_smoke(args: argparse.Namespace) -> int:
+    parser = _build_smoke_parser()
+
+    if args.output_dir is not None:
+        output_dir = args.output_dir.expanduser().resolve()
+        if output_dir.exists() and not output_dir.is_dir():
+            parser.error("--output-dir must be a directory path")
+    else:
+        output_dir = Path(tempfile.mkdtemp(prefix="istots-smoke-")).resolve()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    input_sup = (
+        args.input_sup.expanduser().resolve()
+        if args.input_sup is not None
+        else _default_smoke_input_sup()
+    )
+    output_srt = output_dir / f"{input_sup.stem}.smoke.srt"
+    detector_output = None
+    if args.ocr_mode == "default" and not args.no_detector:
+        detector_output = output_dir / f"{input_sup.stem}.detector.jsonl"
+    corrector_output = None
+    if args.corrector != "off":
+        corrector_output = output_dir / f"{input_sup.stem}.corrected.jsonl"
+
+    convert_args = argparse.Namespace(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine="llama-server",
+        device=args.device,
+        model_id=DEFAULT_MODEL_ID,
+        models_dir=args.models_dir,
+        max_items=None,
+        max_new_tokens=args.max_new_tokens,
+        batch_size=args.batch_size,
+        ocr_mode=args.ocr_mode,
+        runtime_profile=args.runtime_profile,
+        llama_server_path=args.llama_server_path,
+        runtime_port=args.runtime_port,
+        threads=args.threads,
+        threads_batch=args.threads_batch,
+        gpu_layers=args.gpu_layers,
+        no_mmproj_offload=args.no_mmproj_offload,
+        startup_timeout_sec=args.startup_timeout_sec,
+        quiet=args.quiet,
+        furigana_mask=args.furigana_mask,
+        detector_output=detector_output,
+        corrector=args.corrector,
+        corrector_output=corrector_output,
+        corrector_model_path=args.corrector_model_path,
+        corrector_mmproj_path=args.corrector_mmproj_path,
+        corrector_port=args.corrector_port,
+        corrector_startup_timeout_sec=args.corrector_startup_timeout_sec,
+        corrector_gemini_model=args.corrector_gemini_model,
+        corrector_api_key_env=args.corrector_api_key_env,
+        corrector_thinking_level=args.corrector_thinking_level,
+        corrector_media_resolution=args.corrector_media_resolution,
+        corrector_cache_dir=args.corrector_cache_dir,
+        srt_policy=args.srt_policy,
+        force=args.force,
+    )
+    return _run_convert_impl(convert_args, parser)
+
+
+def run_convert(args: argparse.Namespace) -> int:
+    parser = _build_convert_parser()
+    return _run_convert_impl(args, parser)
+
+
+def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _validate_convert_args(parser, args)
 
     configure_logging(verbose=not args.quiet)
 

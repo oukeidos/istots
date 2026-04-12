@@ -50,6 +50,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--min-pixels MIN_PIXELS" in captured.out
     assert "--runtime-profile {auto,cpu,memory}" in captured.out
     assert "--profile {auto,cpu,memory}" in captured.out
+    assert "--output-dir OUTPUT_DIR" in captured.out
+    assert "--no-detector" in captured.out
     assert "--force" in captured.out
 
 
@@ -83,6 +85,16 @@ def test_run_routes_doctor(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "run_doctor", fake_doctor)
     assert cli.run(["doctor"]) == 19
+
+
+def test_run_routes_smoke(monkeypatch) -> None:
+    def fake_smoke(args) -> int:
+        assert args.command == "smoke"
+        assert args.ocr_mode == "default"
+        return 23
+
+    monkeypatch.setattr(cli, "run_smoke", fake_smoke)
+    assert cli.run(["smoke"]) == 23
 
 
 def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> None:
@@ -339,6 +351,104 @@ def test_run_convert_defaults_to_llama_server(monkeypatch, tmp_path: Path) -> No
     assert captured["ocr_mode"] == "default"
     assert captured["local_files_only"] is False
     assert captured["models_dir"] is None
+
+
+def test_run_smoke_uses_default_sample_and_auto_detector(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_dir / "sample.smoke.srt",
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=0,
+            correction_applied_count=0,
+        ),
+    )
+
+    rc = cli.run(["smoke", "--output-dir", str(output_dir), "--quiet"])
+
+    assert rc == 0
+    assert captured["input_sup"] == sample_sup.resolve()
+    assert captured["output_srt"] == (output_dir / "sample.smoke.srt").resolve()
+    assert captured["detector_output"] == (output_dir / "sample.detector.jsonl").resolve()
+    assert captured["engine"] == "llama-server"
+    assert captured["ocr_mode"] == "default"
+    assert captured["models_dir"] is None
+
+
+def test_run_smoke_disables_detector_for_fast_mode(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_dir / "sample.smoke.srt",
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(["smoke", "--output-dir", str(output_dir), "--ocr-mode", "fast", "--quiet"])
+
+    assert rc == 0
+    assert captured["ocr_mode"] == "fast"
+    assert captured["detector_output"] is None
+
+
+def test_run_smoke_auto_writes_corrector_manifest(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke"
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_dir / "sample.smoke.srt",
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=1,
+            correction_applied_count=1,
+        ),
+    )
+
+    rc = cli.run(
+        [
+            "smoke",
+            "--output-dir",
+            str(output_dir),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.QWEN_LOCAL
+    assert config.output_path == (output_dir / "sample.corrected.jsonl").resolve()
 
 
 def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path) -> None:

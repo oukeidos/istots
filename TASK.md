@@ -14,7 +14,7 @@ Implement the experimentally validated feature set into the product code without
 - Step 6. Default Detector Integration: completed
 - Step 7. Conservative Correction Integration: completed
 - Step 8. `HF` Optional Fallback Wiring: completed
-- Step 9. Minimal Regression Probe Wiring: pending
+- Step 9. Minimal Regression Probe Wiring: completed
 - Step 10. Final Documentation Pass: pending
 
 ## Current Focus
@@ -28,4 +28,5 @@ Implement the experimentally validated feature set into the product code without
 - Step 6 completed: added retained hybrid detector manifest generation with non-tall `ocr-fast` alternate-read comparisons, tall `detector` repeat-drift comparisons, and disagreement labeling for correction-ready downstream use.
 - Step 7 completed: added opt-in conservative correction on `convert`, retained anchor-only merge behavior, local Qwen correction wiring, and Gemini tall-row prompt gating on top of the retained hybrid detector trigger surface.
 - Step 8 completed: moved the heavyweight HF runtime behind an explicit optional dependency contract while keeping `hf` as a simple explicit fallback engine.
-- Next focus: Step 9 minimal regression probe wiring.
+- Step 9 completed: added a dedicated `smoke` quick-validation command around the retained `../test/sample.sup` asset, auto-wired retained smoke artifacts, and locked the sample parser contract with regression coverage.
+- Next focus: Step 10 final documentation pass.

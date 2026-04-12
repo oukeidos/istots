@@ -24,6 +24,9 @@
 - Added correction manifest export and regression coverage for anchor merge, correction CLI validation, and detector-to-correction pipeline composition.
 - Step 8: moved the heavyweight HF runtime behind an explicit optional dependency contract while keeping `hf` as the explicit fallback engine.
 - Updated HF-facing CLI and runtime messaging to point users to the optional HF install path and added packaging regression coverage for the retained fallback dependency posture.
+- Step 9: added a dedicated `istots smoke` quick-validation command that defaults to the retained `../test/sample.sup` asset.
+- Auto-wired smoke SRT, detector, and correction artifact paths for the retained primary `llama-server` workflow and kept fast-mode smoke available on the same sample.
+- Added regression coverage for the new smoke CLI surface and for the frozen `sample.sup` parser contract used by required smoke tests.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.
