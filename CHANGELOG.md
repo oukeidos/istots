@@ -29,6 +29,8 @@
 - Added regression coverage for the new smoke CLI surface and for the frozen `sample.sup` parser contract used by required smoke tests.
 - Step 10: refreshed the product-facing README around the retained setup boundary, runtime profiles, host patterns, and the default smoke workflow.
 - Documented the retained detector/corrector posture and the recommended quick-validation order from setup through doctor, smoke, and full convert.
+- Post-plan stability fix: changed the OCR backend lifecycle so heavy OCR runtimes are opened one role at a time instead of being kept resident concurrently across fast, detector, and local-corrector stages.
+- Added regression coverage to lock single-backend residency across retained hybrid OCR, detector, and correction flows.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

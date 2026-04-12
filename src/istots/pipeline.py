@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -162,17 +163,13 @@ def convert_sup_to_srt(
             verbose=verbose,
         )
 
-    backend = None
-
-    try:
-        backend, device = _create_ocr_backends(
-            [backend_config],
-            preferred_device=preferred_device,
-            verbose=verbose,
-        )
+    with _managed_ocr_backend(
+        backend_config,
+        preferred_device=preferred_device,
+        verbose=verbose,
+    ) as (active_backend, device):
         if verbose:
             logger.info("using device: %s", device)
-        active_backend = backend[0]
         segments: list[_WindowTextSegment] = []
         processed = 0
         total = 0
@@ -287,8 +284,6 @@ def convert_sup_to_srt(
             written_count=len(entries),
             device_used=device,
         )
-    finally:
-        _close_ocr_backends(backend, verbose=verbose)
 
 
 def _convert_sup_to_srt_fast(
@@ -326,69 +321,58 @@ def _convert_sup_to_srt_fast(
     if tall_inputs:
         backend_specs.append(("ocr", replace(backend_config, role="ocr")))
 
-    active_backends: list[Any] = []
     device = backend_config.device
-    try:
-        active_backends, device = _create_ocr_backends(
-            [config for _, config in backend_specs],
-            preferred_device=preferred_device,
+    device_logged = False
+    recognized_by_index: dict[int, str] = {}
+
+    for role, config in backend_specs:
+        branch_inputs = wide_inputs if role == "ocr-fast" else tall_inputs
+        branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
+        if not branch_inputs:
+            continue
+        with _managed_ocr_backend(
+            replace(config, device=device),
+            preferred_device=preferred_device if not device_logged else device,
             verbose=verbose,
-        )
-        if verbose:
-            logger.info("using device: %s", device)
-        backends_by_role = {
-            role: backend for (role, _), backend in zip(backend_specs, active_backends, strict=True)
-        }
-        recognized_by_index: dict[int, str] = {}
-
-        if wide_inputs:
-            if verbose:
-                logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(wide_inputs))
-            wide_texts = _recognize_prepared_inputs(
-                wide_inputs,
-                backend=backends_by_role["ocr-fast"],
+        ) as (backend, device):
+            if verbose and not device_logged:
+                logger.info("using device: %s", device)
+            device_logged = True
+            if role == "ocr-fast":
+                if verbose:
+                    logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(branch_inputs))
+            elif verbose:
+                logger.info("running default OCR branch: tall=%d role=ocr", len(branch_inputs))
+            branch_texts = _recognize_prepared_inputs(
+                branch_inputs,
+                backend=backend,
                 batch_size=batch_size,
                 verbose=verbose,
-                branch_label="non-tall-fast",
+                branch_label=branch_label,
             )
-            for item, text in zip(wide_inputs, wide_texts, strict=True):
+            for item, text in zip(branch_inputs, branch_texts, strict=True):
                 recognized_by_index[item.index] = text
 
-        if tall_inputs:
-            if verbose:
-                logger.info("running default OCR branch: tall=%d role=ocr", len(tall_inputs))
-            tall_texts = _recognize_prepared_inputs(
-                tall_inputs,
-                backend=backends_by_role["ocr"],
-                batch_size=batch_size,
-                verbose=verbose,
-                branch_label="tall-default",
-            )
-            for item, text in zip(tall_inputs, tall_texts, strict=True):
-                recognized_by_index[item.index] = text
-
-        segments = [
-            segment
-            for item in prepared_inputs
-            if (segment := _build_window_text_segment(item.frame, recognized_by_index.get(item.index, ""))) is not None
-        ]
-        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
-        write_srt(entries, output_srt)
-        if verbose:
-            logger.info(
-                "conversion finished: processed=%d written=%d output=%s",
-                len(prepared_inputs),
-                len(entries),
-                output_srt,
-            )
-        return ConversionResult(
-            output_srt=output_srt,
-            processed_count=len(prepared_inputs),
-            written_count=len(entries),
-            device_used=device,
+    segments = [
+        segment
+        for item in prepared_inputs
+        if (segment := _build_window_text_segment(item.frame, recognized_by_index.get(item.index, ""))) is not None
+    ]
+    entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+    write_srt(entries, output_srt)
+    if verbose:
+        logger.info(
+            "conversion finished: processed=%d written=%d output=%s",
+            len(prepared_inputs),
+            len(entries),
+            output_srt,
         )
-    finally:
-        _close_ocr_backends(active_backends, verbose=verbose)
+    return ConversionResult(
+        output_srt=output_srt,
+        processed_count=len(prepared_inputs),
+        written_count=len(entries),
+        device_used=device,
+    )
 
 
 def _convert_sup_to_srt_default_with_detector(
@@ -411,81 +395,78 @@ def _convert_sup_to_srt_default_with_detector(
         enable_furigana_mask=enable_furigana_mask,
         verbose=verbose,
     )
-    active_backends: list[Any] = []
     device = backend_config.device
-    try:
-        active_backends, device = _create_ocr_backends(
-            [backend_config],
-            preferred_device=preferred_device,
-            verbose=verbose,
-        )
+    with _managed_ocr_backend(
+        backend_config,
+        preferred_device=preferred_device,
+        verbose=verbose,
+    ) as (baseline_backend, device):
         if verbose:
             logger.info("using device: %s", device)
         baseline_texts = _recognize_prepared_inputs(
             prepared_inputs,
-            backend=active_backends[0],
+            backend=baseline_backend,
             batch_size=batch_size,
             verbose=verbose,
             branch_label="default",
         )
-        detector_records = _build_hybrid_detector_records(
-            prepared_inputs,
-            baseline_texts,
-            detector_backend_config=replace(backend_config, device=device),
+
+    detector_records = _build_hybrid_detector_records(
+        prepared_inputs,
+        baseline_texts,
+        detector_backend_config=replace(backend_config, device=device),
+        batch_size=batch_size,
+        verbose=verbose,
+    )
+    if detector_output is not None:
+        write_hybrid_detector_records(detector_output, detector_records)
+
+    correction_records: list[ConservativeCorrectionRecord] = []
+    final_texts = list(baseline_texts)
+    if corrector_config is not None:
+        correction_records = _apply_conservative_corrections(
+            prepared_inputs=prepared_inputs,
+            detector_records=detector_records,
+            corrector_config=corrector_config,
+            preferred_device=preferred_device,
+            current_device=device,
+            runtime_binary_path=backend_config.binary_path,
+            runtime_host=backend_config.host,
             batch_size=batch_size,
             verbose=verbose,
         )
-        if detector_output is not None:
-            write_hybrid_detector_records(detector_output, detector_records)
+        for record in correction_records:
+            final_texts[record.index] = record.conservative_merged_text
+        if corrector_config.output_path is not None:
+            write_correction_records(corrector_config.output_path, correction_records)
 
-        correction_records: list[ConservativeCorrectionRecord] = []
-        final_texts = list(baseline_texts)
-        if corrector_config is not None:
-            correction_records = _apply_conservative_corrections(
-                prepared_inputs=prepared_inputs,
-                detector_records=detector_records,
-                corrector_config=corrector_config,
-                preferred_device=preferred_device,
-                current_device=device,
-                runtime_binary_path=backend_config.binary_path,
-                runtime_host=backend_config.host,
-                batch_size=batch_size,
-                verbose=verbose,
-            )
-            for record in correction_records:
-                final_texts[record.index] = record.conservative_merged_text
-            if corrector_config.output_path is not None:
-                write_correction_records(corrector_config.output_path, correction_records)
-
-        segments = [
-            segment
-            for item, text in zip(prepared_inputs, final_texts, strict=True)
-            if (segment := _build_window_text_segment(item.frame, text)) is not None
-        ]
-        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
-        write_srt(entries, output_srt)
-        if verbose:
-            logger.info(
-                "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d output=%s",
-                len(prepared_inputs),
-                len(entries),
-                len(detector_records),
-                len(correction_records),
-                output_srt,
-            )
-        return ConversionResult(
-            output_srt=output_srt,
-            processed_count=len(prepared_inputs),
-            written_count=len(entries),
-            device_used=device,
-            detector_record_count=len(detector_records),
-            correction_record_count=len(correction_records),
-            correction_applied_count=sum(
-                1 for record in correction_records if record.merged_changed
-            ),
+    segments = [
+        segment
+        for item, text in zip(prepared_inputs, final_texts, strict=True)
+        if (segment := _build_window_text_segment(item.frame, text)) is not None
+    ]
+    entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+    write_srt(entries, output_srt)
+    if verbose:
+        logger.info(
+            "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d output=%s",
+            len(prepared_inputs),
+            len(entries),
+            len(detector_records),
+            len(correction_records),
+            output_srt,
         )
-    finally:
-        _close_ocr_backends(active_backends, verbose=verbose)
+    return ConversionResult(
+        output_srt=output_srt,
+        processed_count=len(prepared_inputs),
+        written_count=len(entries),
+        device_used=device,
+        detector_record_count=len(detector_records),
+        correction_record_count=len(correction_records),
+        correction_applied_count=sum(
+            1 for record in correction_records if record.merged_changed
+        ),
+    )
 
 
 def _normalize_ocr_mode(ocr_mode: str) -> str:
@@ -523,60 +504,72 @@ def _collect_prepared_ocr_inputs(
     ]
 
 
-def _create_ocr_backends(
-    configs: list[OCRBackendConfig],
+def _open_ocr_backend(
+    config: OCRBackendConfig,
     *,
     preferred_device: str,
     verbose: bool,
-) -> tuple[list[Any], str]:
-    if not configs:
-        return [], "cpu"
+) -> tuple[Any, str]:
+    if config is None:
+        raise RuntimeError("OCR backend config is required")
 
     try:
-        return _attempt_create_ocr_backends(configs, verbose=verbose), configs[0].device
+        return _attempt_open_ocr_backend(config, verbose=verbose), config.device
     except Exception as exc:
-        if preferred_device.lower() == "auto" and configs[0].device == "gpu":
+        if preferred_device.lower() == "auto" and config.device == "gpu":
             if verbose:
                 logger.warning("GPU init failed (%s). Retrying with CPU.", exc)
-            cpu_configs = [replace(config, device="cpu") for config in configs]
-            return _attempt_create_ocr_backends(cpu_configs, verbose=verbose), "cpu"
+            cpu_config = replace(config, device="cpu")
+            return _attempt_open_ocr_backend(cpu_config, verbose=verbose), "cpu"
         raise
 
 
-def _attempt_create_ocr_backends(
-    configs: list[OCRBackendConfig],
+def _attempt_open_ocr_backend(
+    config: OCRBackendConfig,
     *,
     verbose: bool,
-) -> list[Any]:
-    created: list[Any] = []
-    try:
-        for config in configs:
-            if verbose:
-                logger.info(
-                    "loading OCR backend: engine=%s role=%s model=%s device=%s",
-                    config.engine,
-                    config.role,
-                    config.model_id,
-                    config.device,
-                )
-            created.append(create_ocr_backend(config))
-        return created
-    except Exception:
-        _close_ocr_backends(created, verbose=False)
-        raise
+) -> Any:
+    if verbose:
+        logger.info(
+            "loading OCR backend: engine=%s role=%s model=%s device=%s",
+            config.engine,
+            config.role,
+            config.model_id,
+            config.device,
+        )
+    return create_ocr_backend(config)
 
 
-def _close_ocr_backends(backends: list[Any] | None, *, verbose: bool) -> None:
-    if not backends:
+def _close_ocr_backend(backend: Any | None, *, verbose: bool) -> None:
+    if backend is None:
         return
-    for backend in backends:
-        if hasattr(backend, "close"):
-            try:
-                backend.close()
-                if verbose:
-                    logger.info("OCR backend released from device memory")
-            except Exception as exc:
-                logger.warning("failed to release OCR backend cleanly: %s", exc)
+    if hasattr(backend, "close"):
+        try:
+            backend.close()
+            if verbose:
+                logger.info("OCR backend released from device memory")
+        except Exception as exc:
+            logger.warning("failed to release OCR backend cleanly: %s", exc)
+
+
+@contextmanager
+def _managed_ocr_backend(
+    config: OCRBackendConfig,
+    *,
+    preferred_device: str,
+    verbose: bool,
+) -> Iterator[tuple[Any, str]]:
+    backend = None
+    device = config.device
+    try:
+        backend, device = _open_ocr_backend(
+            config,
+            preferred_device=preferred_device,
+            verbose=verbose,
+        )
+        yield backend, device
+    finally:
+        _close_ocr_backend(backend, verbose=verbose)
 
 
 def _recognize_prepared_inputs(
@@ -690,23 +683,17 @@ def _build_hybrid_detector_records(
             )
         )
 
-    active_backends: list[Any] = []
-    try:
-        active_backends, _ = _create_ocr_backends(
-            [config for _, _, _, config in detector_specs],
+    detector_records: list[HybridDetectorRecord] = []
+    baseline_by_index = {
+        item.index: text for item, text in zip(prepared_inputs, baseline_texts, strict=True)
+    }
+
+    for branch_name, option_role, branch_inputs, config in detector_specs:
+        with _managed_ocr_backend(
+            config,
             preferred_device=detector_backend_config.device,
             verbose=verbose,
-        )
-        detector_records: list[HybridDetectorRecord] = []
-        baseline_by_index = {
-            item.index: text for item, text in zip(prepared_inputs, baseline_texts, strict=True)
-        }
-
-        for (branch_name, option_role, branch_inputs, _), backend in zip(
-            detector_specs,
-            active_backends,
-            strict=True,
-        ):
+        ) as (backend, _):
             option_texts = _recognize_prepared_inputs(
                 branch_inputs,
                 backend=backend,
@@ -738,9 +725,7 @@ def _build_hybrid_detector_records(
                         char_error_rate=diff.char_error_rate,
                     )
                 )
-        return detector_records
-    finally:
-        _close_ocr_backends(active_backends, verbose=verbose)
+    return detector_records
 
 
 def _apply_conservative_corrections(
@@ -819,22 +804,18 @@ def _apply_local_qwen_corrections(
         no_mmproj_offload=True,
         startup_timeout_sec=corrector_config.startup_timeout_sec,
     )
-    active_backends: list[Any] = []
-    try:
-        active_backends, _ = _create_ocr_backends(
-            [corrector_backend_config],
-            preferred_device=preferred_device,
-            verbose=verbose,
-        )
+    with _managed_ocr_backend(
+        corrector_backend_config,
+        preferred_device=preferred_device,
+        verbose=verbose,
+    ) as (corrector_backend, _):
         corrector_texts = _recognize_prepared_inputs(
             correction_inputs,
-            backend=active_backends[0],
+            backend=corrector_backend,
             batch_size=batch_size,
             verbose=verbose,
             branch_label="corrector-qwen-local",
         )
-    finally:
-        _close_ocr_backends(active_backends, verbose=verbose)
 
     corrector_name = corrector_name_for_config(corrector_config)
     records: list[ConservativeCorrectionRecord] = []

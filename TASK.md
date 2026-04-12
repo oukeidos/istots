@@ -31,3 +31,4 @@ Implement the experimentally validated feature set into the product code without
 - Step 9 completed: added a dedicated `smoke` quick-validation command around the retained `../test/sample.sup` asset, auto-wired retained smoke artifacts, and locked the sample parser contract with regression coverage.
 - Step 10 completed: refreshed the product-facing README around setup boundaries, runtime profiles, host patterns, the retained smoke workflow, and the detector/corrector posture.
 - The Practical Implementation Order is complete for this session.
+- Post-plan stability fix completed: the OCR pipeline now opens heavy OCR runtimes sequentially, one role at a time, to avoid concurrent residency during hybrid OCR, detector, and local-corrector flows.

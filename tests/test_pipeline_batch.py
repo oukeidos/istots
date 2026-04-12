@@ -450,11 +450,16 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
     branch_calls: list[tuple[str, list[tuple[int, int]]]] = []
     closed_roles: list[str] = []
     written_entries = []
+    live_count = 0
+    max_live_count = 0
 
     class FakeBackend:
         def __init__(self, role: str) -> None:
+            nonlocal live_count, max_live_count
             self.role = role
             self.calls = 0
+            live_count += 1
+            max_live_count = max(max_live_count, live_count)
 
         def recognize_batch(self, images):
             branch_calls.append((self.role, [image.size for image in images]))
@@ -466,7 +471,9 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
             return None
 
         def close(self) -> None:
+            nonlocal live_count
             closed_roles.append(self.role)
+            live_count -= 1
 
     def fake_iter_sup_window_frames(*args, **kwargs):
         if kwargs.get("on_total") is not None:
@@ -504,6 +511,7 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
     ]
     assert [entry.text for entry in written_entries] == ["fast-1", "default-1", "fast-2"]
     assert closed_roles == ["ocr-fast", "ocr"]
+    assert max_live_count == 1
 
 
 def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_path: Path) -> None:
@@ -550,10 +558,15 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
 
     created_roles: list[str] = []
     closed_roles: list[str] = []
+    live_count = 0
+    max_live_count = 0
 
     class FakeBackend:
         def __init__(self, role: str) -> None:
+            nonlocal live_count, max_live_count
             self.role = role
+            live_count += 1
+            max_live_count = max(max_live_count, live_count)
 
         def recognize_batch(self, images):
             if self.role == "ocr":
@@ -568,7 +581,9 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
             return None
 
         def close(self) -> None:
+            nonlocal live_count
             closed_roles.append(self.role)
+            live_count -= 1
 
     def fake_iter_sup_window_frames(*args, **kwargs):
         if kwargs.get("on_total") is not None:
@@ -599,7 +614,8 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
     assert result.processed_count == 3
     assert result.detector_record_count == 2
     assert created_roles == ["ocr", "ocr-fast", "detector"]
-    assert closed_roles == ["ocr-fast", "detector", "ocr"]
+    assert closed_roles == ["ocr", "ocr-fast", "detector"]
+    assert max_live_count == 1
     assert [row["detector_branch"] for row in manifest] == [
         "alternate_read_non_tall",
         "repeat_drift_tall",
@@ -651,10 +667,15 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
     created_configs: list[OCRBackendConfig] = []
     closed_roles: list[str] = []
     written_entries = []
+    live_count = 0
+    max_live_count = 0
 
     class FakeBackend:
         def __init__(self, role: str) -> None:
+            nonlocal live_count, max_live_count
             self.role = role
+            live_count += 1
+            max_live_count = max(max_live_count, live_count)
 
         def recognize_batch(self, images):
             if self.role == "ocr":
@@ -669,7 +690,9 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
             return None
 
         def close(self) -> None:
+            nonlocal live_count
             closed_roles.append(self.role)
+            live_count -= 1
 
     def fake_iter_sup_window_frames(*args, **kwargs):
         if kwargs.get("on_total") is not None:
@@ -718,7 +741,8 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
     assert created_configs[2].ctx_size == 4096
     assert created_configs[2].no_mmproj_offload is True
     assert [entry.text for entry in written_entries] == ["AEC"]
-    assert closed_roles == ["ocr-fast", "corrector", "ocr"]
+    assert closed_roles == ["ocr", "ocr-fast", "corrector"]
+    assert max_live_count == 1
     assert manifest[0]["corrector_prompt_style"] == "strict_ocr_v1"
     assert manifest[0]["conservative_merged_text"] == "AEC"
     assert manifest[0]["applied_op_count"] == 1
