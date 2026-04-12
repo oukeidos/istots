@@ -672,7 +672,7 @@ def _apply_local_qwen_corrections(
         n_predict=LOCAL_QWEN_MAX_NEW_TOKENS,
         reasoning="off",
         gpu_layers=None,
-        no_mmproj_offload=True,
+        no_mmproj_offload=corrector_config.local_no_mmproj_offload,
         startup_timeout_sec=corrector_config.startup_timeout_sec,
     )
     with _managed_ocr_backend(
@@ -924,4 +924,3 @@ def _progress_label(current: int, total: int) -> str:
     if total > 0:
         return f"{current}/{total} ({_percent(current, total):.1f}%)"
     return f"{current}"
-

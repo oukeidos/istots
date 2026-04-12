@@ -61,6 +61,55 @@ def test_build_llama_server_command_applies_cpu_profile_and_overrides() -> None:
         "12",
         "-tb",
         "8",
+    ]
+
+
+def test_build_llama_server_command_does_not_force_no_mmproj_offload_for_memory_profile() -> None:
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.MEMORY,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="127.0.0.1",
+        port=18080,
+    )
+
+    assert llama_runtime.build_llama_server_command(spec) == [
+        "/tmp/llama-server",
+        "-m",
+        "/tmp/model.gguf",
+        "--mmproj",
+        "/tmp/mmproj.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18080",
+    ]
+
+
+def test_build_llama_server_command_applies_explicit_no_mmproj_offload_override() -> None:
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.CORRECTOR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="127.0.0.1",
+        port=18083,
+        no_mmproj_offload=True,
+    )
+
+    assert llama_runtime.build_llama_server_command(spec) == [
+        "/tmp/llama-server",
+        "-m",
+        "/tmp/model.gguf",
+        "--mmproj",
+        "/tmp/mmproj.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18083",
         "--no-mmproj-offload",
     ]
 

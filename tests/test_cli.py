@@ -661,8 +661,48 @@ def test_run_convert_passes_qwen_local_corrector_config(monkeypatch, tmp_path: P
     assert config.mode is CorrectorMode.QWEN_LOCAL
     assert config.local_model_path == model_path.resolve()
     assert config.local_mmproj_path == mmproj_path.resolve()
+    assert config.local_no_mmproj_offload is False
     assert config.output_path == corrector_output.resolve()
     assert config.port == 19083
+
+
+def test_run_convert_passes_qwen_local_mmproj_offload_override(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--corrector-no-mmproj-offload",
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.QWEN_LOCAL
+    assert config.local_no_mmproj_offload is True
 
 
 def test_run_convert_resolves_default_qwen_local_corrector_assets(monkeypatch, tmp_path: Path) -> None:
@@ -703,6 +743,7 @@ def test_run_convert_resolves_default_qwen_local_corrector_assets(monkeypatch, t
     assert config.mode is CorrectorMode.QWEN_LOCAL
     assert config.local_model_path == resolved_model_path
     assert config.local_mmproj_path == resolved_mmproj_path
+    assert config.local_no_mmproj_offload is False
 
 
 def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path) -> None:
@@ -970,6 +1011,24 @@ def test_run_convert_rejects_qwen_local_without_paths(tmp_path: Path) -> None:
                 "qwen-local",
                 "--corrector-model-path",
                 str(tmp_path / "qwen.gguf"),
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_run_convert_rejects_qwen_mmproj_offload_override_without_qwen_local(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                str(input_sup),
+                str(output_srt),
+                "--quiet",
+                "--corrector-no-mmproj-offload",
             ]
         )
 

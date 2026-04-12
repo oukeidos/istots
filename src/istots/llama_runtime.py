@@ -384,11 +384,7 @@ def build_llama_server_command(spec: LlamaServerLaunchSpec) -> list[str]:
     ]
 
     force_cpu = spec.profile is LlamaServerProfile.CPU or spec.device == "cpu"
-    no_mmproj_offload = (
-        force_cpu
-        or spec.profile is LlamaServerProfile.MEMORY
-        or spec.no_mmproj_offload
-    )
+    no_mmproj_offload = bool(spec.no_mmproj_offload)
 
     if force_cpu:
         command.extend(["--device", "none", "--gpu-layers", "0"])

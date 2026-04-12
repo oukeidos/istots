@@ -58,6 +58,7 @@ uv run istots smoke
 uv run istots smoke --output-dir ./artifacts/smoke
 uv run istots smoke --ocr-mode fast
 uv run istots smoke --corrector qwen-local
+uv run istots smoke --corrector qwen-local --corrector-no-mmproj-offload
 uv run istots smoke --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots auth gemini set
 uv run istots smoke --corrector gemini
@@ -71,6 +72,7 @@ uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
 uv run istots input.sup output.srt --detector-output detector.jsonl
 uv run istots input.sup output.srt --corrector qwen-local
+uv run istots input.sup output.srt --corrector qwen-local --corrector-no-mmproj-offload
 uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
 ```
@@ -108,6 +110,7 @@ Global flags:
 - `--corrector-model-path CORRECTOR_MODEL_PATH`: optional explicit local GGUF corrector model path override for `--corrector qwen-local`.
 - `--corrector-mmproj-path CORRECTOR_MMPROJ_PATH`: optional explicit local GGUF corrector mmproj path override for `--corrector qwen-local`.
 - `--corrector-port PORT`: override the retained corrector port for `--corrector qwen-local`.
+- `--corrector-no-mmproj-offload`: force `--no-mmproj-offload` for `--corrector qwen-local`.
 - `--corrector-startup-timeout-sec SECONDS`: startup timeout for `--corrector qwen-local`.
 - `--corrector-gemini-model MODEL`: Gemini model id for `--corrector gemini`.
 - `--corrector-api-key-env ENV`: environment variable name used when resolving Gemini credentials from the configured `.env` file or the current shell environment.
@@ -211,7 +214,7 @@ The doctor checks:
 
 - `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
 - `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
-- `memory`: the official compatibility profile for more constrained hosts where the default profile may be too aggressive.
+- `memory`: the official compatibility profile label for more constrained hosts. Pair it with explicit overrides when doctor or smoke shows bring-up pressure.
 
 Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke` through:
 
@@ -228,7 +231,7 @@ Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke`
 
 - GPU-first host: start with the default `auto` profile and `--device auto`.
 - CPU-only host: use `--runtime-profile cpu --device cpu`.
-- Constrained GPU host: start with `--runtime-profile memory`, then tighten explicit overrides only if doctor or smoke shows bring-up pressure.
+- Constrained GPU host: start with `--runtime-profile memory`, then add explicit overrides only if doctor or smoke shows bring-up pressure.
 
 ## OCR Modes
 
@@ -248,6 +251,7 @@ Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke`
 - The retained hybrid detector disagreement surface is the default correction trigger surface.
 - `--corrector qwen-local` uses the retained `strict_ocr_v1` prompt with the retained local Qwen runtime recipe.
 - If the retained local Qwen corrector assets were provisioned with `uv run istots setup --with-qwen-corrector`, `--corrector qwen-local` can run without explicit model or mmproj path overrides.
+- `--corrector-no-mmproj-offload` is available as an opt-in Qwen local override and is not forced by default.
 - `--corrector gemini` uses `strict_ocr_v1` on non-tall rows and adds `general_vertical_hint_v1` on tall rows.
 - `uv run istots auth gemini set` stores the Gemini API key in the local keyring, and `uv run istots auth gemini env-file set /path/to/.env` configures the fallback `.env` path.
 

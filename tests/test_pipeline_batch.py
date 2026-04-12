@@ -721,13 +721,89 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
     )
     assert created_configs[2].reasoning == "off"
     assert created_configs[2].ctx_size == 4096
-    assert created_configs[2].no_mmproj_offload is True
+    assert created_configs[2].no_mmproj_offload is False
     assert [entry.text for entry in written_entries] == ["AEC"]
     assert closed_roles == ["ocr", "ocr-fast", "corrector"]
     assert max_live_count == 1
     assert manifest[0]["corrector_prompt_style"] == "strict_ocr_v1"
     assert manifest[0]["conservative_merged_text"] == "AEC"
     assert manifest[0]["applied_op_count"] == 1
+
+
+def test_convert_sup_to_srt_applies_qwen_mmproj_offload_override_when_requested(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        )
+    ]
+
+    created_configs: list[OCRBackendConfig] = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            if self.role == "ocr":
+                return ["ABC"]
+            if self.role == "ocr-fast":
+                return ["ADC"]
+            if self.role == "corrector":
+                return ["AECZ"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_configs.append(config)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.QWEN_LOCAL,
+            output_path=tmp_path / "corrected.jsonl",
+            local_model_path=tmp_path / "qwen.gguf",
+            local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
+            local_no_mmproj_offload=True,
+        ),
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    assert created_configs[2].role == "corrector"
+    assert created_configs[2].no_mmproj_offload is True
 
 
 def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_path: Path) -> None:

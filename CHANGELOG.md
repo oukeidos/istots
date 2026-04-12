@@ -39,6 +39,8 @@
 - Added `auth gemini` key management with hidden-input keyring storage, configured `.env` fallback paths, keyring-first credential resolution, and regression coverage for the new setup/auth surfaces.
 - Post-plan OCR execution cleanup: removed the product batch-execution surface and now run OCR sequentially per subtitle image across convert, smoke, detector, and corrector flows.
 - Removed the `--batch-size` CLI surface, simplified the OCR pipeline and backend execution path, and added regression coverage for the sequential-only behavior.
+- Post-plan mmproj offload cleanup: stopped forcing `--no-mmproj-offload` through shared runtime profiles and removed the default force from local Qwen correction.
+- Added an opt-in `--corrector-no-mmproj-offload` override for `qwen-local` and locked the new launch behavior with runtime, CLI, and pipeline regression coverage.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

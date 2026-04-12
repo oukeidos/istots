@@ -50,6 +50,7 @@ class CorrectorConfig:
     output_path: Path | None = None
     local_model_path: Path | None = None
     local_mmproj_path: Path | None = None
+    local_no_mmproj_offload: bool = False
     port: int | None = None
     startup_timeout_sec: float = 120.0
     api_key_env: str = "GEMINI_API_KEY"

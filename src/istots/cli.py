@@ -262,6 +262,11 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Override the retained corrector port for `--corrector qwen-local`.",
     )
     parser.add_argument(
+        "--corrector-no-mmproj-offload",
+        action="store_true",
+        help="Force `--no-mmproj-offload` for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
         "--corrector-startup-timeout-sec",
         type=float,
         default=120.0,
@@ -437,6 +442,11 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Override the retained corrector port for `--corrector qwen-local`.",
+    )
+    parser.add_argument(
+        "--corrector-no-mmproj-offload",
+        action="store_true",
+        help="Force `--no-mmproj-offload` for `--corrector qwen-local`.",
     )
     parser.add_argument(
         "--corrector-startup-timeout-sec",
@@ -1017,6 +1027,8 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--corrector requires --ocr-mode default")
     if args.corrector == "off" and args.corrector_output is not None:
         parser.error("--corrector-output requires --corrector")
+    if args.corrector != "qwen-local" and args.corrector_no_mmproj_offload:
+        parser.error("--corrector-no-mmproj-offload is only valid with --corrector qwen-local")
     if args.corrector == "qwen-local":
         has_model_path = args.corrector_model_path is not None
         has_mmproj_path = args.corrector_mmproj_path is not None
@@ -1086,6 +1098,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         corrector_model_path=args.corrector_model_path,
         corrector_mmproj_path=args.corrector_mmproj_path,
         corrector_port=args.corrector_port,
+        corrector_no_mmproj_offload=args.corrector_no_mmproj_offload,
         corrector_startup_timeout_sec=args.corrector_startup_timeout_sec,
         corrector_gemini_model=args.corrector_gemini_model,
         corrector_api_key_env=args.corrector_api_key_env,
@@ -1162,6 +1175,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             output_path=corrector_output,
             local_model_path=resolved_corrector_model_path,
             local_mmproj_path=resolved_corrector_mmproj_path,
+            local_no_mmproj_offload=args.corrector_no_mmproj_offload,
             port=args.corrector_port,
             startup_timeout_sec=args.corrector_startup_timeout_sec,
             api_key_env=args.corrector_api_key_env,
