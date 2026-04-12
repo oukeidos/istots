@@ -42,7 +42,7 @@ def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: P
     def fake_write_srt(entries, path):
         path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
@@ -94,7 +94,7 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
             kwargs["on_total"](1)
         return iter([frame])
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
@@ -148,7 +148,7 @@ def test_convert_sup_to_srt_applies_furigana_mask_when_enabled(monkeypatch, tmp_
             kwargs["on_total"](1)
         return iter([frame])
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
@@ -212,7 +212,7 @@ def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_p
         calls["count"] += 1
         return [SimpleNamespace(image=image) for image in images]
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: None)
@@ -255,7 +255,7 @@ def test_convert_sup_to_srt_builds_hf_backend_config(monkeypatch, tmp_path: Path
         captured.append(config)
         return FakeBackend()
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
@@ -274,6 +274,7 @@ def test_convert_sup_to_srt_builds_hf_backend_config(monkeypatch, tmp_path: Path
             engine=OCREngine.HF,
             model_id="org/model",
             device="cpu",
+            hf_dtype="auto",
             max_new_tokens=99,
             local_files_only=False,
             models_dir=None,
@@ -319,7 +320,7 @@ def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch
             raise RuntimeError("GPU init failed")
         return FakeBackend()
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "gpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "gpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
@@ -327,7 +328,7 @@ def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch
     result = pipeline.convert_sup_to_srt(
         input_sup=input_sup,
         output_srt=output_srt,
-        preferred_device="auto",
+        hf_device="auto",
         verbose=False,
     )
 
@@ -337,6 +338,7 @@ def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch
             engine=OCREngine.HF,
             model_id="PaddlePaddle/PaddleOCR-VL-1.5",
             device="gpu",
+            hf_dtype="auto",
             max_new_tokens=256,
             local_files_only=True,
             models_dir=None,
@@ -355,6 +357,7 @@ def test_convert_sup_to_srt_retries_backend_init_on_auto_gpu_failure(monkeypatch
             engine=OCREngine.HF,
             model_id="PaddlePaddle/PaddleOCR-VL-1.5",
             device="cpu",
+            hf_dtype="auto",
             max_new_tokens=256,
             local_files_only=True,
             models_dir=None,
@@ -470,7 +473,7 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
         written_entries.extend(entries)
         path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
@@ -578,7 +581,7 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
         created_roles.append(config.role)
         return FakeBackend(config.role)
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
@@ -690,7 +693,7 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
         written_entries.extend(entries)
         path.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
@@ -699,6 +702,7 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
         input_sup=input_sup,
         output_srt=output_srt,
         engine=OCREngine.LLAMA_SERVER,
+        runtime_profile="cpu",
         corrector_config=CorrectorConfig(
             mode=CorrectorMode.QWEN_LOCAL,
             output_path=corrector_output,
@@ -720,7 +724,10 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
         "Preserve line breaks. Do not explain."
     )
     assert created_configs[2].reasoning == "off"
+    assert created_configs[2].profile == "cpu"
     assert created_configs[2].ctx_size == 4096
+    assert created_configs[2].threads is None
+    assert created_configs[2].threads_batch is None
     assert created_configs[2].no_mmproj_offload is False
     assert [entry.text for entry in written_entries] == ["AEC"]
     assert closed_roles == ["ocr", "ocr-fast", "corrector"]
@@ -782,7 +789,7 @@ def test_convert_sup_to_srt_applies_qwen_mmproj_offload_override_when_requested(
         created_configs.append(config)
         return FakeBackend(config.role)
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
@@ -864,7 +871,7 @@ def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_p
         gemini_calls.append(shape)
         return "AECZ", "general_vertical_hint_v1", ""
 
-    monkeypatch.setattr(pipeline, "resolve_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
     monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
     monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
     monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)

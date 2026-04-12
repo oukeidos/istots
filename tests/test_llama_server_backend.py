@@ -48,7 +48,7 @@ def test_llama_server_backend_starts_runtime_and_recognizes(monkeypatch, tmp_pat
         lambda proc: stopped.append(proc),
     )
 
-    backend = LlamaServerOCRBackend(device="gpu", max_new_tokens=64, models_dir=tmp_path)
+    backend = LlamaServerOCRBackend(max_new_tokens=64, models_dir=tmp_path)
     try:
         assert backend.recognize_batch([Image.new("RGB", (2, 2), "white")]) == ["abc"]
     finally:
@@ -83,7 +83,7 @@ def test_llama_server_backend_rejects_missing_assets(monkeypatch, tmp_path: Path
     )
 
     try:
-        LlamaServerOCRBackend(device="gpu", models_dir=tmp_path)
+        LlamaServerOCRBackend(models_dir=tmp_path)
     except RuntimeError as exc:
         assert "required llama-server runtime assets are missing" in str(exc)
     else:

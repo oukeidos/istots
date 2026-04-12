@@ -88,7 +88,8 @@ Global flags:
 
 - `--engine {llama-server,hf}`: choose the OCR engine. Default is `llama-server`. Use `hf` for the explicit fallback path.
 - `--engine hf` requires the optional HF runtime from `uv sync --extra hf`.
-- `--device {auto,cpu,gpu}`: choose the inference device. `auto` prefers GPU and falls back to CPU.
+- `--hf-device {auto,cpu,gpu}`: HF-only device selection. `auto` prefers CUDA when available and otherwise uses CPU.
+- `--hf-dtype {auto,float32,float16,bfloat16}`: HF-only torch dtype policy. `auto` prefers BF16 on supported GPU or CPU paths and otherwise falls back conservatively.
 - `--model-id MODEL_ID`: HF model ID or local HF model path for `--engine hf`.
 - `--models-dir MODELS_DIR`: local model cache root. Default is `~/.cache/istots/models` or `ISTOTS_MODELS_DIR`.
 - `--max-items MAX_ITEMS`: process only the first N subtitle items for debugging.
@@ -96,6 +97,8 @@ Global flags:
 - OCR requests run sequentially, one subtitle image at a time.
 - `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
 - `--runtime-profile {auto,cpu}`: retained `llama-server` runtime profile. Default is `auto`.
+- `--runtime-profile auto` leaves low-level hardware selection to `llama-server`.
+- `--runtime-profile cpu` forces `llama-server` CPU execution.
 - `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
 - `--runtime-port PORT`: override the retained `llama-server` port for convert when `--ocr-mode default` is used.
 - `--threads N`: override `llama-server` thread count.
@@ -215,9 +218,8 @@ The doctor checks:
 - `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
 - `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
 
-Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke` through:
+Advanced `llama-server` overrides remain available on `convert`, `doctor`, and `smoke` through:
 
-- `--device`
 - `--runtime-profile`
 - `--runtime-port`
 - `--threads`
@@ -228,8 +230,8 @@ Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke`
 
 ## Host Patterns
 
-- GPU-first host: start with the default `auto` profile and `--device auto`.
-- CPU-only host: use `--runtime-profile cpu --device cpu`.
+- GPU-capable host: start with the default `auto` profile and let `llama-server` choose its own hardware path.
+- CPU-only host: use `--runtime-profile cpu`.
 
 ## OCR Modes
 

@@ -118,10 +118,16 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="OCR engine selection (default: llama-server). `hf` is the explicit optional fallback path.",
     )
     parser.add_argument(
-        "--device",
+        "--hf-device",
         choices=("auto", "cpu", "gpu"),
         default="auto",
-        help="Device selection (default: auto)",
+        help="HF-only device selection when using `--engine hf` (default: auto)",
+    )
+    parser.add_argument(
+        "--hf-dtype",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        default="auto",
+        help="HF-only torch dtype policy when using `--engine hf` (default: auto)",
     )
     parser.add_argument(
         "--model-id",
@@ -323,12 +329,6 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="Directory for smoke artifacts (default: a temporary directory)",
-    )
-    parser.add_argument(
-        "--device",
-        choices=("auto", "cpu", "gpu"),
-        default="auto",
-        help="Device selection (default: auto)",
     )
     parser.add_argument(
         "--models-dir",
@@ -731,12 +731,6 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         help="Override the retained default port for the selected role",
     )
     parser.add_argument(
-        "--device",
-        choices=("cpu", "gpu"),
-        default=None,
-        help="Override the runtime device preference",
-    )
-    parser.add_argument(
         "--threads",
         type=int,
         default=None,
@@ -969,7 +963,6 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     overrides = LlamaServerOverrides(
         profile=LlamaServerProfile(args.profile),
-        device=args.device,
         threads=args.threads,
         threads_batch=args.threads_batch,
         port=args.port,
@@ -1015,6 +1008,11 @@ def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Names
         parser.error("--max-new-tokens must be a positive integer")
     if args.ocr_mode == "fast" and args.engine != "llama-server":
         parser.error("--ocr-mode fast requires --engine llama-server")
+    if args.engine != "hf":
+        if args.hf_device != "auto":
+            parser.error("--hf-device is only valid with --engine hf")
+        if args.hf_dtype != "auto":
+            parser.error("--hf-dtype is only valid with --engine hf")
     if args.ocr_mode == "fast" and args.runtime_port is not None:
         parser.error("--runtime-port is only supported with --ocr-mode default")
     if args.detector_output is not None and args.engine != "llama-server":
@@ -1076,7 +1074,8 @@ def run_smoke(args: argparse.Namespace) -> int:
         input_sup=input_sup,
         output_srt=output_srt,
         engine="llama-server",
-        device=args.device,
+        hf_device="auto",
+        hf_dtype="auto",
         model_id=DEFAULT_MODEL_ID,
         models_dir=args.models_dir,
         max_items=None,
@@ -1222,7 +1221,8 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
         result = convert_sup_to_srt(
             input_sup=input_sup,
             output_srt=output_srt,
-            preferred_device=args.device,
+            hf_device=args.hf_device,
+            hf_dtype=args.hf_dtype,
             engine=args.engine,
             ocr_mode=args.ocr_mode,
             detector_output=detector_output,
@@ -1249,12 +1249,20 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
         return 1
 
     if not args.quiet:
-        logging.getLogger(__name__).info(
-            "done: wrote %d subtitles to %s (device=%s)",
-            result.written_count,
-            result.output_srt,
-            result.device_used,
-        )
+        if args.engine == "hf":
+            logging.getLogger(__name__).info(
+                "done: wrote %d subtitles to %s (hf-device=%s)",
+                result.written_count,
+                result.output_srt,
+                result.device_used,
+            )
+        else:
+            logging.getLogger(__name__).info(
+                "done: wrote %d subtitles to %s (llama-profile=%s)",
+                result.written_count,
+                result.output_srt,
+                result.device_used,
+            )
         if detector_output is not None:
             logging.getLogger(__name__).info(
                 "detector manifest: %s disagreements=%d",

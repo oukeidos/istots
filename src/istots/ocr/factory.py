@@ -11,6 +11,7 @@ def create_ocr_backend(config: OCRBackendConfig) -> OCRBackend:
         model_path=config.model_path,
         mmproj_path=config.mmproj_path,
         device=config.device,
+        hf_dtype=config.hf_dtype,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
         models_dir=config.models_dir,
@@ -42,7 +43,8 @@ def _create_hf_backend(config: OCRBackendConfig) -> OCRBackend:
 
     return HFPaddleOCRVLBackend(
         model_id=config.model_id,
-        device=config.device,
+        device=config.device or "cpu",
+        dtype=config.hf_dtype,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
     )
@@ -52,7 +54,6 @@ def _create_llama_server_backend(config: OCRBackendConfig) -> OCRBackend:
     from .llama_server_backend import LlamaServerOCRBackend
 
     return LlamaServerOCRBackend(
-        device=config.device,
         max_new_tokens=config.max_new_tokens,
         model_path=config.model_path,
         mmproj_path=config.mmproj_path,

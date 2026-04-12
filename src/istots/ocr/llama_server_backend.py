@@ -24,7 +24,6 @@ from .hf_backend import normalize_ocr_text
 
 @dataclass
 class LlamaServerOCRBackend:
-    device: str
     max_new_tokens: int = 256
     model_path: Path | None = None
     mmproj_path: Path | None = None
@@ -69,7 +68,6 @@ class LlamaServerOCRBackend:
                 mmproj_path=self.mmproj_path.expanduser().resolve(),
                 host=self.host,
                 port=self.port or DEFAULT_ROLE_PORTS[normalized_role],
-                device=self.device,
                 threads=self.threads,
                 threads_batch=self.threads_batch,
                 ctx_size=self.ctx_size,
@@ -83,7 +81,6 @@ class LlamaServerOCRBackend:
         else:
             overrides = LlamaServerOverrides(
                 profile=normalized_profile,
-                device=self.device,
                 threads=self.threads,
                 threads_batch=self.threads_batch,
                 port=self.port,

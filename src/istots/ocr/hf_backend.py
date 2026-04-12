@@ -17,6 +17,7 @@ ROPE_WARNING_LOGGER = "transformers.modeling_rope_utils"
 class HFPaddleOCRVLBackend:
     model_id: str
     device: str
+    dtype: str = "auto"
     max_new_tokens: int = 256
     local_files_only: bool = True
 
@@ -46,7 +47,7 @@ class HFPaddleOCRVLBackend:
             self._processor.padding_side = "left"
         self._model = AutoModelForImageTextToText.from_pretrained(
             self.model_id,
-            dtype=pick_torch_dtype(self.device),
+            dtype=pick_torch_dtype(self.device, self.dtype),
             local_files_only=self.local_files_only,
         )
         self._model.to(self._torch_device)

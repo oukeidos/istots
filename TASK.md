@@ -38,3 +38,5 @@ Implement the experimentally validated feature set into the product code without
 - Post-plan OCR execution cleanup completed: the product no longer exposes batch execution, and OCR now runs sequentially one subtitle image at a time across convert, smoke, detector, and corrector paths.
 - Post-plan mmproj offload cleanup completed: runtime profiles no longer force `--no-mmproj-offload`, and local Qwen correction now exposes it only as an explicit opt-in override.
 - Post-plan runtime profile cleanup completed: removed the no-op `memory` runtime profile and kept only `auto` and `cpu` as supported product profiles.
+- Post-plan hardware policy cleanup completed: split engine-specific hardware control so `llama-server` now relies only on runtime profiles while HF uses dedicated `hf-device` and `hf-dtype` controls.
+- Post-plan Qwen recipe cleanup completed: removed local Qwen thread-count hardcodes, kept only behavior-critical retained fields such as context size and reasoning mode, and stopped steering `llama-server` through PyTorch CUDA checks.

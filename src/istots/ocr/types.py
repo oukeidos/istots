@@ -32,7 +32,8 @@ class OCRBackendConfig:
     model_id: str = ""
     model_path: Path | None = None
     mmproj_path: Path | None = None
-    device: str = "cpu"
+    device: str | None = None
+    hf_dtype: str = "auto"
     max_new_tokens: int = 256
     local_files_only: bool = True
     models_dir: Path | None = None

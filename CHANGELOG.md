@@ -42,6 +42,8 @@
 - Post-plan mmproj offload cleanup: stopped forcing `--no-mmproj-offload` through shared runtime profiles and removed the default force from local Qwen correction.
 - Added an opt-in `--corrector-no-mmproj-offload` override for `qwen-local` and locked the new launch behavior with runtime, CLI, and pipeline regression coverage.
 - Post-plan runtime profile cleanup: removed the no-op `memory` profile from the product surface and kept `auto` and `cpu` as the supported runtime profiles.
+- Post-plan hardware policy cleanup: removed the legacy global device surface from `llama-server` flows and split hardware control into `llama-server` runtime profiles plus HF-only `--hf-device` / `--hf-dtype` options.
+- Stopped using PyTorch CUDA detection to steer `llama-server`, limited auto CPU fallback to the HF engine, and removed local Qwen thread-count hardcodes while keeping only behavior-critical recipe fields.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

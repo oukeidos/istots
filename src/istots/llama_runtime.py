@@ -68,7 +68,6 @@ class LlamaServerRoleAssets:
 @dataclass(frozen=True)
 class LlamaServerOverrides:
     profile: LlamaServerProfile = LlamaServerProfile.AUTO
-    device: str | None = None
     threads: int | None = None
     threads_batch: int | None = None
     port: int | None = None
@@ -85,7 +84,6 @@ class LlamaServerLaunchSpec:
     mmproj_path: Path
     host: str
     port: int
-    device: str | None = None
     threads: int | None = None
     threads_batch: int | None = None
     ctx_size: int | None = None
@@ -361,7 +359,6 @@ def build_llama_server_launch_spec(
         mmproj_path=assets.mmproj_path,
         host=host,
         port=normalized_overrides.port or DEFAULT_ROLE_PORTS[normalized_role],
-        device=normalized_overrides.device,
         threads=normalized_overrides.threads,
         threads_batch=normalized_overrides.threads_batch,
         gpu_layers=normalized_overrides.gpu_layers,
@@ -382,7 +379,7 @@ def build_llama_server_command(spec: LlamaServerLaunchSpec) -> list[str]:
         str(spec.port),
     ]
 
-    force_cpu = spec.profile is LlamaServerProfile.CPU or spec.device == "cpu"
+    force_cpu = spec.profile is LlamaServerProfile.CPU
     no_mmproj_offload = bool(spec.no_mmproj_offload)
 
     if force_cpu:

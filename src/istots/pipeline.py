@@ -14,8 +14,6 @@ from istots.anchor_merge import apply_union_anchor_merge, build_focus_context
 from istots.corrector import (
     LOCAL_QWEN_CTX_SIZE,
     LOCAL_QWEN_MAX_NEW_TOKENS,
-    LOCAL_QWEN_THREADS,
-    LOCAL_QWEN_THREADS_BATCH,
     STRICT_OCR_V1_PROMPT,
     ConservativeCorrectionRecord,
     CorrectorConfig,
@@ -26,7 +24,7 @@ from istots.corrector import (
     write_correction_records,
 )
 from istots.detector import HybridDetectorRecord, write_hybrid_detector_records
-from istots.device import resolve_device
+from istots.device import resolve_hf_device
 from istots.furigana_mask import build_furigana_masks
 from istots.ocr import OCRBackendConfig, OCREngine, create_ocr_backend, normalize_ocr_engine
 from istots.srt_writer import SubtitleEntry, write_srt
@@ -70,7 +68,8 @@ class _PreparedOCRInput:
 def convert_sup_to_srt(
     input_sup: Path,
     output_srt: Path,
-    preferred_device: str = "auto",
+    hf_device: str = "auto",
+    hf_dtype: str = "auto",
     engine: str | OCREngine = OCREngine.HF,
     ocr_mode: str = "default",
     detector_output: Path | None = None,
@@ -97,9 +96,10 @@ def convert_sup_to_srt(
         raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
 
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
-    device = resolve_device(preferred_device)
     normalized_engine = normalize_ocr_engine(engine)
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
+    resolved_hf_device = resolve_hf_device(hf_device) if normalized_engine is OCREngine.HF else None
+    runtime_label = resolved_hf_device if resolved_hf_device is not None else runtime_profile
     if normalized_ocr_mode == "fast" and normalized_engine is not OCREngine.LLAMA_SERVER:
         raise ValueError("fast OCR mode requires the llama-server engine")
     if detector_output is not None and normalized_engine is not OCREngine.LLAMA_SERVER:
@@ -113,7 +113,8 @@ def convert_sup_to_srt(
     backend_config = OCRBackendConfig(
         engine=normalized_engine,
         model_id=model_id,
-        device=device,
+        device=resolved_hf_device,
+        hf_dtype=hf_dtype,
         max_new_tokens=max_new_tokens,
         local_files_only=local_files_only,
         models_dir=models_dir,
@@ -138,8 +139,8 @@ def convert_sup_to_srt(
         return _convert_sup_to_srt_fast(
             input_sup=input_sup,
             output_srt=output_srt,
-            preferred_device=preferred_device,
             backend_config=backend_config,
+            runtime_label=runtime_label,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
             srt_policy=srt_policy,
@@ -149,8 +150,8 @@ def convert_sup_to_srt(
         return _convert_sup_to_srt_default_with_detector(
             input_sup=input_sup,
             output_srt=output_srt,
-            preferred_device=preferred_device,
             backend_config=backend_config,
+            runtime_label=runtime_label,
             detector_output=detector_output,
             corrector_config=corrector_config,
             max_items=max_items,
@@ -167,11 +168,11 @@ def convert_sup_to_srt(
     )
     with _managed_ocr_backend(
         backend_config,
-        preferred_device=preferred_device,
+        allow_hf_auto_cpu_fallback=normalized_engine is OCREngine.HF and hf_device == "auto",
         verbose=verbose,
-    ) as (active_backend, device):
+    ) as (active_backend, runtime_used):
         if verbose:
-            logger.info("using device: %s", device)
+            _log_runtime_selection(engine=normalized_engine, runtime_used=runtime_used)
         texts = _recognize_prepared_inputs(
             prepared_inputs,
             backend=active_backend,
@@ -196,7 +197,7 @@ def convert_sup_to_srt(
             output_srt=output_srt,
             processed_count=len(prepared_inputs),
             written_count=len(entries),
-            device_used=device,
+            device_used=runtime_used,
         )
 
 
@@ -204,8 +205,8 @@ def _convert_sup_to_srt_fast(
     *,
     input_sup: Path,
     output_srt: Path,
-    preferred_device: str,
     backend_config: OCRBackendConfig,
+    runtime_label: str,
     max_items: int | None,
     enable_furigana_mask: bool,
     srt_policy: str,
@@ -234,7 +235,6 @@ def _convert_sup_to_srt_fast(
     if tall_inputs:
         backend_specs.append(("ocr", replace(backend_config, role="ocr")))
 
-    device = backend_config.device
     device_logged = False
     recognized_by_index: dict[int, str] = {}
 
@@ -244,12 +244,12 @@ def _convert_sup_to_srt_fast(
         if not branch_inputs:
             continue
         with _managed_ocr_backend(
-            replace(config, device=device),
-            preferred_device=preferred_device if not device_logged else device,
+            config,
+            allow_hf_auto_cpu_fallback=False,
             verbose=verbose,
-        ) as (backend, device):
+        ) as (backend, _):
             if verbose and not device_logged:
-                logger.info("using device: %s", device)
+                _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_label)
             device_logged = True
             if role == "ocr-fast":
                 if verbose:
@@ -283,7 +283,7 @@ def _convert_sup_to_srt_fast(
         output_srt=output_srt,
         processed_count=len(prepared_inputs),
         written_count=len(entries),
-        device_used=device,
+        device_used=runtime_label,
     )
 
 
@@ -291,8 +291,8 @@ def _convert_sup_to_srt_default_with_detector(
     *,
     input_sup: Path,
     output_srt: Path,
-    preferred_device: str,
     backend_config: OCRBackendConfig,
+    runtime_label: str,
     detector_output: Path | None,
     corrector_config: CorrectorConfig | None,
     max_items: int | None,
@@ -308,11 +308,11 @@ def _convert_sup_to_srt_default_with_detector(
     )
     with _managed_ocr_backend(
         backend_config,
-        preferred_device=preferred_device,
+        allow_hf_auto_cpu_fallback=False,
         verbose=verbose,
-    ) as (baseline_backend, device):
+    ) as (baseline_backend, _):
         if verbose:
-            logger.info("using device: %s", device)
+            _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_label)
         baseline_texts = _recognize_prepared_inputs(
             prepared_inputs,
             backend=baseline_backend,
@@ -323,7 +323,7 @@ def _convert_sup_to_srt_default_with_detector(
     detector_records = _build_hybrid_detector_records(
         prepared_inputs,
         baseline_texts,
-        detector_backend_config=replace(backend_config, device=device),
+        detector_backend_config=backend_config,
         verbose=verbose,
     )
     if detector_output is not None:
@@ -336,8 +336,7 @@ def _convert_sup_to_srt_default_with_detector(
             prepared_inputs=prepared_inputs,
             detector_records=detector_records,
             corrector_config=corrector_config,
-            preferred_device=preferred_device,
-            current_device=device,
+            runtime_profile=backend_config.profile,
             runtime_binary_path=backend_config.binary_path,
             runtime_host=backend_config.host,
             verbose=verbose,
@@ -367,7 +366,7 @@ def _convert_sup_to_srt_default_with_detector(
         output_srt=output_srt,
         processed_count=len(prepared_inputs),
         written_count=len(entries),
-        device_used=device,
+        device_used=runtime_label,
         detector_record_count=len(detector_records),
         correction_record_count=len(correction_records),
         correction_applied_count=sum(
@@ -414,16 +413,17 @@ def _collect_prepared_ocr_inputs(
 def _open_ocr_backend(
     config: OCRBackendConfig,
     *,
-    preferred_device: str,
+    allow_hf_auto_cpu_fallback: bool,
     verbose: bool,
 ) -> tuple[Any, str]:
     if config is None:
         raise RuntimeError("OCR backend config is required")
 
+    runtime_used = config.device or config.profile
     try:
-        return _attempt_open_ocr_backend(config, verbose=verbose), config.device
+        return _attempt_open_ocr_backend(config, verbose=verbose), runtime_used
     except Exception as exc:
-        if preferred_device.lower() == "auto" and config.device == "gpu":
+        if allow_hf_auto_cpu_fallback and config.engine is OCREngine.HF and config.device == "gpu":
             if verbose:
                 logger.warning("GPU init failed (%s). Retrying with CPU.", exc)
             cpu_config = replace(config, device="cpu")
@@ -438,11 +438,11 @@ def _attempt_open_ocr_backend(
 ) -> Any:
     if verbose:
         logger.info(
-            "loading OCR backend: engine=%s role=%s model=%s device=%s",
+            "loading OCR backend: engine=%s role=%s model=%s runtime=%s",
             config.engine,
             config.role,
             config.model_id,
-            config.device,
+            config.device or config.profile,
         )
     return create_ocr_backend(config)
 
@@ -463,18 +463,18 @@ def _close_ocr_backend(backend: Any | None, *, verbose: bool) -> None:
 def _managed_ocr_backend(
     config: OCRBackendConfig,
     *,
-    preferred_device: str,
+    allow_hf_auto_cpu_fallback: bool,
     verbose: bool,
 ) -> Iterator[tuple[Any, str]]:
     backend = None
-    device = config.device
+    runtime_used = config.device or config.profile
     try:
-        backend, device = _open_ocr_backend(
+        backend, runtime_used = _open_ocr_backend(
             config,
-            preferred_device=preferred_device,
+            allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
             verbose=verbose,
         )
-        yield backend, device
+        yield backend, runtime_used
     finally:
         _close_ocr_backend(backend, verbose=verbose)
 
@@ -566,7 +566,7 @@ def _build_hybrid_detector_records(
     for branch_name, option_role, branch_inputs, config in detector_specs:
         with _managed_ocr_backend(
             config,
-            preferred_device=detector_backend_config.device,
+            allow_hf_auto_cpu_fallback=False,
             verbose=verbose,
         ) as (backend, _):
             option_texts = _recognize_prepared_inputs(
@@ -607,8 +607,7 @@ def _apply_conservative_corrections(
     prepared_inputs: list[_PreparedOCRInput],
     detector_records: list[HybridDetectorRecord],
     corrector_config: CorrectorConfig,
-    preferred_device: str,
-    current_device: str,
+    runtime_profile: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
     verbose: bool,
@@ -621,8 +620,7 @@ def _apply_conservative_corrections(
             prepared_inputs=prepared_inputs,
             detector_records=detector_records,
             corrector_config=corrector_config,
-            preferred_device=preferred_device,
-            current_device=current_device,
+            runtime_profile=runtime_profile,
             runtime_binary_path=runtime_binary_path,
             runtime_host=runtime_host,
             verbose=verbose,
@@ -642,8 +640,7 @@ def _apply_local_qwen_corrections(
     prepared_inputs: list[_PreparedOCRInput],
     detector_records: list[HybridDetectorRecord],
     corrector_config: CorrectorConfig,
-    preferred_device: str,
-    current_device: str,
+    runtime_profile: str,
     runtime_binary_path: Path | None,
     runtime_host: str,
     verbose: bool,
@@ -657,27 +654,23 @@ def _apply_local_qwen_corrections(
         model_id=str(corrector_config.local_model_path),
         model_path=corrector_config.local_model_path,
         mmproj_path=corrector_config.local_mmproj_path,
-        device=current_device,
         max_new_tokens=LOCAL_QWEN_MAX_NEW_TOKENS,
         local_files_only=True,
         role="corrector",
         prompt_text=STRICT_OCR_V1_PROMPT,
-        profile="auto",
+        profile=runtime_profile,
         binary_path=runtime_binary_path,
         host=runtime_host,
         port=corrector_config.port,
-        threads=LOCAL_QWEN_THREADS,
-        threads_batch=LOCAL_QWEN_THREADS_BATCH,
         ctx_size=LOCAL_QWEN_CTX_SIZE,
         n_predict=LOCAL_QWEN_MAX_NEW_TOKENS,
         reasoning="off",
-        gpu_layers=None,
         no_mmproj_offload=corrector_config.local_no_mmproj_offload,
         startup_timeout_sec=corrector_config.startup_timeout_sec,
     )
     with _managed_ocr_backend(
         corrector_backend_config,
-        preferred_device=preferred_device,
+        allow_hf_auto_cpu_fallback=False,
         verbose=verbose,
     ) as (corrector_backend, _):
         corrector_texts = _recognize_prepared_inputs(
@@ -701,6 +694,13 @@ def _apply_local_qwen_corrections(
             )
         )
     return records
+
+
+def _log_runtime_selection(*, engine: OCREngine, runtime_used: str) -> None:
+    if engine is OCREngine.HF:
+        logger.info("using HF device: %s", runtime_used)
+        return
+    logger.info("using llama-server runtime profile: %s", runtime_used)
 
 
 def _apply_gemini_corrections(
