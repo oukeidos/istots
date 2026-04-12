@@ -1,7 +1,7 @@
 # IStoTS: Image Subtitles to Text Subtitles
 
 `istots` converts Blu-ray `SUP` subtitles into `SRT`. The main stack is
-PaddleOCR-VL GGUF through `llama-server`, with an optional Hugging Face OCR
+PaddleOCR-VL 1.5 GGUF through `llama-server`, with an optional Hugging Face OCR
 fallback, an optional local Qwen3.5 correction route, and an optional cloud
 Gemini correction route.
 
