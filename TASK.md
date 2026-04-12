@@ -64,3 +64,73 @@ Implement the experimentally validated feature set into the product code without
   - `--qwen-no-mmproj-offload` and the wider Qwen family override surface only affect the Qwen corrector launch
   - PaddleOCR-VL launch behavior remains unchanged when only Qwen overrides are changed
   - regression tests lock the resolved launch spec for mixed Paddle/Qwen runs and verify that internal role defaults remain stable
+
+## Planned Design Work: Detector Expansion
+
+- Retained experiment read:
+  - keep the current hybrid detector as the default detector surface:
+    - `S1`
+    - non-tall:
+      - alternate-read disagreement against the retained `min_pixels=32768` branch
+    - tall:
+      - repeat-drift disagreement against a repeated retained default read
+  - add an opt-in wider detector surface:
+    - `S2`
+    - `S1` plus `p2 meaningful temp0`
+    - practical meaning:
+      - one extra same-default repeated read that is evaluated as an additional detector pass
+  - keep dominant-family widening as a separate optional recall add-on:
+    - `S3 \ S2`
+    - not part of the default detector
+    - not equivalent to the `S2` detector extension
+- Product posture to preserve:
+  - detector default remains `S1`
+  - wider detector remains opt-in only
+  - dominant-family add-on remains opt-in and explicitly recall-oriented
+  - detector stays `llama-server`-only in the product surface
+- Proposed execution shape:
+  - baseline OCR pass:
+    - retained default OCR output
+  - detector pass 1:
+    - current hybrid detector pass
+    - non-tall:
+      - `ocr-fast`
+    - tall:
+      - `detector`
+  - detector pass 2:
+    - repeated retained default read for the wider `S2` extension
+    - produce `p2_meaningful_temp0` rows only when the wider detector mode is enabled
+  - add-on layer:
+    - dominant-family candidate enrichment runs after detector rows are assembled
+    - may be attached to:
+      - `S1`
+      - `S2`
+    - but remains logically separate from detector-pass generation
+- Internal contract:
+  - replace the current single detector-record builder with a detector-surface builder that can compose:
+    - `S1`
+    - `S2`
+    - optional dominant-family add-on
+  - preserve per-row provenance in manifests:
+    - `detector_branch`
+    - `alternate_source_kind`
+    - surface membership tags such as:
+      - `hybrid_detector`
+      - `p2_meaningful_temp0`
+      - `dominant_family_addon`
+  - keep correction trigger selection surface-aligned:
+    - default correction uses `S1`
+    - opt-in wider correction may consume `S2`
+    - family add-on rows are available only when explicitly requested
+- User-facing outcome:
+  - add a detector mode surface with at least:
+    - default hybrid detector
+    - wider `S2` detector
+  - add an explicit family add-on toggle separate from detector mode
+  - do not overload the default detector flag into silently enabling either wider mode or family enrichment
+- Acceptance criteria:
+  - default detector output remains backward-compatible with current `S1`
+  - wider detector adds only the retained `p2_meaningful_temp0` slice on top of `S1`
+  - family add-on can be attached independently to either `S1` or `S2`
+  - manifests preserve enough provenance to reconstruct `S1`, `S2`, and add-on-exclusive slices
+  - regression tests lock row-surface membership and prevent default-surface expansion by accident
