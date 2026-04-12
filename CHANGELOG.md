@@ -52,6 +52,8 @@
 - Added regression coverage to lock the retained Japanese default profile and the new internal generic profile behavior separately.
 - Post-plan detector add-on expansion: added an opt-in dominant-family recall layer that can attach directly to the retained `S1` detector without enabling the wider `S2` detector path.
 - Restricted the family add-on to repeated single-character kanji families, synthesized add-on `alternate_text` through family-pair swap instead of an extra OCR read, and added regression coverage for add-on manifest generation, kanji-only family inference, and CLI routing.
+- Post-plan dominant-family heuristic refinement: replaced the coarse count-only selector with a row-level `support/pure/mixed/agreement breadth` heuristic so the add-on stays narrow without collapsing on simple ties.
+- Added regression coverage for pure-row preference, over-broad family rejection, and the richer add-on family metrics written into detector manifests.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

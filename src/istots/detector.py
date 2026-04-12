@@ -26,6 +26,10 @@ class HybridDetectorRecord:
     dominant_family: str | None = None
     family_current_char: str | None = None
     family_alternate_char: str | None = None
+    family_support_rows: int | None = None
+    family_pure_rows: int | None = None
+    family_mixed_rows: int | None = None
+    family_agreement_rows: int | None = None
 
 
 def write_hybrid_detector_records(path: Path, records: list[HybridDetectorRecord]) -> None:

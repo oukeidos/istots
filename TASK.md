@@ -139,5 +139,6 @@ Implement the experimentally validated feature set into the product code without
     - `S1 + dominant-family add-on`
   - the add-on is now opt-in on top of the default detector surface through `--detector-family-addon`
   - dominant-family extraction is currently limited to repeated single-character kanji families seen in the live `S1` disagreement rows
+  - selection now uses row-level `support`, `pure`, `mixed`, and agreement-breadth gating instead of a count-only winner
   - add-on `alternate_text` is synthesized as the paired family-character swap, matching the retained `family_pair_swap` contract
   - wider `S2` detector wiring remains pending

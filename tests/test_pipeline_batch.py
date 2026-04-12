@@ -842,12 +842,16 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
     assert manifest[2]["family_current_char"] == "仲"
     assert manifest[2]["family_alternate_char"] == "伸"
     assert manifest[2]["source_tags"] == ["dominant_family_addon"]
+    assert manifest[2]["family_support_rows"] == 2
+    assert manifest[2]["family_pure_rows"] == 2
+    assert manifest[2]["family_mixed_rows"] == 0
+    assert manifest[2]["family_agreement_rows"] == 2
     assert manifest[3]["baseline_text"] == "(伸子) はい"
     assert manifest[3]["option_text"] == "(仲子) はい"
     assert manifest[3]["dominant_family"] == "仲伸"
 
 
-def test_infer_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
+def test_select_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
     records = [
         HybridDetectorRecord(
             index=0,
@@ -883,7 +887,211 @@ def test_infer_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
         ),
     ]
 
-    assert pipeline._infer_dominant_kanji_family(records) is None
+    assert (
+        pipeline._select_dominant_kanji_family(
+            prepared_inputs=[],
+            baseline_texts=[],
+            s1_detector_records=records,
+        )
+        is None
+    )
+
+
+def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> None:
+    records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=0,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="仲",
+            option_text="伸",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=1,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="仲",
+            option_text="伸",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=2,
+            raw_index=2,
+            window_id=0,
+            start_ms=20,
+            end_ms=30,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="昂",
+            option_text="昴",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=3,
+            raw_index=3,
+            window_id=0,
+            start_ms=30,
+            end_ms=40,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="仲/昂",
+            option_text="伸/昴",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=4,
+            raw_index=4,
+            window_id=0,
+            start_ms=40,
+            end_ms=50,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="昂/処",
+            option_text="昴/妃",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+    ]
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(
+            index=index,
+            frame=SimpleNamespace(raw_index=index, window_id=0, start=timedelta(), end=timedelta()),
+            image=Image.new("RGB", (1, 1), "white"),
+        )
+        for index in range(7)
+    ]
+    baseline_texts = ["仲", "仲", "昂", "仲/昂", "昂/処", "仲子", "昂子"]
+
+    selected = pipeline._select_dominant_kanji_family(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
+        s1_detector_records=records,
+    )
+
+    assert selected is not None
+    assert selected.family == "仲伸"
+    assert selected.support_rows == 3
+    assert selected.pure_rows == 2
+    assert selected.mixed_rows == 1
+    assert selected.agreement_rows == 1
+
+
+def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
+    records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=0,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="仲",
+            option_text="伸",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=1,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="仲",
+            option_text="伸",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=2,
+            raw_index=2,
+            window_id=0,
+            start_ms=20,
+            end_ms=30,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="昂",
+            option_text="昴",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+        HybridDetectorRecord(
+            index=3,
+            raw_index=3,
+            window_id=0,
+            start_ms=30,
+            end_ms=40,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="昂",
+            option_text="昴",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=1.0,
+        ),
+    ]
+    baseline_texts = ["仲", "仲", "昂", "昂"]
+    baseline_texts.extend(["仲子"] * 21)
+    baseline_texts.extend(["昂子"] * 2)
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(
+            index=index,
+            frame=SimpleNamespace(raw_index=index, window_id=0, start=timedelta(), end=timedelta()),
+            image=Image.new("RGB", (1, 1), "white"),
+        )
+        for index in range(len(baseline_texts))
+    ]
+
+    selected = pipeline._select_dominant_kanji_family(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
+        s1_detector_records=records,
+    )
+
+    assert selected is not None
+    assert selected.family == "昂昴"
+    assert selected.agreement_rows == 2
 
 
 def test_convert_sup_to_srt_correction_requires_llama_server(tmp_path: Path) -> None:

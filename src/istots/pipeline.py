@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
 HF_FAST_MIN_PIXELS = 32768
 KANJI_FAMILY_MIN_COUNT = 2
+MAX_FAMILY_AGREEMENT_ROWS_PER_SUPPORT_ROW = 10
 
 
 @dataclass
@@ -76,6 +77,15 @@ class _PreparedOCRInput:
     index: int
     frame: Any
     image: Image.Image
+
+
+@dataclass(frozen=True)
+class _KanjiFamilyCandidateStats:
+    family: str
+    support_rows: int
+    pure_rows: int
+    mixed_rows: int
+    agreement_rows: int
 
 
 def _resolve_paddle_runtime_overrides(
@@ -757,9 +767,14 @@ def _build_dominant_family_addon_records(
     baseline_texts: list[str],
     s1_detector_records: list[HybridDetectorRecord],
 ) -> tuple[str | None, list[HybridDetectorRecord]]:
-    dominant_family = _infer_dominant_kanji_family(s1_detector_records)
-    if dominant_family is None:
+    dominant_family_stats = _select_dominant_kanji_family(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
+        s1_detector_records=s1_detector_records,
+    )
+    if dominant_family_stats is None:
         return None, []
+    dominant_family = dominant_family_stats.family
 
     disagreement_indices = {record.index for record in s1_detector_records}
     addon_records: list[HybridDetectorRecord] = []
@@ -797,28 +812,117 @@ def _build_dominant_family_addon_records(
                 dominant_family=dominant_family,
                 family_current_char=current_char,
                 family_alternate_char=alternate_char,
+                family_support_rows=dominant_family_stats.support_rows,
+                family_pure_rows=dominant_family_stats.pure_rows,
+                family_mixed_rows=dominant_family_stats.mixed_rows,
+                family_agreement_rows=dominant_family_stats.agreement_rows,
             )
         )
     return dominant_family, addon_records
 
 
-def _infer_dominant_kanji_family(detector_records: list[HybridDetectorRecord]) -> str | None:
-    family_counts: Counter[str] = Counter()
-    for record in detector_records:
-        for family in _iter_single_char_kanji_replace_families(
-            record.baseline_text,
-            record.option_text,
-        ):
-            family_counts[family] += 1
-    if not family_counts:
+def _select_dominant_kanji_family(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    s1_detector_records: list[HybridDetectorRecord],
+) -> _KanjiFamilyCandidateStats | None:
+    candidates = _collect_kanji_family_candidate_stats(
+        prepared_inputs=prepared_inputs,
+        baseline_texts=baseline_texts,
+        s1_detector_records=s1_detector_records,
+    )
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.support_rows >= KANJI_FAMILY_MIN_COUNT
+        and candidate.pure_rows >= 1
+        and candidate.agreement_rows >= 1
+        and candidate.agreement_rows
+        <= candidate.support_rows * MAX_FAMILY_AGREEMENT_ROWS_PER_SUPPORT_ROW
+    ]
+    if not eligible:
         return None
 
-    dominant_family, dominant_count = family_counts.most_common(1)[0]
-    if dominant_count < KANJI_FAMILY_MIN_COUNT:
+    eligible.sort(
+        key=lambda candidate: (
+            -candidate.support_rows,
+            -candidate.pure_rows,
+            candidate.mixed_rows,
+            candidate.agreement_rows,
+            candidate.family,
+        )
+    )
+    best = eligible[0]
+    if len(eligible) == 1:
+        return best
+    second = eligible[1]
+    if _family_selection_rank(best) == _family_selection_rank(second):
         return None
-    if sum(1 for count in family_counts.values() if count == dominant_count) != 1:
-        return None
-    return dominant_family
+    return best
+
+
+def _family_selection_rank(candidate: _KanjiFamilyCandidateStats) -> tuple[int, int, int, int]:
+    return (
+        candidate.support_rows,
+        candidate.pure_rows,
+        -candidate.mixed_rows,
+        -candidate.agreement_rows,
+    )
+
+
+def _collect_kanji_family_candidate_stats(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    s1_detector_records: list[HybridDetectorRecord],
+) -> list[_KanjiFamilyCandidateStats]:
+    support_rows: Counter[str] = Counter()
+    pure_rows: Counter[str] = Counter()
+    mixed_rows: Counter[str] = Counter()
+
+    for record in s1_detector_records:
+        families = sorted(
+            set(
+                _iter_single_char_kanji_replace_families(
+                    record.baseline_text,
+                    record.option_text,
+                )
+            )
+        )
+        if not families:
+            continue
+        for family in families:
+            support_rows[family] += 1
+        if len(families) == 1:
+            pure_rows[families[0]] += 1
+        else:
+            for family in families:
+                mixed_rows[family] += 1
+
+    if not support_rows:
+        return []
+
+    disagreement_indices = {record.index for record in s1_detector_records}
+    agreement_rows: Counter[str] = Counter()
+    candidate_families = tuple(sorted(support_rows))
+    for item, baseline_text in zip(prepared_inputs, baseline_texts, strict=True):
+        if item.index in disagreement_indices or not baseline_text:
+            continue
+        for family in candidate_families:
+            if _build_family_pair_swap_text(baseline_text, family) is not None:
+                agreement_rows[family] += 1
+
+    return [
+        _KanjiFamilyCandidateStats(
+            family=family,
+            support_rows=support_rows[family],
+            pure_rows=pure_rows[family],
+            mixed_rows=mixed_rows[family],
+            agreement_rows=agreement_rows[family],
+        )
+        for family in candidate_families
+    ]
 
 
 def _iter_single_char_kanji_replace_families(
