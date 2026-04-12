@@ -31,6 +31,8 @@
 - Documented the retained detector/corrector posture and the recommended quick-validation order from setup through doctor, smoke, and full convert.
 - Post-plan stability fix: changed the OCR backend lifecycle so heavy OCR runtimes are opened one role at a time instead of being kept resident concurrently across fast, detector, and local-corrector stages.
 - Added regression coverage to lock single-backend residency across retained hybrid OCR, detector, and correction flows.
+- Post-plan corrector fix: wrapped Gemini image inputs in the required `inline_data` part envelope so product Gemini correction requests match the retained experiment contract.
+- Added regression coverage for Gemini inline-image request construction and verified retained Qwen local and Gemini correction smoke flows on experiment-backed SUP input slices.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

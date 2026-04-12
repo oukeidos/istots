@@ -158,14 +158,16 @@ def request_gemini_correction(
     return normalize_ocr_text(payload["text"]), prompt_style, str(payload.get("reasoning_content", ""))
 
 
-def _image_to_inline_data(image: Image.Image) -> tuple[dict[str, str], bytes]:
+def _image_to_inline_data(image: Image.Image) -> tuple[dict[str, object], bytes]:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     image_bytes = buffer.getvalue()
     return (
         {
-            "mime_type": "image/png",
-            "data": base64.b64encode(image_bytes).decode("ascii"),
+            "inline_data": {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            },
         },
         image_bytes,
     )

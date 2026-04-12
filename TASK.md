@@ -32,3 +32,4 @@ Implement the experimentally validated feature set into the product code without
 - Step 10 completed: refreshed the product-facing README around setup boundaries, runtime profiles, host patterns, the retained smoke workflow, and the detector/corrector posture.
 - The Practical Implementation Order is complete for this session.
 - Post-plan stability fix completed: the OCR pipeline now opens heavy OCR runtimes sequentially, one role at a time, to avoid concurrent residency during hybrid OCR, detector, and local-corrector flows.
+- Post-plan corrector fix completed: Gemini correction requests now send image parts with the required `inline_data` envelope, and experiment-backed Qwen local / Gemini correction smoke runs both completed successfully on a detector-positive slice.
