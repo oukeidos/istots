@@ -10,6 +10,7 @@ from PIL import Image
 
 from istots import pipeline
 from istots.corrector import CorrectorConfig, CorrectorMode
+from istots.detector import HybridDetectorRecord
 from istots.ocr import (
     OCRBackendConfig,
     OCREngine,
@@ -702,10 +703,187 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
     assert [row["option_role"] for row in manifest] == ["ocr-fast", "detector"]
     assert [row["baseline_text"] for row in manifest] == ["BASE-WIDE", "BASE-TALL"]
     assert [row["option_text"] for row in manifest] == ["ALT-WIDE", "ALT-TALL"]
+    assert [row["source_tags"] for row in manifest] == [["hybrid_detector"], ["hybrid_detector"]]
+    assert [row["alternate_source_kind"] for row in manifest] == ["min32768", "temp0_repeat"]
     assert [row["diff_label"] for row in manifest] == [
         "meaningful_difference",
         "meaningful_difference",
     ]
+
+
+def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=13,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=30),
+            end=timedelta(milliseconds=40),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=14,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=40),
+            end=timedelta(milliseconds=50),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+    ]
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            if self.role == "ocr":
+                return [[
+                    "(仲子) 了解",
+                    "(仲子) おはよう",
+                    "(仲子) またね",
+                    "(伸子) はい",
+                    "(太郎) 了解",
+                ][self.calls - 1]]
+            if self.role == "ocr-fast":
+                return [[
+                    "(伸子) 了解",
+                    "(仲子) またね",
+                    "(太郎) 了解",
+                ][self.calls - 1]]
+            if self.role == "detector":
+                return [["(伸子) おはよう", "(伸子) はい"][self.calls - 1]]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend(config.role))
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        detector_family_addon=True,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 4
+    assert [row["detector_branch"] for row in manifest] == [
+        "alternate_read_non_tall",
+        "repeat_drift_tall",
+        "dominant_family_addon",
+        "dominant_family_addon",
+    ]
+    assert manifest[2]["baseline_text"] == "(仲子) またね"
+    assert manifest[2]["option_text"] == "(伸子) またね"
+    assert manifest[2]["alternate_source_kind"] == "family_pair_swap"
+    assert manifest[2]["dominant_family"] == "仲伸"
+    assert manifest[2]["family_current_char"] == "仲"
+    assert manifest[2]["family_alternate_char"] == "伸"
+    assert manifest[2]["source_tags"] == ["dominant_family_addon"]
+    assert manifest[3]["baseline_text"] == "(伸子) はい"
+    assert manifest[3]["option_text"] == "(仲子) はい"
+    assert manifest[3]["dominant_family"] == "仲伸"
+
+
+def test_infer_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
+    records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=0,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="かなが",
+            option_text="かなか",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.2,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=1,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="repeat_drift_tall",
+            shape="tall",
+            ratio=3.0,
+            option_role="detector",
+            baseline_text="かなが",
+            option_text="かなか",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.2,
+        ),
+    ]
+
+    assert pipeline._infer_dominant_kanji_family(records) is None
 
 
 def test_convert_sup_to_srt_correction_requires_llama_server(tmp_path: Path) -> None:

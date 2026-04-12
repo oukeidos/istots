@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections import Counter
+import difflib
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -43,6 +45,7 @@ from istots.text_diff import DEFAULT_TEXT_DIFF_PROFILE, assess_difference
 logger = logging.getLogger(__name__)
 TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
 HF_FAST_MIN_PIXELS = 32768
+KANJI_FAMILY_MIN_COUNT = 2
 
 
 @dataclass
@@ -161,6 +164,7 @@ def convert_sup_to_srt(
     max_new_tokens: int = 256,
     local_files_only: bool = True,
     enable_furigana_mask: bool = False,
+    detector_family_addon: bool = False,
     srt_policy: str = "safe",
     runtime_binary_path: Path | None = None,
     runtime_host: str = "127.0.0.1",
@@ -225,6 +229,7 @@ def convert_sup_to_srt(
             runtime_label=runtime_label,
             detector_output=detector_output,
             corrector_config=corrector_config,
+            detector_family_addon=detector_family_addon,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
             srt_policy=srt_policy,
@@ -401,6 +406,7 @@ def _convert_sup_to_srt_default_with_detector(
     runtime_label: str,
     detector_output: Path | None,
     corrector_config: CorrectorConfig | None,
+    detector_family_addon: bool,
     max_items: int | None,
     enable_furigana_mask: bool,
     srt_policy: str,
@@ -437,6 +443,22 @@ def _convert_sup_to_srt_default_with_detector(
         paddle_runtime_overrides=paddle_runtime_overrides,
         verbose=verbose,
     )
+    if detector_family_addon:
+        dominant_family, addon_records = _build_dominant_family_addon_records(
+            prepared_inputs=prepared_inputs,
+            baseline_texts=baseline_texts,
+            s1_detector_records=detector_records,
+        )
+        detector_records.extend(addon_records)
+        if verbose:
+            if dominant_family is None:
+                logger.info("dominant-family detector add-on: no repeated single-char kanji family found")
+            else:
+                logger.info(
+                    "dominant-family detector add-on: family=%s added_rows=%d",
+                    dominant_family,
+                    len(addon_records),
+                )
     if detector_output is not None:
         write_hybrid_detector_records(detector_output, detector_records)
 
@@ -720,9 +742,138 @@ def _build_hybrid_detector_records(
                         diff_label=diff.label,
                         meaningful=diff.meaningful,
                         char_error_rate=diff.char_error_rate,
+                        source_tags=("hybrid_detector",),
+                        alternate_source_kind=(
+                            "min32768" if branch_name == "alternate_read_non_tall" else "temp0_repeat"
+                        ),
                     )
                 )
     return detector_records
+
+
+def _build_dominant_family_addon_records(
+    *,
+    prepared_inputs: list[_PreparedOCRInput],
+    baseline_texts: list[str],
+    s1_detector_records: list[HybridDetectorRecord],
+) -> tuple[str | None, list[HybridDetectorRecord]]:
+    dominant_family = _infer_dominant_kanji_family(s1_detector_records)
+    if dominant_family is None:
+        return None, []
+
+    disagreement_indices = {record.index for record in s1_detector_records}
+    addon_records: list[HybridDetectorRecord] = []
+    for item, baseline_text in zip(prepared_inputs, baseline_texts, strict=True):
+        if item.index in disagreement_indices or not baseline_text:
+            continue
+        family_swap = _build_family_pair_swap_text(baseline_text, dominant_family)
+        if family_swap is None:
+            continue
+        option_text, current_char, alternate_char = family_swap
+        ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+        diff = assess_difference(
+            baseline_text,
+            option_text,
+            profile=DEFAULT_TEXT_DIFF_PROFILE,
+        )
+        addon_records.append(
+            HybridDetectorRecord(
+                index=item.index,
+                raw_index=item.frame.raw_index,
+                window_id=item.frame.window_id,
+                start_ms=_timedelta_to_ms(item.frame.start),
+                end_ms=_timedelta_to_ms(item.frame.end),
+                detector_branch="dominant_family_addon",
+                shape="tall" if _is_tall_subtitle_image(item.image) else "wide",
+                ratio=ratio,
+                option_role="dominant-family-addon",
+                baseline_text=baseline_text,
+                option_text=option_text,
+                diff_label=diff.label,
+                meaningful=diff.meaningful,
+                char_error_rate=diff.char_error_rate,
+                source_tags=("dominant_family_addon",),
+                alternate_source_kind="family_pair_swap",
+                dominant_family=dominant_family,
+                family_current_char=current_char,
+                family_alternate_char=alternate_char,
+            )
+        )
+    return dominant_family, addon_records
+
+
+def _infer_dominant_kanji_family(detector_records: list[HybridDetectorRecord]) -> str | None:
+    family_counts: Counter[str] = Counter()
+    for record in detector_records:
+        for family in _iter_single_char_kanji_replace_families(
+            record.baseline_text,
+            record.option_text,
+        ):
+            family_counts[family] += 1
+    if not family_counts:
+        return None
+
+    dominant_family, dominant_count = family_counts.most_common(1)[0]
+    if dominant_count < KANJI_FAMILY_MIN_COUNT:
+        return None
+    if sum(1 for count in family_counts.values() if count == dominant_count) != 1:
+        return None
+    return dominant_family
+
+
+def _iter_single_char_kanji_replace_families(
+    baseline_text: str,
+    option_text: str,
+) -> Iterator[str]:
+    matcher = difflib.SequenceMatcher(a=baseline_text, b=option_text)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "replace":
+            continue
+        left = baseline_text[i1:i2]
+        right = option_text[j1:j2]
+        if len(left) != 1 or len(right) != 1 or left == right:
+            continue
+        if not (_is_kanji_char(left) and _is_kanji_char(right)):
+            continue
+        yield "".join(sorted(left + right))
+
+
+def _build_family_pair_swap_text(
+    baseline_text: str,
+    family: str,
+) -> tuple[str, str, str] | None:
+    family_chars = tuple(family)
+    if len(family_chars) != 2:
+        return None
+    hits = [char for char in baseline_text if char in family_chars]
+    if not hits:
+        return None
+    unique_hits = set(hits)
+    if len(unique_hits) != 1:
+        return None
+    current_char = hits[0]
+    alternate_char = family_chars[1] if current_char == family_chars[0] else family_chars[0]
+    swapped = baseline_text.replace(current_char, alternate_char)
+    if swapped == baseline_text:
+        return None
+    return swapped, current_char, alternate_char
+
+
+def _is_kanji_char(text: str) -> bool:
+    if len(text) != 1:
+        return False
+    codepoint = ord(text)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2A6DF
+        or 0x2A700 <= codepoint <= 0x2B73F
+        or 0x2B740 <= codepoint <= 0x2B81F
+        or 0x2B820 <= codepoint <= 0x2CEAF
+        or 0x2CEB0 <= codepoint <= 0x2EBEF
+        or 0x30000 <= codepoint <= 0x3134F
+    )
 
 
 def _apply_conservative_corrections(

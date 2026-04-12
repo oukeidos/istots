@@ -134,3 +134,10 @@ Implement the experimentally validated feature set into the product code without
   - family add-on can be attached independently to either `S1` or `S2`
   - manifests preserve enough provenance to reconstruct `S1`, `S2`, and add-on-exclusive slices
   - regression tests lock row-surface membership and prevent default-surface expansion by accident
+- Current implementation status:
+  - completed the first retained slice:
+    - `S1 + dominant-family add-on`
+  - the add-on is now opt-in on top of the default detector surface through `--detector-family-addon`
+  - dominant-family extraction is currently limited to repeated single-character kanji families seen in the live `S1` disagreement rows
+  - add-on `alternate_text` is synthesized as the paired family-character swap, matching the retained `family_pair_swap` contract
+  - wider `S2` detector wiring remains pending

@@ -21,6 +21,11 @@ class HybridDetectorRecord:
     diff_label: str
     meaningful: bool
     char_error_rate: float
+    source_tags: tuple[str, ...] = ()
+    alternate_source_kind: str | None = None
+    dominant_family: str | None = None
+    family_current_char: str | None = None
+    family_alternate_char: str | None = None
 
 
 def write_hybrid_detector_records(path: Path, records: list[HybridDetectorRecord]) -> None:

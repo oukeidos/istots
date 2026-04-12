@@ -71,7 +71,9 @@ uv run istots input.sup output.srt --furigana-mask
 uv run istots input.sup output.srt --srt-policy overlap
 uv run istots input.sup output.srt --ocr-mode fast
 uv run istots input.sup output.srt --detector-output detector.jsonl
+uv run istots input.sup output.srt --detector-output detector.jsonl --detector-family-addon
 uv run istots input.sup output.srt --corrector qwen-local
+uv run istots input.sup output.srt --corrector qwen-local --detector-family-addon
 uv run istots input.sup output.srt --corrector qwen-local --qwen-no-mmproj-offload
 uv run istots input.sup output.srt --corrector qwen-local --corrector-model-path /path/to/qwen.gguf --corrector-mmproj-path /path/to/qwen-mmproj.gguf
 uv run istots input.sup output.srt --corrector gemini --corrector-output corrected.jsonl
@@ -110,6 +112,7 @@ Global flags:
 - `--paddle-startup-timeout-sec SECONDS`: PaddleOCR-VL `llama-server` startup timeout.
 - `--furigana-mask`: enable optional furigana masking before OCR. Default is disabled.
 - `--detector-output DETECTOR_OUTPUT`: write retained hybrid detector disagreements as JSONL. Requires `--engine llama-server` with `--ocr-mode default`.
+- `--detector-family-addon`: opt into the retained dominant-family agreement-row add-on on top of the default detector surface. Requires `--engine llama-server`, `--ocr-mode default`, and either `--detector-output` or `--corrector`.
 - `--corrector {off,qwen-local,gemini}`: attach the retained conservative anchor-only corrector to `convert`. Requires `--engine llama-server` with `--ocr-mode default`.
 - `--corrector-output CORRECTOR_OUTPUT`: optional JSONL path for conservative correction records.
 - `--corrector-model-path CORRECTOR_MODEL_PATH`: optional explicit local GGUF corrector model path override for `--corrector qwen-local`.
@@ -195,6 +198,7 @@ Use `smoke` when you want the retained fast regression path instead of a full ma
 - `smoke` defaults to `../test/sample.sup`, which is the retained minimum sample for required smoke tests.
 - If `--output-dir` is omitted, `istots` writes smoke artifacts to a temporary directory.
 - The default smoke path writes a smoke SRT plus the retained hybrid detector manifest.
+- `--detector-family-addon` extends the default smoke detector surface with the retained dominant-family kanji add-on.
 - `uv run istots smoke --ocr-mode fast` exercises the optional faster OCR path on the same sample.
 - `--corrector qwen-local` or `--corrector gemini` adds a correction manifest alongside the smoke SRT.
 
@@ -251,6 +255,9 @@ Advanced `llama-server` overrides remain available on `convert` and `smoke` thro
 - `--detector-output`: runs the retained hybrid detector alongside the retained default OCR path and writes disagreement rows as JSONL.
 - Non-tall rows use the `alternate_read_non_tall` branch backed by `ocr-fast`.
 - Tall rows use the `repeat_drift_tall` branch backed by the retained `detector` role.
+- `--detector-family-addon` keeps the default `S1` detector intact and then adds an opt-in dominant-family recall layer on top of it.
+- The add-on only considers repeated single-character kanji families observed in the current `S1` detector disagreements.
+- For add-on rows, `alternate_text` is a synthetic family-pair swap rather than an extra OCR read, and the manifest marks it as `alternate_source_kind = family_pair_swap`.
 - In the first-wave product surface, detector behavior is retained on the `llama-server` path and is not mirrored onto the explicit `hf` fallback path.
 
 ## Conservative Correction
