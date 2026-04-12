@@ -38,7 +38,7 @@ from istots.ocr import (
 )
 from istots.srt_writer import SubtitleEntry, write_srt
 from istots.sup_reader import iter_sup_window_frames
-from istots.text_diff import assess_difference
+from istots.text_diff import DEFAULT_TEXT_DIFF_PROFILE, assess_difference
 
 logger = logging.getLogger(__name__)
 TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
@@ -699,7 +699,11 @@ def _build_hybrid_detector_records(
                 if baseline_text == option_text:
                     continue
                 ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
-                diff = assess_difference(baseline_text, option_text)
+                diff = assess_difference(
+                    baseline_text,
+                    option_text,
+                    profile=DEFAULT_TEXT_DIFF_PROFILE,
+                )
                 detector_records.append(
                     HybridDetectorRecord(
                         index=item.index,

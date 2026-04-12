@@ -48,6 +48,8 @@
 - Added regression coverage to lock model-family override routing, shared Paddle role resolution, and isolated Qwen local runtime overrides.
 - Post-plan HF fast-path parity: added retained hybrid HF fast OCR so non-tall rows use `min_pixels=32768` while tall rows stay on the default HF read.
 - Added regression coverage for HF processor `min_pixels` override routing and for the mixed tall/wide HF fast branch contract.
+- Post-plan text-diff decoupling: split generic text normalization from the retained Japanese OCR orthographic rules without changing the product default detector behavior.
+- Added regression coverage to lock the retained Japanese default profile and the new internal generic profile behavior separately.
 
 ## [0.2.0] - 2026-04-05
 - Added optional furigana masking before OCR to reduce furigana noise in generated subtitles.

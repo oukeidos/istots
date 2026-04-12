@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -49,6 +50,13 @@ _SMALL_KANA_EQUIVALENTS = str.maketrans(
         "ヶ": "ケ",
     }
 )
+
+
+@dataclass(frozen=True)
+class TextDiffProfile:
+    name: str
+    orthographic_folder: Callable[[str], str]
+    orthographic_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +115,11 @@ def _looks_like_trailing_long_vowel_confusion(text: str, index: int) -> bool:
     return bool(category and category[0] in {"P", "S", "Z"})
 
 
-def orthographic_fold_text(text: str) -> str:
+def _generic_orthographic_fold(text: str) -> str:
+    return equivalence_text(text)
+
+
+def _ja_subtitle_ocr_orthographic_fold(text: str) -> str:
     normalized = equivalence_text(text)
     chars: list[str] = []
     for index, char in enumerate(normalized):
@@ -119,6 +131,26 @@ def orthographic_fold_text(text: str) -> str:
     normalized = re.sub(r"つ(?=" + _GEMINATE_FOLLOW_RE.pattern + r")", "", normalized)
     normalized = re.sub(r"ツ(?=[カキクケコサシスセソタチツテトパピプペポ])", "", normalized)
     return normalized
+
+
+GENERIC_TEXT_DIFF_PROFILE = TextDiffProfile(
+    name="generic",
+    orthographic_folder=_generic_orthographic_fold,
+)
+JA_SUBTITLE_OCR_TEXT_DIFF_PROFILE = TextDiffProfile(
+    name="ja-subtitle-ocr",
+    orthographic_folder=_ja_subtitle_ocr_orthographic_fold,
+    orthographic_note="difference is limited to Japanese small-kana, sokuon, or trailing long-vowel OCR drift",
+)
+DEFAULT_TEXT_DIFF_PROFILE = JA_SUBTITLE_OCR_TEXT_DIFF_PROFILE
+
+
+def orthographic_fold_text(
+    text: str,
+    *,
+    profile: TextDiffProfile = DEFAULT_TEXT_DIFF_PROFILE,
+) -> str:
+    return profile.orthographic_folder(text)
 
 
 def levenshtein_distance(left: str, right: str) -> int:
@@ -142,7 +174,12 @@ def levenshtein_distance(left: str, right: str) -> int:
     return previous[-1]
 
 
-def assess_difference(reference: str, candidate: str) -> DiffAssessment:
+def assess_difference(
+    reference: str,
+    candidate: str,
+    *,
+    profile: TextDiffProfile = DEFAULT_TEXT_DIFF_PROFILE,
+) -> DiffAssessment:
     reference = reference or ""
     candidate = candidate or ""
     raw_equal = reference == candidate
@@ -152,8 +189,8 @@ def assess_difference(reference: str, candidate: str) -> DiffAssessment:
     punctuation_reference = punctuation_fold_text(reference)
     punctuation_candidate = punctuation_fold_text(candidate)
     punctuation_equal = punctuation_reference == punctuation_candidate
-    orthographic_reference = orthographic_fold_text(reference)
-    orthographic_candidate = orthographic_fold_text(candidate)
+    orthographic_reference = orthographic_fold_text(reference, profile=profile)
+    orthographic_candidate = orthographic_fold_text(candidate, profile=profile)
     orthographic_equal = orthographic_reference == orthographic_candidate
     edit_distance = levenshtein_distance(canonical_reference, canonical_candidate)
     denom = max(len(canonical_reference), 1)
@@ -213,7 +250,7 @@ def assess_difference(reference: str, candidate: str) -> DiffAssessment:
             edit_distance=edit_distance,
             reference_canonical=canonical_reference,
             candidate_canonical=canonical_candidate,
-            note="difference is limited to Japanese small-kana, sokuon, or trailing long-vowel OCR drift",
+            note=profile.orthographic_note or "difference disappears after profile-specific orthographic normalization",
         )
     return DiffAssessment(
         label="meaningful_difference",
