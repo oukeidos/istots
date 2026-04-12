@@ -47,8 +47,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--srt-policy {safe,overlap}" in captured.out
     assert "--device {auto,cpu,gpu}" in captured.out
     assert "--min-pixels MIN_PIXELS" in captured.out
-    assert "--runtime-profile {auto,cpu,memory}" in captured.out
-    assert "--profile {auto,cpu,memory}" in captured.out
+    assert "--runtime-profile {auto,cpu}" in captured.out
+    assert "--profile {auto,cpu}" in captured.out
     assert "--output-dir OUTPUT_DIR" in captured.out
     assert "--no-detector" in captured.out
     assert "--force" in captured.out

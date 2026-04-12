@@ -164,7 +164,7 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--runtime-profile",
-        choices=("auto", "cpu", "memory"),
+        choices=("auto", "cpu"),
         default="auto",
         help="llama-server runtime profile when using `--engine llama-server` (default: auto)",
     )
@@ -356,7 +356,7 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--runtime-profile",
-        choices=("auto", "cpu", "memory"),
+        choices=("auto", "cpu"),
         default="auto",
         help="llama-server runtime profile for smoke validation (default: auto)",
     )
@@ -694,7 +694,7 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--profile",
-        choices=("auto", "cpu", "memory"),
+        choices=("auto", "cpu"),
         default="auto",
         help="Runtime launch profile (default: auto)",
     )

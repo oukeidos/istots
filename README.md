@@ -95,7 +95,7 @@ Global flags:
 - `--max-new-tokens MAX_NEW_TOKENS`: maximum generated tokens per subtitle image.
 - OCR requests run sequentially, one subtitle image at a time.
 - `--ocr-mode {default,fast}`: retained default OCR or the optional faster hybrid OCR path. `fast` uses `ocr-fast` for non-tall rows and retained `ocr` for tall rows.
-- `--runtime-profile {auto,cpu,memory}`: retained `llama-server` runtime profile. Default is `auto`.
+- `--runtime-profile {auto,cpu}`: retained `llama-server` runtime profile. Default is `auto`.
 - `--llama-server-path LLAMA_SERVER_PATH`: explicit `llama-server` binary path.
 - `--runtime-port PORT`: override the retained `llama-server` port for convert when `--ocr-mode default` is used.
 - `--threads N`: override `llama-server` thread count.
@@ -214,7 +214,6 @@ The doctor checks:
 
 - `auto`: the default retained profile. Use this first on supported GPU hosts or when you want `llama-server` to choose the lowest-level launch details.
 - `cpu`: the official force-CPU profile for hosts without a usable GPU path or when you want a deterministic CPU-only run.
-- `memory`: the official compatibility profile label for more constrained hosts. Pair it with explicit overrides when doctor or smoke shows bring-up pressure.
 
 Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke` through:
 
@@ -231,7 +230,6 @@ Advanced per-role overrides remain available on `convert`, `doctor`, and `smoke`
 
 - GPU-first host: start with the default `auto` profile and `--device auto`.
 - CPU-only host: use `--runtime-profile cpu --device cpu`.
-- Constrained GPU host: start with `--runtime-profile memory`, then add explicit overrides only if doctor or smoke shows bring-up pressure.
 
 ## OCR Modes
 

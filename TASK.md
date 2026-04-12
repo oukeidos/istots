@@ -37,3 +37,4 @@ Implement the experimentally validated feature set into the product code without
 - Post-plan credential/setup expansion completed: `setup` can now opt into retained local Qwen corrector provisioning with the default `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` asset, and `auth gemini` now manages Gemini credentials through keyring-first storage with a configured `.env` fallback path.
 - Post-plan OCR execution cleanup completed: the product no longer exposes batch execution, and OCR now runs sequentially one subtitle image at a time across convert, smoke, detector, and corrector paths.
 - Post-plan mmproj offload cleanup completed: runtime profiles no longer force `--no-mmproj-offload`, and local Qwen correction now exposes it only as an explicit opt-in override.
+- Post-plan runtime profile cleanup completed: removed the no-op `memory` runtime profile and kept only `auto` and `cpu` as supported product profiles.

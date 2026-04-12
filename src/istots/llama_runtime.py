@@ -48,7 +48,6 @@ class LlamaServerRole(StrEnum):
 class LlamaServerProfile(StrEnum):
     AUTO = "auto"
     CPU = "cpu"
-    MEMORY = "memory"
 
 
 DEFAULT_ROLE_PORTS: dict[LlamaServerRole, int] = {
