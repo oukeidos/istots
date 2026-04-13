@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.1] - 2026-04-13
+- Added the shared PGS frame/window assembly layer and dedicated regression coverage to preserve retained `E3-C3` candidate, finalize, and dedupe semantics.
+
 ## [0.3.0] - 2026-04-13
 - Rebuilt the product around a primary `llama-server` OCR path, with `hf` kept as an explicit optional fallback.
 - Added retained setup/materialization for Paddle GGUF assets, a derived `min_pixels=32768` mmproj, and optional local Qwen corrector assets.
