@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
@@ -22,6 +26,9 @@ _CORE_CLUSTER_GAP = 12.0
 _CORE_CLUSTER_STEPS = 8
 _FURIGANA_FRAGMENT_GAP_RATIO = 0.85
 _FURIGANA_FRAGMENT_MIN_OVERLAP = 0.55
+_PARALLEL_ANALYZE_MIN_IMAGES = 256
+_PARALLEL_ANALYZE_MAX_WORKERS = 8
+_PARALLEL_ANALYZE_TARGET_CHUNKS_PER_WORKER = 8
 LineRole = Literal["main", "furigana", "other"]
 
 
@@ -87,6 +94,21 @@ class LineCluster:
 
     def flow_end(self, orientation: str) -> int:
         return self.content_right if orientation == HORIZONTAL else self.content_bottom
+
+
+@dataclass(frozen=True)
+class _ScanlineSlab:
+    start: int
+    end: int
+    owners: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _ScanlineBand:
+    start: int
+    end: int
+    slab_start: int
+    slab_end: int
 
 
 @dataclass(frozen=True)
@@ -158,9 +180,99 @@ def build_furigana_mask(
 
 
 def build_furigana_masks(images: Sequence[Image.Image]) -> list[FuriganaMaskResult]:
-    analyses = [_analyze_image(image) for image in images]
+    analyses = _analyze_images(images)
     global_stats = _build_global_line_stats(analyses)
     return [_finalize_analysis(analysis, global_stats) for analysis in analyses]
+
+
+def _analyze_images(images: Sequence[Image.Image]) -> list[_FrameAnalysis]:
+    unique_images, analysis_order = _deduplicate_analysis_images(images)
+    worker_count = _parallel_analyze_worker_count(len(unique_images))
+    if worker_count < 2:
+        unique_analyses = [_analyze_image(image) for image in unique_images]
+    else:
+        target_chunks_per_worker = _parallel_analyze_target_chunks_per_worker()
+        chunk_size = max(1, len(unique_images) // (worker_count * target_chunks_per_worker))
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=_parallel_analyze_context(),
+        ) as executor:
+            unique_analyses = list(executor.map(_analyze_image, unique_images, chunksize=chunk_size))
+
+    return [unique_analyses[index] for index in analysis_order]
+
+
+def _deduplicate_analysis_images(images: Sequence[Image.Image]) -> tuple[list[Image.Image], list[int]]:
+    unique_images: list[Image.Image] = []
+    analysis_order: list[int] = []
+    digest_buckets: dict[bytes, list[int]] = {}
+
+    for image in images:
+        rgb_image = image if image.mode == "RGB" else image.convert("RGB")
+        image_bytes = rgb_image.tobytes()
+        digest = hashlib.blake2b(image_bytes, digest_size=16).digest()
+        match_index: int | None = None
+        bucket = digest_buckets.get(digest)
+        if bucket is not None:
+            for candidate_index in bucket:
+                candidate_image = unique_images[candidate_index]
+                if candidate_image.size != rgb_image.size:
+                    continue
+                if candidate_image.tobytes() == image_bytes:
+                    match_index = candidate_index
+                    break
+        if match_index is None:
+            match_index = len(unique_images)
+            unique_images.append(rgb_image)
+            digest_buckets.setdefault(digest, []).append(match_index)
+        analysis_order.append(match_index)
+
+    return unique_images, analysis_order
+
+
+def _parallel_analyze_worker_count(image_count: int) -> int:
+    if image_count < _parallel_analyze_min_images():
+        return 1
+    if multiprocessing.current_process().name != "MainProcess":
+        return 1
+
+    cpu_count = os.cpu_count() or 1
+    if cpu_count < 2:
+        return 1
+    return min(_parallel_analyze_max_workers(), cpu_count, image_count)
+
+
+def _parallel_analyze_min_images() -> int:
+    return _parallel_env_int("ISTOTS_FURIGANA_MASK_PARALLEL_MIN_IMAGES", _PARALLEL_ANALYZE_MIN_IMAGES)
+
+
+def _parallel_analyze_max_workers() -> int:
+    return _parallel_env_int("ISTOTS_FURIGANA_MASK_PARALLEL_MAX_WORKERS", _PARALLEL_ANALYZE_MAX_WORKERS)
+
+
+def _parallel_analyze_target_chunks_per_worker() -> int:
+    return _parallel_env_int(
+        "ISTOTS_FURIGANA_MASK_PARALLEL_TARGET_CHUNKS_PER_WORKER",
+        _PARALLEL_ANALYZE_TARGET_CHUNKS_PER_WORKER,
+    )
+
+
+def _parallel_env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 1 else default
+
+
+def _parallel_analyze_context() -> multiprocessing.context.BaseContext:
+    try:
+        return multiprocessing.get_context("fork")
+    except ValueError:
+        return multiprocessing.get_context()
 
 
 def _analyze_image(image: Image.Image) -> _FrameAnalysis:
@@ -199,7 +311,7 @@ def _analyze_image(image: Image.Image) -> _FrameAnalysis:
         )
 
     orientation = _infer_orientation(components, image_size=(rgb_image.width, rgb_image.height))
-    lines = _build_lines(components, labels, core_mask.shape, orientation)
+    lines = _build_lines(components, core_mask.shape, orientation)
     return _FrameAnalysis(
         image=rgb_image,
         ink_mask=ink_mask,
@@ -424,34 +536,37 @@ def _build_core_mask(gray_array: np.ndarray, ink_mask: np.ndarray) -> np.ndarray
 
 
 def _estimate_core_threshold(foreground_values: np.ndarray) -> int:
-    values = np.asarray(foreground_values, dtype=np.float64)
+    values = np.asarray(foreground_values, dtype=np.uint8)
     if values.size == 0:
         return _THRESHOLD
 
-    low = float(values.min())
-    high = float(values.max())
+    counts = np.bincount(values, minlength=256).astype(np.int64, copy=False)
+    nonzero_levels = np.flatnonzero(counts)
+    low = float(nonzero_levels[0])
+    high = float(nonzero_levels[-1])
     if high - low < 1.0:
         return int(min(_VISIBLE_THRESHOLD - 1, round(high)))
 
+    cumulative = np.cumsum(counts)
     centers = np.asarray(
         [
-            np.percentile(values, 15.0),
-            np.percentile(values, 85.0),
+            _histogram_percentile(cumulative, 15.0),
+            _histogram_percentile(cumulative, 85.0),
         ],
         dtype=np.float64,
     )
     if abs(float(centers[1] - centers[0])) < 1.0:
         centers = np.asarray([low, high], dtype=np.float64)
 
-    labels = np.zeros(values.shape[0], dtype=np.int8)
+    weighted_levels = nonzero_levels.astype(np.float64, copy=False)
+    weighted_counts = counts[nonzero_levels].astype(np.float64, copy=False)
     for _ in range(_CORE_CLUSTER_STEPS):
-        distances = np.abs(values[:, np.newaxis] - centers[np.newaxis, :])
-        labels = np.argmin(distances, axis=1).astype(np.int8)
+        dark_mask = np.abs(weighted_levels - centers[0]) <= np.abs(weighted_levels - centers[1])
         updated = centers.copy()
-        for idx in (0, 1):
-            cluster_values = values[labels == idx]
-            if cluster_values.size > 0:
-                updated[idx] = cluster_values.mean()
+        if np.any(dark_mask):
+            updated[0] = float(np.average(weighted_levels[dark_mask], weights=weighted_counts[dark_mask]))
+        if np.any(~dark_mask):
+            updated[1] = float(np.average(weighted_levels[~dark_mask], weights=weighted_counts[~dark_mask]))
         if np.allclose(updated, centers):
             centers = updated
             break
@@ -461,6 +576,21 @@ def _estimate_core_threshold(foreground_values: np.ndarray) -> int:
     if (light_center - dark_center) < _CORE_CLUSTER_GAP:
         return int(min(_VISIBLE_THRESHOLD - 1, round(light_center)))
     return int(min(_VISIBLE_THRESHOLD - 1, np.floor((dark_center + light_center) / 2.0)))
+
+
+def _histogram_percentile(cumulative_counts: np.ndarray, percentile: float) -> float:
+    total = int(cumulative_counts[-1]) if cumulative_counts.size else 0
+    if total <= 0:
+        return float(_THRESHOLD)
+
+    rank = (total - 1) * (percentile / 100.0)
+    lower_rank = int(np.floor(rank))
+    upper_rank = int(np.ceil(rank))
+    lower_value = float(np.searchsorted(cumulative_counts, lower_rank + 1, side="left"))
+    upper_value = float(np.searchsorted(cumulative_counts, upper_rank + 1, side="left"))
+    if lower_rank == upper_rank:
+        return lower_value
+    return lower_value + ((upper_value - lower_value) * (rank - lower_rank))
 
 
 def _extract_components(mask: np.ndarray, erode: bool) -> tuple[list[Component], np.ndarray]:
@@ -491,54 +621,182 @@ def _erode_mask(mask: np.ndarray, radius_x: int, radius_y: int) -> np.ndarray:
 def _find_components(mask: np.ndarray) -> tuple[list[Component], np.ndarray]:
     height, width = mask.shape
     labels = np.zeros((height, width), dtype=np.int32)
-    components: list[Component] = []
-    next_label = 1
+    if height == 0 or width == 0 or not np.any(mask):
+        return [], labels
 
-    for y in range(height):
-        for x in range(width):
-            if not mask[y, x] or labels[y, x] != 0:
-                continue
+    run_rows, run_starts, run_ends, row_run_offsets = _foreground_runs(mask)
+    run_count = int(run_rows.shape[0])
+    if run_count == 0:
+        return [], labels
 
-            stack = [(x, y)]
-            labels[y, x] = next_label
-            left = right = x
-            top = bottom = y
-            area = 0
+    parents = np.arange(run_count, dtype=np.int32)
+    ranks = np.zeros(run_count, dtype=np.uint8)
 
-            while stack:
-                current_x, current_y = stack.pop()
-                area += 1
-                left = min(left, current_x)
-                right = max(right, current_x)
-                top = min(top, current_y)
-                bottom = max(bottom, current_y)
+    for row_index in range(1, height):
+        prev_start = int(row_run_offsets[row_index - 1])
+        prev_end = int(row_run_offsets[row_index])
+        curr_start = int(row_run_offsets[row_index])
+        curr_end = int(row_run_offsets[row_index + 1])
+        if prev_start == prev_end or curr_start == curr_end:
+            continue
 
-                for neighbor_x, neighbor_y in _neighbors(current_x, current_y, width, height):
-                    if not mask[neighbor_y, neighbor_x]:
-                        continue
-                    if labels[neighbor_y, neighbor_x] != 0:
-                        continue
-                    labels[neighbor_y, neighbor_x] = next_label
-                    stack.append((neighbor_x, neighbor_y))
+        prev_pointer = prev_start
+        for curr_index in range(curr_start, curr_end):
+            curr_left = int(run_starts[curr_index])
+            curr_right = int(run_ends[curr_index])
+            while prev_pointer < prev_end and int(run_ends[prev_pointer]) + 1 < curr_left:
+                prev_pointer += 1
 
-            if area >= _MIN_COMPONENT_AREA:
-                components.append(
-                    Component(
-                        left=left,
-                        top=top,
-                        right=right,
-                        bottom=bottom,
-                        area=area,
-                    )
-                )
-                next_label += 1
-                continue
+            scan_index = prev_pointer
+            while scan_index < prev_end and int(run_starts[scan_index]) <= curr_right + 1:
+                _union_runs_array(parents, ranks, curr_index, int(scan_index))
+                scan_index += 1
 
-            labels[labels == next_label] = 0
+    run_roots = np.fromiter((_find_run_root_array(parents, run_index) for run_index in range(run_count)), dtype=np.int32)
+    unique_roots, first_indices, inverse = np.unique(
+        run_roots,
+        return_index=True,
+        return_inverse=True,
+    )
+    root_order = np.argsort(first_indices, kind="stable")
+    ordered_roots = unique_roots[root_order]
+    component_count = int(ordered_roots.shape[0])
+
+    remap = np.empty(component_count, dtype=np.int32)
+    remap[root_order] = np.arange(component_count, dtype=np.int32)
+    component_indices = remap[inverse]
+
+    component_lefts = np.full(component_count, width, dtype=np.int32)
+    component_rights = np.zeros(component_count, dtype=np.int32)
+    component_tops = np.full(component_count, height, dtype=np.int32)
+    component_bottoms = np.zeros(component_count, dtype=np.int32)
+    component_areas = np.zeros(component_count, dtype=np.int32)
+
+    np.minimum.at(component_lefts, component_indices, run_starts)
+    np.maximum.at(component_rights, component_indices, run_ends)
+    np.minimum.at(component_tops, component_indices, run_rows)
+    np.maximum.at(component_bottoms, component_indices, run_rows)
+    np.add.at(component_areas, component_indices, (run_ends - run_starts + 1).astype(np.int32, copy=False))
+
+    keep_mask = component_areas >= _MIN_COMPONENT_AREA
+    kept_indices = np.flatnonzero(keep_mask)
+
+    components: list[Component] = [
+        Component(
+            left=int(component_lefts[component_index]),
+            top=int(component_tops[component_index]),
+            right=int(component_rights[component_index]),
+            bottom=int(component_bottoms[component_index]),
+            area=int(component_areas[component_index]),
+        )
+        for component_index in kept_indices
+    ]
+
+    component_labels = np.zeros(component_count, dtype=np.int32)
+    component_labels[kept_indices] = np.arange(1, kept_indices.size + 1, dtype=np.int32)
+    run_labels = component_labels[component_indices]
+
+    for run_index, label in enumerate(run_labels):
+        if label == 0:
+            continue
+        row = int(run_rows[run_index])
+        left = int(run_starts[run_index])
+        right = int(run_ends[run_index])
+        labels[row, left : right + 1] = int(label)
 
     return components, labels
 
 
+def _foreground_runs(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    height = mask.shape[0]
+    transitions = np.diff(
+        np.pad(mask.astype(np.int8, copy=False), ((0, 0), (1, 1)), mode="constant", constant_values=0),
+        axis=1,
+    )
+    run_rows, run_starts = np.nonzero(transitions == 1)
+    end_rows, run_end_plus_one = np.nonzero(transitions == -1)
+    if run_rows.size == 0:
+        return (
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            np.empty(0, dtype=np.int32),
+            np.zeros(height + 1, dtype=np.int32),
+        )
+
+    if not np.array_equal(run_rows, end_rows):
+        raise RuntimeError("foreground run extraction lost row alignment")
+
+    row_run_counts = np.bincount(run_rows, minlength=height).astype(np.int32, copy=False)
+    row_run_offsets = np.empty(height + 1, dtype=np.int32)
+    row_run_offsets[0] = 0
+    np.cumsum(row_run_counts, out=row_run_offsets[1:])
+    return (
+        run_rows.astype(np.int32, copy=False),
+        run_starts.astype(np.int32, copy=False),
+        (run_end_plus_one - 1).astype(np.int32, copy=False),
+        row_run_offsets,
+    )
+def _find_run_root(parents: list[int], index: int) -> int:
+    root = index
+    while parents[root] != root:
+        root = parents[root]
+    while parents[index] != index:
+        parent = parents[index]
+        parents[index] = root
+        index = parent
+    return root
+
+
+def _union_runs(parents: list[int], ranks: list[int], left: int, right: int) -> None:
+    left_root = _find_run_root(parents, left)
+    right_root = _find_run_root(parents, right)
+    if left_root == right_root:
+        return
+
+    if ranks[left_root] < ranks[right_root]:
+        parents[left_root] = right_root
+        return
+    if ranks[left_root] > ranks[right_root]:
+        parents[right_root] = left_root
+        return
+
+    parents[right_root] = left_root
+    ranks[left_root] += 1
+
+
+def _find_run_root_array(parents: np.ndarray, index: int) -> int:
+    root = index
+    while True:
+        parent = int(parents[root])
+        if parent == root:
+            break
+        root = parent
+    while True:
+        parent = int(parents[index])
+        if parent == index:
+            break
+        parents[index] = root
+        index = parent
+    return root
+
+
+def _union_runs_array(parents: np.ndarray, ranks: np.ndarray, left: int, right: int) -> None:
+    left_root = _find_run_root_array(parents, left)
+    right_root = _find_run_root_array(parents, right)
+    if left_root == right_root:
+        return
+
+    left_rank = int(ranks[left_root])
+    right_rank = int(ranks[right_root])
+    if left_rank < right_rank:
+        parents[left_root] = right_root
+        return
+    if left_rank > right_rank:
+        parents[right_root] = left_root
+        return
+
+    parents[right_root] = left_root
+    ranks[left_root] = left_rank + 1
 def _neighbors(x: int, y: int, width: int, height: int) -> list[tuple[int, int]]:
     result: list[tuple[int, int]] = []
     for dy in (-1, 0, 1):
@@ -583,7 +841,6 @@ def _infer_orientation(components: list[Component], image_size: tuple[int, int])
 
 def _build_lines(
     components: list[Component],
-    labels: np.ndarray,
     mask_shape: tuple[int, int],
     orientation: str,
 ) -> list[LineCluster]:
@@ -593,14 +850,14 @@ def _build_lines(
     thicknesses = np.asarray([component.thickness(orientation) for component in components], dtype=np.float64)
     weights = np.asarray([component.area for component in components], dtype=np.float64)
     median_thickness = _weighted_median(thicknesses, weights)
-    owner_sets = _build_scanline_owner_sets(labels, orientation)
-    bands = _build_scanline_bands(owner_sets)
+    slabs = _build_scanline_owner_sets(components, mask_shape, orientation)
+    bands = _build_scanline_bands(slabs)
     if not bands:
         return []
 
     bands = _merge_scanline_bands(
         bands=bands,
-        owner_sets=owner_sets,
+        owner_sets=slabs,
         components=components,
         orientation=orientation,
         median_thickness=median_thickness,
@@ -608,7 +865,7 @@ def _build_lines(
     return [
         _make_line_cluster_from_band(
             band=band,
-            owner_sets=owner_sets,
+            owner_sets=slabs,
             components=components,
             mask_shape=mask_shape,
             orientation=orientation,
@@ -617,56 +874,111 @@ def _build_lines(
     ]
 
 
-def _build_scanline_owner_sets(labels: np.ndarray, orientation: str) -> list[frozenset[int]]:
-    axis_length = labels.shape[0] if orientation == HORIZONTAL else labels.shape[1]
-    owner_sets: list[frozenset[int]] = []
-    for position in range(axis_length):
-        slice_labels = labels[position, :] if orientation == HORIZONTAL else labels[:, position]
-        unique_labels = np.unique(slice_labels)
-        owner_sets.append(
-            frozenset(int(label - 1) for label in unique_labels.tolist() if label != 0)
+def _build_scanline_owner_sets(
+    components: Sequence[Component],
+    mask_shape: tuple[int, int],
+    orientation: str,
+) -> list[_ScanlineSlab]:
+    axis_length = mask_shape[0] if orientation == HORIZONTAL else mask_shape[1]
+    if axis_length <= 0 or not components:
+        return []
+
+    start_events: list[list[int]] = [[] for _ in range(axis_length + 1)]
+    end_events: list[list[int]] = [[] for _ in range(axis_length + 1)]
+    if orientation == HORIZONTAL:
+        for component_index, component in enumerate(components):
+            start_events[component.top].append(component_index)
+            end_after = component.bottom + 1
+            if end_after <= axis_length:
+                end_events[end_after].append(component_index)
+    else:
+        for component_index, component in enumerate(components):
+            start_events[component.left].append(component_index)
+            end_after = component.right + 1
+            if end_after <= axis_length:
+                end_events[end_after].append(component_index)
+
+    change_positions = sorted(
+        {
+            position
+            for position in range(axis_length + 1)
+            if start_events[position] or end_events[position] or position == axis_length
+        }
+    )
+
+    active: set[int] = set()
+    slabs: list[_ScanlineSlab] = []
+    current_position = 0
+
+    for position in change_positions:
+        if position > current_position and active:
+            slabs.append(
+                _ScanlineSlab(
+                    start=current_position,
+                    end=position - 1,
+                    owners=frozenset(active),
+                )
+            )
+
+        for component_index in end_events[position]:
+            active.discard(component_index)
+        for component_index in start_events[position]:
+            active.add(component_index)
+
+        current_position = position
+
+    return slabs
+
+
+def _build_scanline_bands(owner_sets: list[_ScanlineSlab]) -> list[_ScanlineBand]:
+    bands: list[_ScanlineBand] = []
+    if not owner_sets:
+        return bands
+
+    current_start = owner_sets[0].start
+    current_end = owner_sets[0].end
+    current_slab_start = 0
+    previous_owners = owner_sets[0].owners
+
+    for slab_index in range(1, len(owner_sets)):
+        slab = owner_sets[slab_index]
+        gap = slab.start - current_end - 1
+        if gap == 0 and _owner_set_overlap(previous_owners, slab.owners) >= _SCANLINE_MATCH_THRESHOLD:
+            current_end = slab.end
+            previous_owners = slab.owners
+            continue
+
+        bands.append(
+            _ScanlineBand(
+                start=current_start,
+                end=current_end,
+                slab_start=current_slab_start,
+                slab_end=slab_index - 1,
+            )
         )
-    return owner_sets
+        current_start = slab.start
+        current_end = slab.end
+        current_slab_start = slab_index
+        previous_owners = slab.owners
 
-
-def _build_scanline_bands(owner_sets: list[frozenset[int]]) -> list[tuple[int, int]]:
-    bands: list[tuple[int, int]] = []
-    start: int | None = None
-    previous = frozenset()
-
-    for position, owners in enumerate(owner_sets):
-        if not owners:
-            if start is not None:
-                bands.append((start, position - 1))
-                start = None
-            previous = frozenset()
-            continue
-
-        if start is None:
-            start = position
-            previous = owners
-            continue
-
-        if _owner_set_overlap(previous, owners) >= _SCANLINE_MATCH_THRESHOLD:
-            previous = owners
-            continue
-
-        bands.append((start, position - 1))
-        start = position
-        previous = owners
-
-    if start is not None:
-        bands.append((start, len(owner_sets) - 1))
+    bands.append(
+        _ScanlineBand(
+            start=current_start,
+            end=current_end,
+            slab_start=current_slab_start,
+            slab_end=len(owner_sets) - 1,
+        )
+    )
     return bands
 
 
 def _merge_scanline_bands(
-    bands: list[tuple[int, int]],
-    owner_sets: list[frozenset[int]],
+    bands: list[_ScanlineBand],
+    owner_sets: list[_ScanlineSlab],
     components: list[Component],
     orientation: str,
     median_thickness: float,
-) -> list[tuple[int, int]]:
+) -> list[_ScanlineBand]:
     if len(bands) < 2:
         return bands
 
@@ -684,7 +996,7 @@ def _merge_scanline_bands(
             current = merged[index]
             if index + 1 < len(merged):
                 following = merged[index + 1]
-                gap = following[0] - current[1] - 1
+                gap = following.start - current.end - 1
                 overlap = _band_overlap_signature(current, following, owner_sets)
                 if gap <= merge_gap and (
                     overlap >= _SIGNATURE_OVERLAP_THRESHOLD
@@ -694,7 +1006,7 @@ def _merge_scanline_bands(
                         >= _THICKNESS_SIMILARITY_THRESHOLD
                     )
                 ):
-                    next_bands.append((current[0], following[1]))
+                    next_bands.append(_combine_scanline_bands(current, following))
                     index += 2
                     changed = True
                     continue
@@ -709,7 +1021,7 @@ def _merge_scanline_bands(
         next_bands = []
         while index < len(merged):
             current = merged[index]
-            thickness = current[1] - current[0] + 1
+            thickness = current.end - current.start + 1
             if thickness <= micro_thickness:
                 previous = next_bands[-1] if next_bands else None
                 following = merged[index + 1] if index + 1 < len(merged) else None
@@ -728,18 +1040,18 @@ def _merge_scanline_bands(
 
                 if previous and (
                     previous_overlap >= _SIGNATURE_OVERLAP_THRESHOLD
-                    or (previous[1] + 1 == current[0] and previous_similarity >= _THICKNESS_SIMILARITY_THRESHOLD)
+                    or (previous.end + 1 == current.start and previous_similarity >= _THICKNESS_SIMILARITY_THRESHOLD)
                 ):
-                    next_bands[-1] = (previous[0], current[1])
+                    next_bands[-1] = _combine_scanline_bands(previous, current)
                     index += 1
                     changed = True
                     continue
 
                 if following and (
                     following_overlap >= _SIGNATURE_OVERLAP_THRESHOLD
-                    or (current[1] + 1 == following[0] and following_similarity >= _THICKNESS_SIMILARITY_THRESHOLD)
+                    or (current.end + 1 == following.start and following_similarity >= _THICKNESS_SIMILARITY_THRESHOLD)
                 ):
-                    next_bands.append((current[0], following[1]))
+                    next_bands.append(_combine_scanline_bands(current, following))
                     index += 2
                     changed = True
                     continue
@@ -751,22 +1063,28 @@ def _merge_scanline_bands(
 
 
 def _band_overlap_signature(
-    left_band: tuple[int, int] | None,
-    right_band: tuple[int, int] | None,
-    owner_sets: list[frozenset[int]],
+    left_band: _ScanlineBand | None,
+    right_band: _ScanlineBand | None,
+    owner_sets: list[_ScanlineSlab],
 ) -> float:
     if left_band is None or right_band is None:
         return 0.0
 
-    left_signature = _representative_owners(_band_owner_counts(left_band, owner_sets), left_band[1] - left_band[0] + 1)
-    right_signature = _representative_owners(_band_owner_counts(right_band, owner_sets), right_band[1] - right_band[0] + 1)
+    left_signature = _representative_owners(
+        _band_owner_counts(left_band, owner_sets),
+        left_band.end - left_band.start + 1,
+    )
+    right_signature = _representative_owners(
+        _band_owner_counts(right_band, owner_sets),
+        right_band.end - right_band.start + 1,
+    )
     return _owner_set_overlap(left_signature, right_signature)
 
 
 def _band_scale_similarity(
-    left_band: tuple[int, int] | None,
-    right_band: tuple[int, int] | None,
-    owner_sets: list[frozenset[int]],
+    left_band: _ScanlineBand | None,
+    right_band: _ScanlineBand | None,
+    owner_sets: list[_ScanlineSlab],
     components: list[Component],
     orientation: str,
 ) -> float:
@@ -774,22 +1092,23 @@ def _band_scale_similarity(
         return 0.0
 
     del owner_sets, components, orientation
-    left_scale = float((left_band[1] - left_band[0]) + 1)
-    right_scale = float((right_band[1] - right_band[0]) + 1)
+    left_scale = float((left_band.end - left_band.start) + 1)
+    right_scale = float((right_band.end - right_band.start) + 1)
     if left_scale <= 0 or right_scale <= 0:
         return 0.0
     return min(left_scale, right_scale) / max(left_scale, right_scale)
 
 
 def _band_owner_counts(
-    band: tuple[int, int],
-    owner_sets: list[frozenset[int]],
+    band: _ScanlineBand,
+    owner_sets: list[_ScanlineSlab],
 ) -> dict[int, int]:
     counts: dict[int, int] = {}
-    start, end = band
-    for position in range(start, end + 1):
-        for index in owner_sets[position]:
-            counts[index] = counts.get(index, 0) + 1
+    for slab_index in range(band.slab_start, band.slab_end + 1):
+        slab = owner_sets[slab_index]
+        thickness = slab.end - slab.start + 1
+        for index in slab.owners:
+            counts[index] = counts.get(index, 0) + thickness
     return counts
 
 
@@ -817,15 +1136,15 @@ def _owner_set_overlap(left: frozenset[int], right: frozenset[int]) -> float:
 
 
 def _make_line_cluster_from_band(
-    band: tuple[int, int],
-    owner_sets: list[frozenset[int]],
+    band: _ScanlineBand,
+    owner_sets: list[_ScanlineSlab],
     components: list[Component],
     mask_shape: tuple[int, int],
     orientation: str,
 ) -> LineCluster:
     all_counts = _band_owner_counts(band, owner_sets)
     all_indices = tuple(sorted(all_counts))
-    representative_indices = tuple(sorted(_representative_owners(all_counts, band[1] - band[0] + 1)))
+    representative_indices = tuple(sorted(_representative_owners(all_counts, band.end - band.start + 1)))
     if not representative_indices:
         representative_indices = all_indices
 
@@ -835,7 +1154,8 @@ def _make_line_cluster_from_band(
     content_top = min(component.top for component in representative_components)
     content_right = max(component.right for component in representative_components)
     content_bottom = max(component.bottom for component in representative_components)
-    band_start, band_end = band
+    band_start = band.start
+    band_end = band.end
 
     if orientation == HORIZONTAL:
         left = 0
@@ -863,6 +1183,15 @@ def _make_line_cluster_from_band(
         content_bottom=content_bottom,
         area=sum(component.area for component in representative_components),
         representative_thickness=representative_thickness,
+    )
+
+
+def _combine_scanline_bands(left: _ScanlineBand, right: _ScanlineBand) -> _ScanlineBand:
+    return _ScanlineBand(
+        start=left.start,
+        end=right.end,
+        slab_start=left.slab_start,
+        slab_end=right.slab_end,
     )
 
 
