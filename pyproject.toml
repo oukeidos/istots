@@ -1,6 +1,6 @@
 [project]
 name = "istots"
-version = "0.3.0"
+version = "0.3.1"
 description = "SUP to SRT subtitle converter using OCR"
 readme = "README.md"
 requires-python = ">=3.11"
