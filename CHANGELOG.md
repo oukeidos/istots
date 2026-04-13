@@ -4,6 +4,7 @@
 - Ported the retained PGS parser refinement by restoring validated parser/full-surface semantics, sharing frame assembly across parser and `sup_reader`, adding the OCR-facing compose-bypass path, and verifying the result with targeted and sample-backed regression suites.
 - Ported the retained furigana-mask optimization by adding same-SUP duplicate analysis reuse, retained process-based batch parallelism, histogram-backed thresholding, row-run connected components, dense-array union-find bookkeeping, and slab/band line construction without changing the validated output contract.
 - Revalidated the furigana-mask port against `tests/test_furigana_mask.py` and `tests/test_pipeline_batch.py`, matching the retained handoff expectation of `35 passed`.
+- Confirmed the furigana-mask port on the shared whole-SUP validator corpus with `mismatch_count=0` across stage 1 and stage 2 and runtime remaining in the retained post-optimization regime.
 
 ## [0.3.0] - 2026-04-13
 - Rebuilt the product around a primary `llama-server` OCR path, with `hf` kept as an explicit optional fallback.
