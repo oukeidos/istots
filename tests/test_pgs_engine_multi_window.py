@@ -59,3 +59,33 @@ def test_decode_display_set_windows_returns_each_window_separately() -> None:
     assert second.object_ids == (2,)
     assert second.size == (3, 1)
     assert (second.left, second.top, second.right, second.bottom) == (100, 30, 102, 30)
+
+
+def test_compose_decoded_windows_returns_union_surface() -> None:
+    decoded = parser._compose_decoded_windows(
+        (
+            parser.DecodedWindow(
+                window_id=0,
+                left=0,
+                top=0,
+                right=1,
+                bottom=1,
+                object_ids=(1,),
+                pixels=[[0, 0], [0, 0]],
+            ),
+            parser.DecodedWindow(
+                window_id=1,
+                left=3,
+                top=1,
+                right=4,
+                bottom=1,
+                object_ids=(2,),
+                pixels=[[128, 128]],
+            ),
+        )
+    )
+
+    assert decoded == [
+        [0, 0, 255, 255, 255],
+        [0, 0, 255, 128, 128],
+    ]

@@ -13,6 +13,14 @@ from typing import Iterator
 
 from PIL import Image
 
+from .assembly import (
+    DEDUPE_MAX_GAP_PTS,
+    FrameCandidate as CandidateFrame,
+    build_frame_candidates,
+    dedupe_consecutive_identical,
+    finalize_candidates,
+)
+
 try:
     import numpy as np
 except Exception:  # pragma: no cover - optional acceleration dependency
@@ -29,11 +37,16 @@ SEGMENT_END = 0x80
 COMPOSITION_STATE_NORMAL = 0x00
 COMPOSITION_STATE_ACQUISITION = 0x40
 COMPOSITION_STATE_EPOCH_START = 0x80
+COMPOSITION_STATE_EPOCH_CONTINUE = 0xC0
+VALID_COMPOSITION_STATES = {
+    COMPOSITION_STATE_NORMAL,
+    COMPOSITION_STATE_ACQUISITION,
+    COMPOSITION_STATE_EPOCH_START,
+    COMPOSITION_STATE_EPOCH_CONTINUE,
+}
 START_STATES = {COMPOSITION_STATE_ACQUISITION, COMPOSITION_STATE_EPOCH_START}
+CACHE_RESET_STATES = {COMPOSITION_STATE_EPOCH_START}
 
-TEN_SECONDS_PTS = 900_000
-ONE_MS_PTS = 90
-DEDUPE_MAX_GAP_PTS = ONE_MS_PTS * 2
 DISPLAY_CACHE_MAX_ITEMS = 4096
 PREDECODE_MAX_AUTO_WORKERS = 16
 
@@ -124,15 +137,6 @@ class DecodedWindow:
 
 
 @dataclass
-class CandidateFrame:
-    raw_index: int
-    start_pts: int
-    end_pts: int
-    image_hash: int
-    pixels: list[list[int]]
-
-
-@dataclass
 class EngineFrame:
     raw_index: int
     start_pts: int
@@ -194,6 +198,7 @@ class PgsEngine:
         self,
         max_display_sets: int | None = None,
         predecode_workers: int = 0,
+        include_decoded_pixels: bool = True,
     ) -> list[ParsedDisplaySet]:
         if not self.input_sup.exists():
             raise FileNotFoundError(f"Input SUP file not found: {self.input_sup}")
@@ -220,7 +225,13 @@ class PgsEngine:
 
         rows: list[ParsedDisplaySet] = []
         for raw_index, packets in enumerate(_iter_display_set_packets(self.input_sup, sup_data=sup_data)):
-            rows.append(self._parse_display_set(raw_index, packets))
+            rows.append(
+                self._parse_display_set(
+                    raw_index,
+                    packets,
+                    include_decoded_pixels=include_decoded_pixels,
+                )
+            )
             if max_display_sets is not None and len(rows) >= max_display_sets:
                 break
         return rows
@@ -234,9 +245,9 @@ class PgsEngine:
             raise ValueError("max_items must be a positive integer")
 
         display_sets = self.parse_display_sets(predecode_workers=predecode_workers)
-        candidates = _build_candidates(display_sets)
-        finalized = _finalize_candidates(candidates, max_items=max_items)
-        deduped = _dedupe_consecutive_identical(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
+        candidates = build_frame_candidates(display_sets, hash_pixels=_hash_pixels)
+        finalized = finalize_candidates(candidates, max_items=max_items)
+        deduped = dedupe_consecutive_identical(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
 
         frames: list[EngineFrame] = []
         for row in deduped:
@@ -257,8 +268,15 @@ class PgsEngine:
             )
         return frames
 
-    def _parse_display_set(self, raw_index: int, packets: list[_Packet]) -> ParsedDisplaySet:
+    def _parse_display_set(
+        self,
+        raw_index: int,
+        packets: list[_Packet],
+        *,
+        include_decoded_pixels: bool = True,
+    ) -> ParsedDisplaySet:
         pcs: PcsSegment | None = None
+        saw_end = False
 
         for packet in packets:
             if packet.segment_type == SEGMENT_PCS:
@@ -266,8 +284,9 @@ class PgsEngine:
                 if parsed_pcs is None:
                     continue
                 pcs = parsed_pcs
-                if pcs.composition_state in START_STATES:
-                    # Start boundary for a new composition group.
+                if pcs.composition_state in CACHE_RESET_STATES:
+                    # Start of a new epoch. Object/window state from the previous
+                    # epoch should not bleed into the next one.
                     self._objects.clear()
                     self._windows.clear()
 
@@ -277,6 +296,8 @@ class PgsEngine:
                 _update_object(self._objects, packet.payload)
             elif packet.segment_type == SEGMENT_WDS:
                 _update_windows(self._windows, packet.payload)
+            elif packet.segment_type == SEGMENT_END:
+                saw_end = True
 
         if pcs is None:
             return ParsedDisplaySet(
@@ -286,12 +307,29 @@ class PgsEngine:
                 decoded_pixels=None,
             )
 
-        if pcs.composition_state not in START_STATES:
+        if pcs.composition_state not in VALID_COMPOSITION_STATES:
             return ParsedDisplaySet(
                 raw_index=raw_index,
                 pcs=pcs,
                 complete=False,
                 decoded_pixels=None,
+            )
+
+        if not saw_end:
+            return ParsedDisplaySet(
+                raw_index=raw_index,
+                pcs=pcs,
+                complete=False,
+                decoded_pixels=None,
+            )
+
+        if not pcs.objects:
+            return ParsedDisplaySet(
+                raw_index=raw_index,
+                pcs=pcs,
+                complete=True,
+                decoded_pixels=None,
+                decoded_windows=(),
             )
 
         decoded_windows = _decode_display_set_windows_cached(
@@ -303,11 +341,11 @@ class PgsEngine:
             cache=self._display_decode_cache,
             max_cache_items=DISPLAY_CACHE_MAX_ITEMS,
         )
-        decoded = decoded_windows[-1].pixels if decoded_windows else None
+        decoded = _compose_decoded_windows(decoded_windows) if include_decoded_pixels else None
         return ParsedDisplaySet(
             raw_index=raw_index,
             pcs=pcs,
-            complete=decoded is not None,
+            complete=(decoded is not None) if include_decoded_pixels else bool(decoded_windows),
             decoded_pixels=decoded,
             decoded_windows=decoded_windows,
         )
@@ -449,7 +487,7 @@ def _collect_unique_completed_objects(
     for display_set_index, packets in enumerate(_iter_display_set_packets(path, sup_data=sup_data)):
         for packet in packets:
             if packet.segment_type == SEGMENT_PCS:
-                if _is_start_pcs_payload(packet.payload):
+                if _is_reset_pcs_payload(packet.payload):
                     objects.clear()
                 continue
 
@@ -477,11 +515,11 @@ def _collect_unique_completed_objects(
     return unique
 
 
-def _is_start_pcs_payload(payload: bytes) -> bool:
+def _is_reset_pcs_payload(payload: bytes) -> bool:
     # PCS layout: composition_state is byte index 7.
     if len(payload) < 8:
         return False
-    return payload[7] in START_STATES
+    return payload[7] in CACHE_RESET_STATES
 
 
 def _predecode_worker_decode_flat(
@@ -713,9 +751,44 @@ def _decode_display_set(
         objects=objects,
         predecoded_objects=predecoded_objects,
     )
+    return _compose_decoded_windows(decoded_windows)
+
+
+def _compose_decoded_windows(decoded_windows: tuple[DecodedWindow, ...]) -> list[list[int]] | None:
     if not decoded_windows:
         return None
-    return decoded_windows[-1].pixels
+
+    min_left = min(window.left for window in decoded_windows)
+    min_top = min(window.top for window in decoded_windows)
+    max_right = max(window.left + window.size[0] for window in decoded_windows)
+    max_bottom = max(window.top + window.size[1] for window in decoded_windows)
+    if max_right <= min_left or max_bottom <= min_top:
+        return None
+
+    out_width = max_right - min_left
+    out_height = max_bottom - min_top
+    white_row = b"\xFF" * out_width
+    output: list[bytearray] = [bytearray(white_row) for _ in range(out_height)]
+
+    for window in decoded_windows:
+        width, height = window.size
+        if width <= 0 or height <= 0:
+            continue
+        dst_x_offset = window.left - min_left
+        dst_y_offset = window.top - min_top
+        for row_index in range(height):
+            src_row = window.pixels[row_index]
+            out_row = output[dst_y_offset + row_index]
+            for col_index in range(width):
+                value = src_row[col_index]
+                if value == 255:
+                    continue
+                out_row[dst_x_offset + col_index] = value
+
+    if all(all(value == 255 for value in row) for row in output):
+        return None
+
+    return [list(row) for row in output]
 
 
 def _decode_display_set_windows(
@@ -1220,117 +1293,6 @@ def _build_palette_lut(palette: dict[int, PaletteEntry]) -> tuple[list[int], lis
     alpha_lut[0] = 0
     alpha_lut[30] = 0
     return gray_lut, alpha_lut
-
-
-def _build_candidates(display_sets: list[ParsedDisplaySet]) -> list[CandidateFrame]:
-    if not display_sets:
-        return []
-
-    ranges: list[tuple[int, int]] = []
-    range_start = 0
-    for idx in range(1, len(display_sets)):
-        if _is_start(display_sets[idx]):
-            ranges.append((range_start, idx))
-            range_start = idx
-    ranges.append((range_start, len(display_sets)))
-
-    candidates: list[CandidateFrame] = []
-    for begin, end in ranges:
-        group = display_sets[begin:end]
-
-        has_pts = False
-        start_pts = 2**32 - 1
-        end_pts = 0
-        for row in group:
-            if row.pcs is None:
-                continue
-            pts = row.pcs.presentation_timestamp
-            start_pts = min(start_pts, pts)
-            end_pts = max(end_pts, pts)
-            has_pts = True
-        if not has_pts:
-            continue
-
-        decoded: list[list[int]] | None = None
-        for row in group:
-            if not _is_start(row):
-                continue
-            if not row.complete or row.decoded_pixels is None:
-                continue
-            decoded = row.decoded_pixels
-            break
-        if decoded is None:
-            continue
-
-        candidates.append(
-            CandidateFrame(
-                raw_index=begin,
-                start_pts=start_pts,
-                end_pts=end_pts,
-                image_hash=_hash_pixels(decoded),
-                pixels=decoded,
-            )
-        )
-
-    return candidates
-
-
-def _finalize_candidates(candidates: list[CandidateFrame], max_items: int | None) -> list[CandidateFrame]:
-    finalized: list[CandidateFrame] = []
-    for idx in range(len(candidates)):
-        item = candidates[idx]
-        start_pts = item.start_pts
-        end_pts = item.end_pts
-
-        if end_pts <= start_pts:
-            if idx + 1 >= len(candidates):
-                continue
-            next_item = candidates[idx + 1]
-            if start_pts + TEN_SECONDS_PTS < next_item.start_pts:
-                continue
-
-            min_end = start_pts + ONE_MS_PTS
-            next_adjusted = max(0, next_item.start_pts - ONE_MS_PTS)
-            end_pts = max(min_end, next_adjusted)
-
-        finalized.append(
-            CandidateFrame(
-                raw_index=item.raw_index,
-                start_pts=start_pts,
-                end_pts=end_pts,
-                image_hash=item.image_hash,
-                pixels=item.pixels,
-            )
-        )
-
-        if max_items is not None and len(finalized) >= max_items:
-            break
-
-    return finalized
-
-
-def _dedupe_consecutive_identical(candidates: list[CandidateFrame], max_gap_pts: int) -> list[CandidateFrame]:
-    deduped: list[CandidateFrame] = []
-
-    for candidate in candidates:
-        if not deduped:
-            deduped.append(candidate)
-            continue
-
-        prev = deduped[-1]
-        gap = max(0, candidate.start_pts - prev.end_pts)
-        if prev.image_hash == candidate.image_hash and gap <= max_gap_pts:
-            prev.end_pts = max(prev.end_pts, candidate.end_pts)
-        else:
-            deduped.append(candidate)
-
-    return deduped
-
-
-def _is_start(display_set: ParsedDisplaySet) -> bool:
-    if display_set.pcs is None:
-        return False
-    return display_set.pcs.composition_state in START_STATES
 
 
 def _pts_to_ms(pts: int) -> int:
