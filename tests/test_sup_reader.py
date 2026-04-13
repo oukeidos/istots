@@ -14,6 +14,7 @@ class _FakePcs:
 
 @dataclass
 class _FakeDisplaySet:
+    raw_index: int
     pcs: _FakePcs | None
     complete: bool
     decoded_pixels: list[list[int]] | None
@@ -47,26 +48,32 @@ def test_iter_sup_frames_uses_python_engine_and_reports_total(
             self,
             max_display_sets: int | None = None,
             predecode_workers: int = 0,
+            include_decoded_pixels: bool = True,
         ) -> list[_FakeDisplaySet]:
             captured["max_display_sets"] = max_display_sets
             captured["predecode_workers"] = predecode_workers
+            captured["include_decoded_pixels"] = include_decoded_pixels
             return [
                 _FakeDisplaySet(
+                    raw_index=0,
                     pcs=_FakePcs(presentation_timestamp=100, composition_state=0x80),
                     complete=True,
                     decoded_pixels=[[1, 2], [3, 4]],
                 ),
                 _FakeDisplaySet(
+                    raw_index=1,
                     pcs=_FakePcs(presentation_timestamp=120, composition_state=0x00),
                     complete=False,
                     decoded_pixels=None,
                 ),
                 _FakeDisplaySet(
+                    raw_index=2,
                     pcs=_FakePcs(presentation_timestamp=200, composition_state=0x80),
                     complete=True,
                     decoded_pixels=[[1, 2], [3, 4]],
                 ),
                 _FakeDisplaySet(
+                    raw_index=3,
                     pcs=_FakePcs(presentation_timestamp=260, composition_state=0x80),
                     complete=True,
                     decoded_pixels=[[5, 6], [7, 8]],
@@ -81,6 +88,7 @@ def test_iter_sup_frames_uses_python_engine_and_reports_total(
     assert captured["path"] == input_sup
     assert captured["max_display_sets"] is None
     assert captured["predecode_workers"] == -1
+    assert captured["include_decoded_pixels"] is True
     assert totals == [1]
 
     assert len(frames) == 1
@@ -121,30 +129,36 @@ def test_iter_sup_window_frames_preserves_tracks_and_dedupes_per_window(
             self,
             max_display_sets: int | None = None,
             predecode_workers: int = 0,
+            include_decoded_pixels: bool = True,
         ) -> list[_FakeDisplaySet]:
             captured["max_display_sets"] = max_display_sets
             captured["predecode_workers"] = predecode_workers
+            captured["include_decoded_pixels"] = include_decoded_pixels
             return [
                 _FakeDisplaySet(
+                    raw_index=0,
                     pcs=_FakePcs(presentation_timestamp=100, composition_state=0x80),
                     complete=True,
                     decoded_pixels=window_a.pixels,
                     decoded_windows=(window_a, window_b),
                 ),
                 _FakeDisplaySet(
+                    raw_index=1,
                     pcs=_FakePcs(presentation_timestamp=120, composition_state=0x00),
                     complete=False,
                     decoded_pixels=None,
                 ),
                 _FakeDisplaySet(
+                    raw_index=2,
                     pcs=_FakePcs(presentation_timestamp=200, composition_state=0x80),
                     complete=True,
                     decoded_pixels=window_a.pixels,
                     decoded_windows=(window_a, window_c),
                 ),
                 _FakeDisplaySet(
+                    raw_index=3,
                     pcs=_FakePcs(presentation_timestamp=220, composition_state=0x00),
-                    complete=False,
+                    complete=True,
                     decoded_pixels=None,
                 ),
             ]
@@ -157,6 +171,7 @@ def test_iter_sup_window_frames_preserves_tracks_and_dedupes_per_window(
     assert captured["path"] == input_sup
     assert captured["max_display_sets"] is None
     assert captured["predecode_workers"] == -1
+    assert captured["include_decoded_pixels"] is False
     assert totals == [3]
 
     assert len(frames) == 3
@@ -175,3 +190,51 @@ def test_iter_sup_window_frames_preserves_tracks_and_dedupes_per_window(
     assert frames[2].raw_index == 2
     assert int(frames[2].start.total_seconds() * 1000) == 2
     assert int(frames[2].end.total_seconds() * 1000) == 3
+
+
+def test_iter_sup_frames_uses_complete_normal_updates_as_continuity(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+
+    class FakeEngine:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def parse_display_sets(
+            self,
+            max_display_sets: int | None = None,
+            predecode_workers: int = 0,
+            include_decoded_pixels: bool = True,
+        ) -> list[_FakeDisplaySet]:
+            return [
+                _FakeDisplaySet(
+                    raw_index=0,
+                    pcs=_FakePcs(presentation_timestamp=100, composition_state=0x80),
+                    complete=True,
+                    decoded_pixels=[[1, 2], [3, 4]],
+                ),
+                _FakeDisplaySet(
+                    raw_index=1,
+                    pcs=_FakePcs(presentation_timestamp=200, composition_state=0x00),
+                    complete=True,
+                    decoded_pixels=[[1, 2], [3, 4]],
+                ),
+                _FakeDisplaySet(
+                    raw_index=2,
+                    pcs=_FakePcs(presentation_timestamp=300, composition_state=0x00),
+                    complete=True,
+                    decoded_pixels=None,
+                ),
+            ]
+
+    monkeypatch.setattr(sup_reader, "PgsEngine", FakeEngine)
+
+    frames = list(sup_reader.iter_sup_frames(input_sup))
+
+    assert len(frames) == 1
+    assert frames[0].raw_index == 0
+    assert int(frames[0].start.total_seconds() * 1000) == 1
+    assert int(frames[0].end.total_seconds() * 1000) == 3
