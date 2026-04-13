@@ -1,10 +1,7 @@
 # Changelog
 
 ## [0.3.1] - 2026-04-13
-- Added the shared PGS frame/window assembly layer and dedicated regression coverage to preserve retained `E3-C3` candidate, finalize, and dedupe semantics.
-- Restored retained parser-state handling, full-surface multi-window composition, and compose-bypass control so `E3-C3` semantics remain aligned with the validated experiment state.
-- Moved `sup_reader` onto the shared assembly path and split full-surface versus window-level parser calls so OCR-facing window extraction skips unnecessary composed-surface work.
-- Verified the retained port against the required targeted suites plus the available `sample.sup` and `test.sup` regression fixtures, with no extra experiment artifacts entering the product tree.
+- Ported the retained PGS parser refinement by restoring validated parser/full-surface semantics, sharing frame assembly across parser and `sup_reader`, adding the OCR-facing compose-bypass path, and verifying the result with targeted and sample-backed regression suites.
 
 ## [0.3.0] - 2026-04-13
 - Rebuilt the product around a primary `llama-server` OCR path, with `hf` kept as an explicit optional fallback.
