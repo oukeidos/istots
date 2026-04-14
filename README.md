@@ -312,77 +312,187 @@ environment last.
 
 ## Command Reference
 
-This section is intentionally later in the document. The earlier sections
-explain the product model first. For exact syntax, `uv run istots --help`
-remains the authoritative CLI reference.
+- The lists below cover the public command surface shown by `--help`.
+- Hidden compatibility aliases are intentionally omitted here.
+- Every command also accepts `-h`, `--help`.
 
 ### `convert`
 
-`convert` is the main command. The positional arguments are `input.sup` and
-`output.srt`. The most important switches are `--engine` for backend choice,
-`--ocr-mode` for default versus fast OCR scheduling, `--furigana-mask` for
-pre-OCR masking, `--detector-output` and `--detector-mode` for disagreement
-inspection, `--detector-family-addon` for the recall-oriented kanji-family
-surface, `--corrector` and `--corrector-output` for conservative correction,
-and `--srt-policy`, `--max-items`, `--max-new-tokens`, `--force`, and
-`--quiet` for execution control.
-
-The `llama-server` path exposes model-family runtime overrides rather than a
-single global low-level surface. PaddleOCR-VL tuning uses `--paddle-profile`,
-`--paddle-port`, `--paddle-threads`, `--paddle-threads-batch`,
-`--paddle-gpu-layers`, `--paddle-no-mmproj-offload`, and
-`--paddle-startup-timeout-sec`. Qwen corrector tuning uses `--qwen-profile`,
-`--qwen-port`, `--qwen-threads`, `--qwen-threads-batch`,
-`--qwen-gpu-layers`, `--qwen-no-mmproj-offload`, `--qwen-ctx-size`,
-`--qwen-n-predict`, `--qwen-reasoning`, and
-`--qwen-startup-timeout-sec`. Shared runtime infrastructure still uses
-`--llama-server-path`.
-
-The HF path has its own explicit hardware controls. `--hf-device` selects
-`auto`, `cpu`, or `gpu`. `--hf-dtype` selects `auto`, `float32`, `float16`,
-or `bfloat16`. `--model-id` selects the HF model or a local HF model path.
+- Purpose:
+  - Main SUP-to-SRT conversion command.
+- Positional arguments:
+  - `input_sup`: Input `.sup` file to read.
+  - `output_srt`: Output `.srt` file to write.
+- Flags:
+  - `--engine`: Select the OCR backend, `llama-server` or `hf`.
+  - `--hf-device`: Select the HF execution device when `--engine hf` is used.
+  - `--hf-dtype`: Select the HF tensor dtype when `--engine hf` is used.
+  - `--model-id`: Choose the HF model id or local HF model path.
+  - `--models-dir`: Override the local model cache root.
+  - `--max-items`: Limit processing to the first `N` subtitle rows.
+  - `--max-new-tokens`: Set the OCR token budget per image.
+  - `--ocr-mode`: Choose the retained `default` or `fast` OCR path.
+  - `--paddle-profile`: Select the PaddleOCR-VL `llama-server` runtime profile.
+  - `--llama-server-path`: Point at an explicit `llama-server` binary.
+  - `--paddle-port`: Override the PaddleOCR-VL `llama-server` port.
+  - `--paddle-threads`: Override PaddleOCR-VL thread count.
+  - `--paddle-threads-batch`: Override PaddleOCR-VL batch thread count.
+  - `--paddle-gpu-layers`: Override PaddleOCR-VL GPU layer count.
+  - `--paddle-no-mmproj-offload`: Disable mmproj offload for PaddleOCR-VL.
+  - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
+  - `--quiet`: Suppress progress logs.
+  - `--furigana-mask`: Enable the pre-OCR furigana masking pass.
+  - `--detector-output`: Write detector disagreements to a JSONL manifest.
+  - `--detector-mode`: Choose the retained `default` or `wider` detector surface.
+  - `--detector-family-addon`: Enable the dominant-family detector add-on.
+  - `--corrector`: Choose `off`, `qwen-local`, or `gemini` correction.
+  - `--corrector-output`: Write correction records to a JSONL file.
+  - `--corrector-model-path`: Point at an explicit local Qwen GGUF model.
+  - `--corrector-mmproj-path`: Point at an explicit local Qwen mmproj.
+  - `--qwen-profile`: Select the Qwen `llama-server` runtime profile.
+  - `--qwen-port`: Override the Qwen `llama-server` port.
+  - `--qwen-threads`: Override Qwen thread count.
+  - `--qwen-threads-batch`: Override Qwen batch thread count.
+  - `--qwen-gpu-layers`: Override Qwen GPU layer count.
+  - `--qwen-no-mmproj-offload`: Disable mmproj offload for Qwen.
+  - `--qwen-ctx-size`: Override Qwen context size.
+  - `--qwen-n-predict`: Override Qwen output token count.
+  - `--qwen-reasoning`: Override Qwen reasoning mode.
+  - `--qwen-startup-timeout-sec`: Set the Qwen startup timeout.
+  - `--corrector-gemini-model`: Choose the Gemini model id.
+  - `--corrector-api-key-env`: Choose the environment variable used for the Gemini API key.
+  - `--corrector-thinking-level`: Set the Gemini thinking level.
+  - `--corrector-media-resolution`: Set the Gemini media resolution hint.
+  - `--corrector-cache-dir`: Choose the Gemini request cache directory.
+  - `--srt-policy`: Choose `safe` or `overlap` SRT assembly.
+  - `--force`: Overwrite the output file if it already exists.
 
 ### `setup`
 
-`setup` prepares local model artifacts. In common use, the important flags are
-`--with-qwen-corrector` when you also want the default local Qwen assets,
-`--model-id` for the HF fallback model, `--gguf-model-id` for the primary
-Paddle GGUF repository, and `--models-dir` or `--support-dir` when you want
-custom local storage locations. The more technical flags
-`--gguf-py-base-url`, `--gguf-source-mode`, `--min-pixels`, and `--force`
-exist for reproducibility and explicit materialization control.
+- Purpose:
+  - Download and materialize local OCR and optional corrector assets.
+- Flags:
+  - `--model-id`: Choose the HF fallback model id to download.
+  - `--gguf-model-id`: Choose the PaddleOCR-VL GGUF repository to download.
+  - `--with-qwen-corrector`: Also provision the retained local Qwen corrector assets.
+  - `--qwen-corrector-model-id`: Choose the Qwen corrector repository id.
+  - `--qwen-corrector-model-filename`: Choose the Qwen GGUF model filename.
+  - `--qwen-corrector-mmproj-filename`: Choose the Qwen mmproj filename.
+  - `--models-dir`: Override the local model cache root.
+  - `--force`: Re-download and re-materialize cached assets.
+  - `--support-dir`: Override the local support cache root.
+  - `--gguf-py-base-url`: Override the source root for the pinned `gguf-py` snapshot.
+  - `--gguf-source-mode`: Choose how the pinned `gguf` implementation is sourced.
+  - `--min-pixels`: Set the derived `mmproj` `min_pixels` value.
+  - `--quiet`: Suppress progress logs.
 
 ### `smoke`
 
-`smoke` is a thin convenience layer over the same retained product surfaces
-used by `convert`. It accepts `--input-sup`, `--output-dir`, `--ocr-mode`,
-`--no-detector`, `--detector-mode`, `--detector-family-addon`,
-`--corrector`, `--furigana-mask`, `--srt-policy`, `--force`, and `--quiet`,
-plus the same Paddle and Qwen runtime override families used by `convert`.
+- Purpose:
+  - Run a quick validation workflow over the retained product surface.
+- Flags:
+  - `--input-sup`: Choose the SUP file used for smoke validation.
+  - `--output-dir`: Choose the directory for smoke artifacts.
+  - `--models-dir`: Override the local model cache root.
+  - `--max-new-tokens`: Set the OCR token budget per image.
+  - `--ocr-mode`: Choose the retained `default` or `fast` OCR path.
+  - `--paddle-profile`: Select the PaddleOCR-VL runtime profile.
+  - `--llama-server-path`: Point at an explicit `llama-server` binary.
+  - `--paddle-port`: Override the PaddleOCR-VL `llama-server` port.
+  - `--paddle-threads`: Override PaddleOCR-VL thread count.
+  - `--paddle-threads-batch`: Override PaddleOCR-VL batch thread count.
+  - `--paddle-gpu-layers`: Override PaddleOCR-VL GPU layer count.
+  - `--paddle-no-mmproj-offload`: Disable mmproj offload for PaddleOCR-VL smoke runs.
+  - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
+  - `--quiet`: Suppress progress logs.
+  - `--furigana-mask`: Enable the pre-OCR furigana masking pass.
+  - `--no-detector`: Skip detector manifest generation during smoke validation.
+  - `--detector-mode`: Choose the retained `default` or `wider` detector surface.
+  - `--detector-family-addon`: Enable the dominant-family detector add-on.
+  - `--corrector`: Choose `off`, `qwen-local`, or `gemini` correction.
+  - `--corrector-model-path`: Point at an explicit local Qwen GGUF model.
+  - `--corrector-mmproj-path`: Point at an explicit local Qwen mmproj.
+  - `--qwen-profile`: Select the Qwen `llama-server` runtime profile.
+  - `--qwen-port`: Override the Qwen `llama-server` port.
+  - `--qwen-threads`: Override Qwen thread count.
+  - `--qwen-threads-batch`: Override Qwen batch thread count.
+  - `--qwen-gpu-layers`: Override Qwen GPU layer count.
+  - `--qwen-no-mmproj-offload`: Disable mmproj offload for Qwen.
+  - `--qwen-ctx-size`: Override Qwen context size.
+  - `--qwen-n-predict`: Override Qwen output token count.
+  - `--qwen-reasoning`: Override Qwen reasoning mode.
+  - `--qwen-startup-timeout-sec`: Set the Qwen startup timeout.
+  - `--corrector-gemini-model`: Choose the Gemini model id.
+  - `--corrector-api-key-env`: Choose the environment variable used for the Gemini API key.
+  - `--corrector-thinking-level`: Set the Gemini thinking level.
+  - `--corrector-media-resolution`: Set the Gemini media resolution hint.
+  - `--corrector-cache-dir`: Choose the Gemini request cache directory.
+  - `--srt-policy`: Choose `safe` or `overlap` SRT assembly.
+  - `--force`: Overwrite any existing smoke artifacts.
 
 ### `doctor`
 
-`doctor` uses a structured two-part form. The runtime targets are `paddle` and
-`qwen`. The auth target is `gemini`. The workflow targets are `default`,
-`wider`, `corrector-qwen`, and `corrector-gemini`, and all workflow checks
-require `--input-sup`. Structured doctor runs also accept the relevant Paddle
-or Qwen model-family runtime overrides and `--api-key-env` for Gemini auth and
-workflow checks.
+- Purpose:
+  - Run structured runtime, auth, and workflow diagnostics.
+- Positional arguments:
+  - `doctor_category`: Choose `runtime`, `auth`, or `workflow`.
+  - `doctor_target`: Choose the target within that category.
+- Flags:
+  - `--models-dir`: Override the local model cache root.
+  - `--min-pixels`: Set the fast-role asset `min_pixels` value used by doctor.
+  - `--llama-server-path`: Point at an explicit `llama-server` binary.
+  - `--host`: Choose the host to bind or probe.
+  - `--input-sup`: Provide the SUP file required by workflow checks.
+  - `--api-key-env`: Choose the environment variable used for Gemini auth checks.
+  - `--paddle-profile`: Select the PaddleOCR-VL runtime profile.
+  - `--paddle-port`: Override the PaddleOCR-VL `llama-server` port.
+  - `--paddle-threads`: Override PaddleOCR-VL thread count.
+  - `--paddle-threads-batch`: Override PaddleOCR-VL batch thread count.
+  - `--paddle-gpu-layers`: Override PaddleOCR-VL GPU layer count.
+  - `--paddle-no-mmproj-offload`: Disable mmproj offload for PaddleOCR-VL doctor runs.
+  - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
+  - `--corrector-model-path`: Point at an explicit local Qwen GGUF model.
+  - `--corrector-mmproj-path`: Point at an explicit local Qwen mmproj.
+  - `--qwen-profile`: Select the Qwen runtime profile.
+  - `--qwen-port`: Override the Qwen `llama-server` port.
+  - `--qwen-threads`: Override Qwen thread count.
+  - `--qwen-threads-batch`: Override Qwen batch thread count.
+  - `--qwen-gpu-layers`: Override Qwen GPU layer count.
+  - `--qwen-no-mmproj-offload`: Disable mmproj offload for Qwen doctor runs.
+  - `--qwen-ctx-size`: Override Qwen context size.
+  - `--qwen-n-predict`: Override Qwen output token count.
+  - `--qwen-reasoning`: Override Qwen reasoning mode.
+  - `--qwen-startup-timeout-sec`: Set the Qwen startup timeout.
+  - `--quiet`: Suppress progress logs.
 
 ### `auth`
 
-`auth gemini` manages Gemini API keys through `set`, `delete`, `status`,
-`env-file set`, and `env-file clear`. The command is intentionally narrow: it
-stores or clears the API key, reports whether a usable key source exists, and
-does not print the key itself.
+- Purpose:
+  - Manage Gemini credential sources.
+- Positional command structure:
+  - `gemini`: Enter the Gemini credential namespace.
+  - `set`: Store the Gemini API key in the local keyring.
+  - `delete`: Delete the Gemini API key from the local keyring.
+  - `status`: Report whether usable Gemini credentials are available.
+  - `env-file set path`: Store the fallback Gemini `.env` file path.
+  - `env-file clear`: Clear the configured fallback Gemini `.env` file path.
+- Flags:
+  - No command-specific flags beyond `-h`, `--help`.
 
 ### `materialize-mmproj`
 
-`materialize-mmproj` exists for direct control of the derived Paddle mmproj
-artifact. Most users do not need it because `istots setup` already runs the
-materializer. The command takes a positional `base_mmproj` path and uses
-`--output`, `--min-pixels`, `--support-dir`, `--gguf-py-base-url`,
-`--gguf-source-mode`, `--force`, and `--quiet` for explicit low-level control.
+- Purpose:
+  - Build a derived Paddle `mmproj` artifact directly from a base `mmproj`.
+- Positional arguments:
+  - `base_mmproj`: Path to the official base `mmproj` GGUF file.
+- Flags:
+  - `--output`: Choose the derived `mmproj` output path.
+  - `--min-pixels`: Set the derived `mmproj` `min_pixels` value.
+  - `--support-dir`: Override the local support cache root.
+  - `--gguf-py-base-url`: Override the source root for the pinned `gguf-py` snapshot.
+  - `--gguf-source-mode`: Choose how the pinned `gguf` implementation is sourced.
+  - `--force`: Overwrite an existing derived `mmproj`.
+  - `--quiet`: Suppress progress logs.
 
 ## Environment Variables
 
