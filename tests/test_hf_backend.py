@@ -5,8 +5,9 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
-from istots.ocr.hf_backend import HFPaddleOCRVLBackend
+from istots.ocr.hf_backend import HFPaddleOCRVLBackend, _HFRecognitionResult
 
 
 def test_hf_backend_missing_optional_runtime_mentions_extra(monkeypatch) -> None:
@@ -69,3 +70,53 @@ def test_hf_backend_applies_min_pixels_override(monkeypatch) -> None:
     assert processor.tokenizer.padding_side == "left"
     assert processor.image_processor.min_pixels == 32768
     backend.close()
+
+
+def test_hf_backend_applies_length_fallback_for_main_ocr() -> None:
+    backend = object.__new__(HFPaddleOCRVLBackend)
+    backend.role = "ocr"
+    backend.prompt_text = "OCR:"
+    backend.max_new_tokens = 256
+
+    prompts: list[str] = []
+
+    def fake_recognize_once(image, *, prompt_text: str):
+        prompts.append(prompt_text)
+        if prompt_text == "OCR:":
+            return _HFRecognitionResult(
+                normalized_text="bad",
+                generated_token_count=256,
+                hit_max_new_tokens=True,
+            )
+        return _HFRecognitionResult(
+            normalized_text="good",
+            generated_token_count=12,
+            hit_max_new_tokens=False,
+        )
+
+    backend._recognize_once = fake_recognize_once
+
+    assert backend.recognize(Image.new("RGB", (2, 2), "white")) == "good"
+    assert prompts == ["OCR:", "Output only the exact text."]
+
+
+def test_hf_backend_skips_length_fallback_outside_main_ocr() -> None:
+    backend = object.__new__(HFPaddleOCRVLBackend)
+    backend.role = "detector"
+    backend.prompt_text = "OCR:"
+    backend.max_new_tokens = 256
+
+    prompts: list[str] = []
+
+    def fake_recognize_once(image, *, prompt_text: str):
+        prompts.append(prompt_text)
+        return _HFRecognitionResult(
+            normalized_text="kept",
+            generated_token_count=256,
+            hit_max_new_tokens=True,
+        )
+
+    backend._recognize_once = fake_recognize_once
+
+    assert backend.recognize(Image.new("RGB", (2, 2), "white")) == "kept"
+    assert prompts == ["OCR:"]
