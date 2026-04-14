@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import time
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 from PIL import Image
 
@@ -47,6 +47,7 @@ TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
 HF_FAST_MIN_PIXELS = 32768
 KANJI_FAMILY_MIN_COUNT = 2
 MAX_FAMILY_AGREEMENT_ROWS_PER_SUPPORT_ROW = 10
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -86,6 +87,38 @@ class _KanjiFamilyCandidateStats:
     pure_rows: int
     mixed_rows: int
     agreement_rows: int
+
+
+def _exact_image_identity_key(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
+    return (image.mode, image.size, image.tobytes())
+
+
+def _dedupe_by_exact_image_identity(
+    items: list[_T],
+    *,
+    image_getter: Callable[[_T], Image.Image],
+    discriminator_getter: Callable[[_T], Any] | None = None,
+) -> tuple[list[_T], list[int], list[int]]:
+    key_to_unique_index: dict[Any, int] = {}
+    unique_items: list[_T] = []
+    item_to_unique_index: list[int] = []
+    unique_group_sizes: list[int] = []
+
+    for item in items:
+        image = image_getter(item)
+        key: Any = _exact_image_identity_key(image)
+        if discriminator_getter is not None:
+            key = (key, discriminator_getter(item))
+        unique_index = key_to_unique_index.get(key)
+        if unique_index is None:
+            unique_index = len(unique_items)
+            key_to_unique_index[key] = unique_index
+            unique_items.append(item)
+            unique_group_sizes.append(0)
+        unique_group_sizes[unique_index] += 1
+        item_to_unique_index.append(unique_index)
+
+    return unique_items, item_to_unique_index, unique_group_sizes
 
 
 def _resolve_paddle_runtime_overrides(
@@ -649,29 +682,37 @@ def _recognize_prepared_inputs(
     if not prepared_inputs:
         return []
 
-    recognized: list[str] = []
-    total = len(prepared_inputs)
-    for processed, item in enumerate(prepared_inputs, start=1):
+    unique_inputs, item_to_unique_index, unique_group_sizes = _dedupe_by_exact_image_identity(
+        prepared_inputs,
+        image_getter=lambda item: item.image,
+    )
+
+    recognized_unique: list[str] = []
+    total = len(unique_inputs)
+    for processed, item in enumerate(unique_inputs, start=1):
+        unique_index = processed - 1
         if verbose:
             logger.info(
-                "OCR started: branch=%s %s",
+                "OCR started: branch=%s %s rows=%d",
                 branch_label,
                 _progress_label(processed, total),
+                unique_group_sizes[unique_index],
             )
         ocr_started = time.monotonic()
         text = _recognize_single_image(backend, item.image)
-        recognized.append(text)
+        recognized_unique.append(text)
         if verbose:
             state = "accepted" if text else "skipped (empty)"
             logger.info(
-                "OCR finished: branch=%s %s %s elapsed=%.2fs",
+                "OCR finished: branch=%s %s %s rows=%d elapsed=%.2fs",
                 branch_label,
                 _progress_label(processed, total),
                 state,
+                unique_group_sizes[unique_index],
                 time.monotonic() - ocr_started,
             )
 
-    return recognized
+    return [recognized_unique[unique_index] for unique_index in item_to_unique_index]
 
 
 def _recognize_single_image(backend: Any, image: Image.Image) -> str:
@@ -1246,7 +1287,13 @@ def _apply_gemini_corrections(
     prepared_by_index = {item.index: item for item in prepared_inputs}
     corrector_name = corrector_name_for_config(corrector_config)
     records: list[ConservativeCorrectionRecord] = []
-    for detector_record in detector_records:
+    unique_records, record_to_unique_index, _ = _dedupe_by_exact_image_identity(
+        detector_records,
+        image_getter=lambda record: prepared_by_index[record.index].image,
+        discriminator_getter=lambda record: record.shape,
+    )
+    unique_responses: list[tuple[str, str, str]] = []
+    for detector_record in unique_records:
         if verbose:
             logger.info(
                 "running Gemini corrector: row=%s branch=%s shape=%s",
@@ -1255,11 +1302,15 @@ def _apply_gemini_corrections(
                 detector_record.shape,
             )
         prepared = prepared_by_index[detector_record.index]
-        corrector_text, prompt_style, reasoning_content = request_gemini_correction(
-            config=corrector_config,
-            image=prepared.image,
-            shape=detector_record.shape,
+        unique_responses.append(
+            request_gemini_correction(
+                config=corrector_config,
+                image=prepared.image,
+                shape=detector_record.shape,
+            )
         )
+    for detector_record, unique_index in zip(detector_records, record_to_unique_index, strict=True):
+        corrector_text, prompt_style, reasoning_content = unique_responses[unique_index]
         records.append(
             _build_correction_record(
                 detector_record=detector_record,

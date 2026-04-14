@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.2] - 2026-04-14
+- Added always-on post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse while preserving Gemini `shape` separation.
 - Applied a narrow one-shot fallback mitigation for main-OCR token-limit truncation issues in both `llama-server` and HF backends while leaving detector and corrector behavior unchanged.
 
 ## [0.3.1] - 2026-04-14
