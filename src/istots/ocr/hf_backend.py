@@ -9,8 +9,21 @@ from PIL import Image
 
 from istots.device import pick_torch_dtype, to_torch_device
 
-OCR_PROMPT = "OCR:"
+from .fallback_policy import (
+    MAIN_OCR_BASELINE_PROMPT,
+    MAIN_OCR_LENGTH_FALLBACK_PROMPT,
+    is_main_ocr_length_fallback_eligible,
+)
+
+OCR_PROMPT = MAIN_OCR_BASELINE_PROMPT
 ROPE_WARNING_LOGGER = "transformers.modeling_rope_utils"
+
+
+@dataclass(frozen=True)
+class _HFRecognitionResult:
+    normalized_text: str
+    generated_token_count: int
+    hit_max_new_tokens: bool
 
 
 @dataclass
@@ -21,6 +34,8 @@ class HFPaddleOCRVLBackend:
     min_pixels_override: int | None = None
     max_new_tokens: int = 256
     local_files_only: bool = True
+    role: str = "ocr"
+    prompt_text: str = OCR_PROMPT
 
     def __post_init__(self) -> None:
         try:
@@ -58,15 +73,13 @@ class HFPaddleOCRVLBackend:
         self._model.to(self._torch_device)
         self._model.eval()
 
-    def recognize(self, image: Image.Image) -> str:
-        prompt = OCR_PROMPT
-
+    def _recognize_once(self, image: Image.Image, *, prompt_text: str) -> _HFRecognitionResult:
         conversation = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": prompt_text},
                 ],
             }
         ]
@@ -96,7 +109,24 @@ class HFPaddleOCRVLBackend:
         prompt_len = model_inputs["input_ids"].shape[-1]
         generated_tokens = output_tokens[:, prompt_len:]
         text = self._processor.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-        return normalize_ocr_text(text)
+        generated_token_count = int(generated_tokens.shape[-1])
+        return _HFRecognitionResult(
+            normalized_text=normalize_ocr_text(text),
+            generated_token_count=generated_token_count,
+            hit_max_new_tokens=generated_token_count >= self.max_new_tokens,
+        )
+
+    def recognize(self, image: Image.Image) -> str:
+        result = self._recognize_once(image, prompt_text=self.prompt_text)
+        if (
+            is_main_ocr_length_fallback_eligible(role=self.role, prompt_text=self.prompt_text)
+            and result.hit_max_new_tokens
+        ):
+            return self._recognize_once(
+                image,
+                prompt_text=MAIN_OCR_LENGTH_FALLBACK_PROMPT,
+            ).normalized_text
+        return result.normalized_text
 
     def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
         if not images:

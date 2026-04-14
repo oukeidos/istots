@@ -7,6 +7,7 @@ from typing import Sequence
 from PIL import Image
 
 from istots.llama_runtime import (
+    LlamaServerOCRResponse,
     DEFAULT_ROLE_PORTS,
     LlamaServerLaunchSpec,
     LlamaServerOverrides,
@@ -14,12 +15,24 @@ from istots.llama_runtime import (
     detect_llama_server_path,
     normalize_llama_server_profile,
     normalize_llama_server_role,
-    request_llama_server_ocr,
+    request_llama_server_ocr_response,
     start_llama_server,
     stop_llama_server,
 )
 
+from .fallback_policy import (
+    MAIN_OCR_BASELINE_PROMPT,
+    MAIN_OCR_LENGTH_FALLBACK_PROMPT,
+    is_main_ocr_length_fallback_eligible,
+)
 from .hf_backend import normalize_ocr_text
+
+
+@dataclass(frozen=True)
+class _LlamaServerRecognitionResult:
+    normalized_text: str
+    finish_reason: str | None
+    completion_tokens: int | None
 
 
 @dataclass
@@ -42,7 +55,7 @@ class LlamaServerOCRBackend:
     gpu_layers: int | None = None
     no_mmproj_offload: bool | None = None
     startup_timeout_sec: float = 120.0
-    prompt_text: str = "OCR:"
+    prompt_text: str = MAIN_OCR_BASELINE_PROMPT
 
     def __post_init__(self) -> None:
         resolved_binary = detect_llama_server_path(self.binary_path)
@@ -121,15 +134,30 @@ class LlamaServerOCRBackend:
             startup_timeout_sec=self.startup_timeout_sec,
         )
 
-    def recognize(self, image: Image.Image) -> str:
-        return normalize_ocr_text(
-            request_llama_server_ocr(
-                self._launch_spec,
-                image,
-                max_new_tokens=self.max_new_tokens,
-                prompt_text=self.prompt_text,
-            )
+    def _recognize_once(self, image: Image.Image, *, prompt_text: str) -> _LlamaServerRecognitionResult:
+        response: LlamaServerOCRResponse = request_llama_server_ocr_response(
+            self._launch_spec,
+            image,
+            max_new_tokens=self.max_new_tokens,
+            prompt_text=prompt_text,
         )
+        return _LlamaServerRecognitionResult(
+            normalized_text=normalize_ocr_text(response.text),
+            finish_reason=response.finish_reason,
+            completion_tokens=response.completion_tokens,
+        )
+
+    def recognize(self, image: Image.Image) -> str:
+        result = self._recognize_once(image, prompt_text=self.prompt_text)
+        if (
+            is_main_ocr_length_fallback_eligible(role=self.role, prompt_text=self.prompt_text)
+            and result.finish_reason == "length"
+        ):
+            return self._recognize_once(
+                image,
+                prompt_text=MAIN_OCR_LENGTH_FALLBACK_PROMPT,
+            ).normalized_text
+        return result.normalized_text
 
     def recognize_batch(self, images: Sequence[Image.Image]) -> list[str]:
         if not images:

@@ -49,6 +49,8 @@ def _create_hf_backend(config: OCRBackendConfig) -> OCRBackend:
         min_pixels_override=config.hf_min_pixels,
         max_new_tokens=config.max_new_tokens,
         local_files_only=config.local_files_only,
+        role=config.role,
+        prompt_text=config.prompt_text,
     )
 
 

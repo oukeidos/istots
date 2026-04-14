@@ -125,6 +125,13 @@ class LlamaServerManagerState:
     role: str
 
 
+@dataclass(frozen=True)
+class LlamaServerOCRResponse:
+    text: str
+    finish_reason: str | None = None
+    completion_tokens: int | None = None
+
+
 def detect_llama_server_path(explicit: Path | None = None) -> Path | None:
     candidates: list[Path] = []
     if explicit is not None:
@@ -521,6 +528,21 @@ def request_llama_server_ocr(
     max_new_tokens: int,
     prompt_text: str = "OCR:",
 ) -> str:
+    return request_llama_server_ocr_response(
+        spec,
+        image,
+        max_new_tokens=max_new_tokens,
+        prompt_text=prompt_text,
+    ).text
+
+
+def request_llama_server_ocr_response(
+    spec: LlamaServerLaunchSpec,
+    image: Image.Image,
+    *,
+    max_new_tokens: int,
+    prompt_text: str = "OCR:",
+) -> LlamaServerOCRResponse:
     url = f"http://{spec.host}:{spec.port}/v1/chat/completions"
     body: dict[str, Any] = {
         "model": "gpt-3.5-turbo",
@@ -548,7 +570,11 @@ def request_llama_server_ocr(
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         parsed = json.loads(response.read().decode("utf-8"))
-    return str(parsed["choices"][0]["message"]["content"]).strip()
+    return LlamaServerOCRResponse(
+        text=str(parsed["choices"][0]["message"]["content"]).strip(),
+        finish_reason=parsed["choices"][0].get("finish_reason"),
+        completion_tokens=parsed.get("usage", {}).get("completion_tokens"),
+    )
 
 
 def run_llama_server_launch_spec_doctor(
