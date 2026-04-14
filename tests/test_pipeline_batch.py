@@ -609,7 +609,7 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
             bottom=2,
             start=timedelta(milliseconds=0),
             end=timedelta(milliseconds=10),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (255, 255, 255)),
         ),
         SimpleNamespace(
             raw_index=11,
@@ -620,7 +620,7 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
             bottom=2,
             start=timedelta(milliseconds=10),
             end=timedelta(milliseconds=20),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (230, 230, 230)),
         ),
         SimpleNamespace(
             raw_index=12,
@@ -631,7 +631,7 @@ def test_convert_sup_to_srt_writes_hybrid_detector_manifest(monkeypatch, tmp_pat
             bottom=20,
             start=timedelta(milliseconds=20),
             end=timedelta(milliseconds=30),
-            image=Image.new("RGB", (2, 20), "white"),
+            image=Image.new("RGB", (2, 20), (200, 200, 200)),
         ),
     ]
 
@@ -727,7 +727,7 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             bottom=2,
             start=timedelta(milliseconds=0),
             end=timedelta(milliseconds=10),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (255, 255, 255)),
         ),
         SimpleNamespace(
             raw_index=11,
@@ -738,7 +738,7 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             bottom=20,
             start=timedelta(milliseconds=10),
             end=timedelta(milliseconds=20),
-            image=Image.new("RGB", (2, 20), "white"),
+            image=Image.new("RGB", (2, 20), (235, 235, 235)),
         ),
         SimpleNamespace(
             raw_index=12,
@@ -749,7 +749,7 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             bottom=2,
             start=timedelta(milliseconds=20),
             end=timedelta(milliseconds=30),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (215, 215, 215)),
         ),
         SimpleNamespace(
             raw_index=13,
@@ -760,7 +760,7 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             bottom=20,
             start=timedelta(milliseconds=30),
             end=timedelta(milliseconds=40),
-            image=Image.new("RGB", (2, 20), "white"),
+            image=Image.new("RGB", (2, 20), (195, 195, 195)),
         ),
         SimpleNamespace(
             raw_index=14,
@@ -771,7 +771,7 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             bottom=2,
             start=timedelta(milliseconds=40),
             end=timedelta(milliseconds=50),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (175, 175, 175)),
         ),
     ]
 
@@ -867,7 +867,7 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
             bottom=2,
             start=timedelta(milliseconds=0),
             end=timedelta(milliseconds=10),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (255, 255, 255)),
         ),
         SimpleNamespace(
             raw_index=11,
@@ -878,7 +878,7 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
             bottom=2,
             start=timedelta(milliseconds=10),
             end=timedelta(milliseconds=20),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (235, 235, 235)),
         ),
         SimpleNamespace(
             raw_index=12,
@@ -889,7 +889,7 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
             bottom=2,
             start=timedelta(milliseconds=20),
             end=timedelta(milliseconds=30),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (215, 215, 215)),
         ),
     ]
 
@@ -980,7 +980,7 @@ def test_convert_sup_to_srt_detector_family_addon_can_attach_to_wider_surface(mo
             bottom=2,
             start=timedelta(milliseconds=index * 10),
             end=timedelta(milliseconds=(index + 1) * 10),
-            image=Image.new("RGB", (20, 2), "white"),
+            image=Image.new("RGB", (20, 2), (index, index, index)),
         )
         for index in range(4)
     ]
@@ -1584,6 +1584,380 @@ def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_p
     assert gemini_calls == ["tall"]
     assert [entry.text for entry in written_entries] == ["AEC"]
     assert manifest[0]["corrector_prompt_style"] == "general_vertical_hint_v1"
+
+
+def test_convert_sup_to_srt_detector_reuses_exact_duplicate_images_within_branch(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=13,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=30),
+            end=timedelta(milliseconds=40),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
+    ]
+
+    created_roles: list[str] = []
+    role_calls: dict[str, int] = {}
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            role_calls[self.role] = role_calls.get(self.role, 0) + 1
+            if self.role == "ocr":
+                return [["BASE-WIDE"], ["BASE-TALL"]][role_calls[self.role] - 1]
+            if self.role == "ocr-fast":
+                return ["ALT-WIDE"]
+            if self.role == "detector":
+                return ["ALT-TALL"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_roles.append(config.role)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 4
+    assert created_roles == ["ocr", "ocr-fast", "detector"]
+    assert role_calls == {"ocr": 2, "ocr-fast": 1, "detector": 1}
+    assert [row["detector_branch"] for row in manifest] == [
+        "alternate_read_non_tall",
+        "alternate_read_non_tall",
+        "repeat_drift_tall",
+        "repeat_drift_tall",
+    ]
+    assert [row["baseline_text"] for row in manifest] == [
+        "BASE-WIDE",
+        "BASE-WIDE",
+        "BASE-TALL",
+        "BASE-TALL",
+    ]
+    assert [row["option_text"] for row in manifest] == [
+        "ALT-WIDE",
+        "ALT-WIDE",
+        "ALT-TALL",
+        "ALT-TALL",
+    ]
+
+
+def test_convert_sup_to_srt_qwen_corrector_reuses_exact_duplicate_images(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+    ]
+
+    created_roles: list[str] = []
+    role_calls: dict[str, int] = {}
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            role_calls[self.role] = role_calls.get(self.role, 0) + 1
+            if self.role == "ocr":
+                return ["ABC"]
+            if self.role == "ocr-fast":
+                return ["ADC"]
+            if self.role == "corrector":
+                return ["AECZ"]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_roles.append(config.role)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.QWEN_LOCAL,
+            output_path=corrector_output,
+            local_model_path=tmp_path / "qwen.gguf",
+            local_mmproj_path=tmp_path / "qwen-mmproj.gguf",
+            local_runtime_overrides=Qwen35RuntimeOverrides(profile="cpu"),
+        ),
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in corrector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 2
+    assert result.correction_record_count == 2
+    assert created_roles == ["ocr", "ocr-fast", "corrector"]
+    assert role_calls == {"ocr": 1, "ocr-fast": 1, "corrector": 1}
+    assert [row["corrector_text"] for row in manifest] == ["AECZ", "AECZ"]
+    assert [row["conservative_merged_text"] for row in manifest] == ["AEC", "AEC"]
+
+
+def test_recognize_prepared_inputs_reuses_exact_duplicate_images() -> None:
+    white_a = Image.new("RGB", (2, 2), "white")
+    white_b = Image.new("RGB", (2, 2), "white")
+    black = Image.new("RGB", (2, 2), "black")
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=0), image=white_a),
+        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=1), image=white_b),
+        pipeline._PreparedOCRInput(index=2, frame=SimpleNamespace(raw_index=2), image=black),
+    ]
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            return [f"call-{self.calls}"]
+
+    backend = FakeBackend()
+
+    texts = pipeline._recognize_prepared_inputs(  # noqa: SLF001
+        prepared_inputs,
+        backend=backend,
+        verbose=False,
+        branch_label="unit",
+    )
+
+    assert backend.calls == 2
+    assert texts == ["call-1", "call-1", "call-2"]
+
+
+def test_apply_gemini_corrections_reuses_exact_duplicate_images(monkeypatch) -> None:
+    shared_a = Image.new("RGB", (20, 2), "white")
+    shared_b = Image.new("RGB", (20, 2), "white")
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=100), image=shared_a),
+        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=101), image=shared_b),
+    ]
+    detector_records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=100,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="ABC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=101,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="AEC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+    ]
+
+    gemini_calls: list[tuple[tuple[int, int], str]] = []
+
+    def fake_request_gemini_correction(*, config, image, shape):
+        gemini_calls.append((image.size, shape))
+        return "AXC", "strict_ocr_v1", ""
+
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    records = pipeline._apply_gemini_corrections(  # noqa: SLF001
+        prepared_inputs=prepared_inputs,
+        detector_records=detector_records,
+        corrector_config=CorrectorConfig(mode=CorrectorMode.GEMINI),
+        verbose=False,
+    )
+
+    assert gemini_calls == [((20, 2), "wide")]
+    assert len(records) == 2
+    assert [record.corrector_text for record in records] == ["AXC", "AXC"]
+
+
+def test_apply_gemini_corrections_does_not_reuse_when_shape_differs(monkeypatch) -> None:
+    shared_a = Image.new("RGB", (20, 2), "white")
+    shared_b = Image.new("RGB", (20, 2), "white")
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=100), image=shared_a),
+        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=101), image=shared_b),
+    ]
+    detector_records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=100,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="ABC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=101,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="repeat_drift_tall",
+            shape="tall",
+            ratio=2.0,
+            option_role="detector",
+            baseline_text="AEC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+    ]
+
+    gemini_calls: list[tuple[tuple[int, int], str]] = []
+
+    def fake_request_gemini_correction(*, config, image, shape):
+        gemini_calls.append((image.size, shape))
+        return f"{shape}-TXT", "strict_ocr_v1", ""
+
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    records = pipeline._apply_gemini_corrections(  # noqa: SLF001
+        prepared_inputs=prepared_inputs,
+        detector_records=detector_records,
+        corrector_config=CorrectorConfig(mode=CorrectorMode.GEMINI),
+        verbose=False,
+    )
+
+    assert gemini_calls == [((20, 2), "wide"), ((20, 2), "tall")]
+    assert [record.corrector_text for record in records] == ["wide-TXT", "tall-TXT"]
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:
