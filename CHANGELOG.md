@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.2] - 2026-04-14
+- Validated the exact-image dedupe port against `sample.sup` smoke coverage and a real `llama-server` baseline-equivalent versus challenger benchmark on `test_6.sup`, preserving final SRT output while reducing OCR requests from `1440` to `1327`.
 - Added retained batch-pipeline regression coverage for exact duplicate detector reuse, local Qwen reuse, and Gemini `shape`-aware non-reuse, while stabilizing existing detector-path fixtures that need distinct backend calls.
 - Added always-on post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse while preserving Gemini `shape` separation.
 - Applied a narrow one-shot fallback mitigation for main-OCR token-limit truncation issues in both `llama-server` and HF backends while leaving detector and corrector behavior unchanged.
