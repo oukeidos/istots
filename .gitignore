@@ -24,6 +24,7 @@ out_images/
 # Local utility folders
 scripts/
 tools/
+run_tests.sh
 
 # Local planning notes
 AGENTS.md

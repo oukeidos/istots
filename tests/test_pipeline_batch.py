@@ -19,6 +19,23 @@ from istots.ocr import (
 )
 
 
+def _generated_token(prefix: str, index: int) -> str:
+    return f"{prefix.upper()}_{index:02d}"
+
+
+def _generated_kanji(index: int) -> str:
+    return chr(0x4E10 + index)
+
+
+def _generated_family_pair(index: int) -> tuple[str, str]:
+    base = index * 2
+    return (_generated_kanji(base), _generated_kanji(base + 1))
+
+
+def _generated_dialogue_text(speaker: str, line_index: int) -> str:
+    return f"({speaker}{_generated_token('speaker', 0)}) {_generated_token('line', line_index)}"
+
+
 def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     output_srt = tmp_path / "output.srt"
@@ -774,6 +791,9 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             image=Image.new("RGB", (20, 2), (175, 175, 175)),
         ),
     ]
+    family_primary, family_alternate = _generated_family_pair(0)
+    unrelated_speaker = _generated_kanji(10)
+    family_name = "".join(sorted(family_primary + family_alternate))
 
     class FakeBackend:
         def __init__(self, role: str) -> None:
@@ -784,20 +804,23 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
             self.calls += 1
             if self.role == "ocr":
                 return [[
-                    "(仲子) 了解",
-                    "(仲子) おはよう",
-                    "(仲子) またね",
-                    "(伸子) はい",
-                    "(太郎) 了解",
+                    _generated_dialogue_text(family_primary, 0),
+                    _generated_dialogue_text(family_primary, 1),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(family_alternate, 3),
+                    _generated_dialogue_text(unrelated_speaker, 0),
                 ][self.calls - 1]]
             if self.role == "ocr-fast":
                 return [[
-                    "(伸子) 了解",
-                    "(仲子) またね",
-                    "(太郎) 了解",
+                    _generated_dialogue_text(family_alternate, 0),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
                 ][self.calls - 1]]
             if self.role == "detector":
-                return [["(伸子) おはよう", "(伸子) はい"][self.calls - 1]]
+                return [[
+                    _generated_dialogue_text(family_alternate, 1),
+                    _generated_dialogue_text(family_alternate, 3),
+                ][self.calls - 1]]
             raise AssertionError(f"unexpected role {self.role}")
 
         def clear_device_cache(self) -> None:
@@ -835,20 +858,20 @@ def test_convert_sup_to_srt_detector_family_addon_appends_agreement_rows(monkeyp
         "dominant_family_addon",
         "dominant_family_addon",
     ]
-    assert manifest[2]["baseline_text"] == "(仲子) またね"
-    assert manifest[2]["option_text"] == "(伸子) またね"
+    assert manifest[2]["baseline_text"] == _generated_dialogue_text(family_primary, 2)
+    assert manifest[2]["option_text"] == _generated_dialogue_text(family_alternate, 2)
     assert manifest[2]["alternate_source_kind"] == "family_pair_swap"
-    assert manifest[2]["dominant_family"] == "仲伸"
-    assert manifest[2]["family_current_char"] == "仲"
-    assert manifest[2]["family_alternate_char"] == "伸"
+    assert manifest[2]["dominant_family"] == family_name
+    assert manifest[2]["family_current_char"] == family_primary
+    assert manifest[2]["family_alternate_char"] == family_alternate
     assert manifest[2]["source_tags"] == ["dominant_family_addon"]
     assert manifest[2]["family_support_rows"] == 2
     assert manifest[2]["family_pure_rows"] == 2
     assert manifest[2]["family_mixed_rows"] == 0
     assert manifest[2]["family_agreement_rows"] == 2
-    assert manifest[3]["baseline_text"] == "(伸子) はい"
-    assert manifest[3]["option_text"] == "(仲子) はい"
-    assert manifest[3]["dominant_family"] == "仲伸"
+    assert manifest[3]["baseline_text"] == _generated_dialogue_text(family_alternate, 3)
+    assert manifest[3]["option_text"] == _generated_dialogue_text(family_primary, 3)
+    assert manifest[3]["dominant_family"] == family_name
 
 
 def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, tmp_path: Path) -> None:
@@ -895,6 +918,12 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
 
     detector_instance_count = 0
     created_roles: list[str] = []
+    baseline_0 = _generated_token("base", 0)
+    baseline_1 = _generated_token("base", 1)
+    baseline_2 = _generated_token("base", 2)
+    alt_s1_0 = _generated_token("alt_s1", 0)
+    alt_p2_0 = _generated_token("alt_p2", 0)
+    alt_p2_2 = _generated_token("alt_p2", 2)
 
     class FakeBackend:
         def __init__(self, role: str, detector_instance: int | None = None) -> None:
@@ -905,11 +934,11 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
         def recognize_batch(self, images):
             self.calls += 1
             if self.role == "ocr":
-                return [["BASE-0"], ["BASE-1"], ["BASE-2"]][self.calls - 1]
+                return [[baseline_0], [baseline_1], [baseline_2]][self.calls - 1]
             if self.role == "ocr-fast":
-                return [["ALT-S1-0"], ["BASE-1"], ["BASE-2"]][self.calls - 1]
+                return [[alt_s1_0], [baseline_1], [baseline_2]][self.calls - 1]
             if self.role == "detector" and self.detector_instance == 1:
-                return [["ALT-P2-0"], ["BASE-1"], ["ALT-P2-2"]][self.calls - 1]
+                return [[alt_p2_0], [baseline_1], [alt_p2_2]][self.calls - 1]
             raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
 
         def clear_device_cache(self) -> None:
@@ -954,12 +983,12 @@ def test_convert_sup_to_srt_wider_detector_merges_p2_surface_rows(monkeypatch, t
         "alternate_read_non_tall",
         "p2_meaningful_temp0",
     ]
-    assert manifest[0]["baseline_text"] == "BASE-0"
-    assert manifest[0]["option_text"] == "ALT-S1-0"
+    assert manifest[0]["baseline_text"] == baseline_0
+    assert manifest[0]["option_text"] == alt_s1_0
     assert manifest[0]["source_tags"] == ["hybrid_detector", "p2_meaningful_temp0"]
     assert manifest[0]["alternate_source_kind"] == "min32768"
-    assert manifest[1]["baseline_text"] == "BASE-2"
-    assert manifest[1]["option_text"] == "ALT-P2-2"
+    assert manifest[1]["baseline_text"] == baseline_2
+    assert manifest[1]["option_text"] == alt_p2_2
     assert manifest[1]["source_tags"] == ["p2_meaningful_temp0"]
     assert manifest[1]["alternate_source_kind"] == "temp0_repeat"
 
@@ -986,6 +1015,9 @@ def test_convert_sup_to_srt_detector_family_addon_can_attach_to_wider_surface(mo
     ]
 
     detector_instance_count = 0
+    family_primary, family_alternate = _generated_family_pair(0)
+    unrelated_speaker = _generated_kanji(10)
+    family_name = "".join(sorted(family_primary + family_alternate))
 
     class FakeBackend:
         def __init__(self, role: str, detector_instance: int | None = None) -> None:
@@ -996,11 +1028,26 @@ def test_convert_sup_to_srt_detector_family_addon_can_attach_to_wider_surface(mo
         def recognize_batch(self, images):
             self.calls += 1
             if self.role == "ocr":
-                return [["(仲子) 了解"], ["(仲子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+                return [[
+                    _generated_dialogue_text(family_primary, 0),
+                    _generated_dialogue_text(family_primary, 1),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
             if self.role == "ocr-fast":
-                return [["(仲子) 了解"], ["(仲子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+                return [[
+                    _generated_dialogue_text(family_primary, 0),
+                    _generated_dialogue_text(family_primary, 1),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
             if self.role == "detector" and self.detector_instance == 1:
-                return [["(伸子) 了解"], ["(伸子) おはよう"], ["(仲子) またね"], ["(太郎) 了解"]][self.calls - 1]
+                return [[
+                    _generated_dialogue_text(family_alternate, 0),
+                    _generated_dialogue_text(family_alternate, 1),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
             raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
 
         def clear_device_cache(self) -> None:
@@ -1047,14 +1094,300 @@ def test_convert_sup_to_srt_detector_family_addon_can_attach_to_wider_surface(mo
     ]
     assert manifest[0]["source_tags"] == ["p2_meaningful_temp0"]
     assert manifest[1]["source_tags"] == ["p2_meaningful_temp0"]
-    assert manifest[2]["baseline_text"] == "(仲子) またね"
-    assert manifest[2]["option_text"] == "(伸子) またね"
-    assert manifest[2]["dominant_family"] == "仲伸"
+    assert manifest[2]["baseline_text"] == _generated_dialogue_text(family_primary, 2)
+    assert manifest[2]["option_text"] == _generated_dialogue_text(family_alternate, 2)
+    assert manifest[2]["dominant_family"] == family_name
     assert manifest[2]["source_tags"] == ["dominant_family_addon"]
     assert manifest[2]["family_support_rows"] == 2
     assert manifest[2]["family_pure_rows"] == 2
     assert manifest[2]["family_mixed_rows"] == 0
     assert manifest[2]["family_agreement_rows"] == 1
+
+
+def test_convert_sup_to_srt_wider_detector_reuses_exact_duplicate_images(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (20, 2), (210, 210, 210)),
+        ),
+        SimpleNamespace(
+            raw_index=13,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=30),
+            end=timedelta(milliseconds=40),
+            image=Image.new("RGB", (20, 2), (180, 180, 180)),
+        ),
+    ]
+
+    detector_instance_count = 0
+    created_roles: list[str] = []
+    role_calls: dict[str, int] = {}
+    baseline_dup = _generated_token("base_dup", 0)
+    baseline_2 = _generated_token("base", 2)
+    baseline_3 = _generated_token("base", 3)
+    alt_dup = _generated_token("alt_dup", 0)
+
+    class FakeBackend:
+        def __init__(self, role: str, detector_instance: int | None = None) -> None:
+            self.role = role
+            self.detector_instance = detector_instance
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            key = self.role if self.detector_instance is None else f"{self.role}#{self.detector_instance}"
+            role_calls[key] = role_calls.get(key, 0) + 1
+            if self.role == "ocr":
+                return [[baseline_dup], [baseline_2], [baseline_3]][self.calls - 1]
+            if self.role == "ocr-fast":
+                return [[baseline_dup], [baseline_2], [baseline_3]][self.calls - 1]
+            if self.role == "detector" and self.detector_instance == 1:
+                return [[alt_dup], [baseline_2], [baseline_3]][self.calls - 1]
+            raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        nonlocal detector_instance_count
+        created_roles.append(config.role)
+        if config.role == "detector":
+            detector_instance_count += 1
+            return FakeBackend(config.role, detector_instance=detector_instance_count)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        detector_mode="wider",
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 2
+    assert created_roles == ["ocr", "ocr-fast", "detector"]
+    assert role_calls == {"ocr": 3, "ocr-fast": 3, "detector#1": 3}
+    assert [row["detector_branch"] for row in manifest] == [
+        "p2_meaningful_temp0",
+        "p2_meaningful_temp0",
+    ]
+    assert [row["baseline_text"] for row in manifest] == [baseline_dup, baseline_dup]
+    assert [row["option_text"] for row in manifest] == [alt_dup, alt_dup]
+    assert [row["source_tags"] for row in manifest] == [
+        ["p2_meaningful_temp0"],
+        ["p2_meaningful_temp0"],
+    ]
+
+
+def test_convert_sup_to_srt_wider_detector_family_addon_reuses_exact_duplicate_images(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=12,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=20),
+            end=timedelta(milliseconds=30),
+            image=Image.new("RGB", (20, 2), (210, 210, 210)),
+        ),
+        SimpleNamespace(
+            raw_index=13,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=30),
+            end=timedelta(milliseconds=40),
+            image=Image.new("RGB", (20, 2), (180, 180, 180)),
+        ),
+    ]
+
+    detector_instance_count = 0
+    created_roles: list[str] = []
+    role_calls: dict[str, int] = {}
+    family_primary, family_alternate = _generated_family_pair(0)
+    unrelated_speaker = _generated_kanji(10)
+    family_name = "".join(sorted(family_primary + family_alternate))
+
+    class FakeBackend:
+        def __init__(self, role: str, detector_instance: int | None = None) -> None:
+            self.role = role
+            self.detector_instance = detector_instance
+            self.calls = 0
+
+        def recognize_batch(self, images):
+            self.calls += 1
+            key = self.role if self.detector_instance is None else f"{self.role}#{self.detector_instance}"
+            role_calls[key] = role_calls.get(key, 0) + 1
+            if self.role == "ocr":
+                return [[
+                    _generated_dialogue_text(family_primary, 0),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
+            if self.role == "ocr-fast":
+                return [[
+                    _generated_dialogue_text(family_primary, 0),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
+            if self.role == "detector" and self.detector_instance == 1:
+                return [[
+                    _generated_dialogue_text(family_alternate, 0),
+                    _generated_dialogue_text(family_primary, 2),
+                    _generated_dialogue_text(unrelated_speaker, 0),
+                ][self.calls - 1]]
+            raise AssertionError(f"unexpected role {self.role}#{self.detector_instance}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        nonlocal detector_instance_count
+        created_roles.append(config.role)
+        if config.role == "detector":
+            detector_instance_count += 1
+            return FakeBackend(config.role, detector_instance=detector_instance_count)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        detector_output=detector_output,
+        detector_mode="wider",
+        detector_family_addon=True,
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in detector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.detector_record_count == 3
+    assert created_roles == ["ocr", "ocr-fast", "detector"]
+    assert role_calls == {"ocr": 3, "ocr-fast": 3, "detector#1": 3}
+    assert [row["detector_branch"] for row in manifest] == [
+        "p2_meaningful_temp0",
+        "p2_meaningful_temp0",
+        "dominant_family_addon",
+    ]
+    assert [row["baseline_text"] for row in manifest[:2]] == [
+        _generated_dialogue_text(family_primary, 0),
+        _generated_dialogue_text(family_primary, 0),
+    ]
+    assert [row["option_text"] for row in manifest[:2]] == [
+        _generated_dialogue_text(family_alternate, 0),
+        _generated_dialogue_text(family_alternate, 0),
+    ]
+    assert manifest[2]["baseline_text"] == _generated_dialogue_text(family_primary, 2)
+    assert manifest[2]["option_text"] == _generated_dialogue_text(family_alternate, 2)
+    assert manifest[2]["source_tags"] == ["dominant_family_addon"]
+    assert manifest[2]["family_support_rows"] == 2
+    assert manifest[2]["family_pure_rows"] == 2
+    assert manifest[2]["family_mixed_rows"] == 0
+    assert manifest[2]["family_agreement_rows"] == 1
+    assert manifest[2]["dominant_family"] == family_name
 
 
 def test_select_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
@@ -1104,6 +1437,11 @@ def test_select_dominant_kanji_family_ignores_non_kanji_pairs() -> None:
 
 
 def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> None:
+    family_primary, family_alternate = _generated_family_pair(0)
+    secondary_primary, secondary_alternate = _generated_family_pair(1)
+    tertiary_primary, tertiary_alternate = _generated_family_pair(2)
+    preferred_family_name = "".join(sorted(family_primary + family_alternate))
+
     records = [
         HybridDetectorRecord(
             index=0,
@@ -1115,8 +1453,8 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="仲",
-            option_text="伸",
+            baseline_text=family_primary,
+            option_text=family_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1131,8 +1469,8 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="仲",
-            option_text="伸",
+            baseline_text=family_primary,
+            option_text=family_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1147,8 +1485,8 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="昂",
-            option_text="昴",
+            baseline_text=secondary_primary,
+            option_text=secondary_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1163,8 +1501,8 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="仲/昂",
-            option_text="伸/昴",
+            baseline_text=f"{family_primary}/{secondary_primary}",
+            option_text=f"{family_alternate}/{secondary_alternate}",
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1179,8 +1517,8 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="昂/処",
-            option_text="昴/妃",
+            baseline_text=f"{secondary_primary}/{tertiary_primary}",
+            option_text=f"{secondary_alternate}/{tertiary_alternate}",
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1194,7 +1532,15 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
         )
         for index in range(7)
     ]
-    baseline_texts = ["仲", "仲", "昂", "仲/昂", "昂/処", "仲子", "昂子"]
+    baseline_texts = [
+        family_primary,
+        family_primary,
+        secondary_primary,
+        f"{family_primary}/{secondary_primary}",
+        f"{secondary_primary}/{tertiary_primary}",
+        f"{family_primary}{_generated_token('suffix', 0)}",
+        f"{secondary_primary}{_generated_token('suffix', 0)}",
+    ]
 
     selected = pipeline._select_dominant_kanji_family(
         prepared_inputs=prepared_inputs,
@@ -1203,7 +1549,7 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
     )
 
     assert selected is not None
-    assert selected.family == "仲伸"
+    assert selected.family == preferred_family_name
     assert selected.support_rows == 3
     assert selected.pure_rows == 2
     assert selected.mixed_rows == 1
@@ -1211,6 +1557,10 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
 
 
 def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
+    family_primary, family_alternate = _generated_family_pair(0)
+    secondary_primary, secondary_alternate = _generated_family_pair(1)
+    secondary_family_name = "".join(sorted(secondary_primary + secondary_alternate))
+
     records = [
         HybridDetectorRecord(
             index=0,
@@ -1222,8 +1572,8 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="仲",
-            option_text="伸",
+            baseline_text=family_primary,
+            option_text=family_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1238,8 +1588,8 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="仲",
-            option_text="伸",
+            baseline_text=family_primary,
+            option_text=family_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1254,8 +1604,8 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="昂",
-            option_text="昴",
+            baseline_text=secondary_primary,
+            option_text=secondary_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
@@ -1270,16 +1620,16 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
             shape="wide",
             ratio=0.1,
             option_role="ocr-fast",
-            baseline_text="昂",
-            option_text="昴",
+            baseline_text=secondary_primary,
+            option_text=secondary_alternate,
             diff_label="meaningful_difference",
             meaningful=True,
             char_error_rate=1.0,
         ),
     ]
-    baseline_texts = ["仲", "仲", "昂", "昂"]
-    baseline_texts.extend(["仲子"] * 21)
-    baseline_texts.extend(["昂子"] * 2)
+    baseline_texts = [family_primary, family_primary, secondary_primary, secondary_primary]
+    baseline_texts.extend([f"{family_primary}{_generated_token('suffix', 0)}"] * 21)
+    baseline_texts.extend([f"{secondary_primary}{_generated_token('suffix', 0)}"] * 2)
     prepared_inputs = [
         pipeline._PreparedOCRInput(
             index=index,
@@ -1296,7 +1646,7 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
     )
 
     assert selected is not None
-    assert selected.family == "昂昴"
+    assert selected.family == secondary_family_name
     assert selected.agreement_rows == 2
 
 
