@@ -1,8 +1,7 @@
 # Changelog
 
 ## [0.3.2] - 2026-04-14
-- Ported the retained main-OCR length-only fallback product changes by exposing llama-server OCR finish metadata, adding a shared fallback-policy helper, and wiring one-shot fallback handling into the llama-server and HF OCR backends without changing detector or corrector behavior.
-- Added retained backend regression coverage for the one-shot length-only fallback scope and verified the required `llama-server`, HF, factory, and pipeline test set with `35 passed`.
+- Applied a narrow one-shot fallback mitigation for main-OCR token-limit truncation issues in both `llama-server` and HF backends while leaving detector and corrector behavior unchanged.
 
 ## [0.3.1] - 2026-04-14
 - Improved the PGS parser by tightening composition-state handling, fixing full-surface multi-window composition, sharing frame assembly across parser and `sup_reader`, and adding an OCR-facing path that skips unnecessary composed-surface work.
