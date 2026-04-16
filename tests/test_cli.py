@@ -287,6 +287,15 @@ def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path
     assert overrides.no_mmproj_offload is True
 
 
+def test_run_doctor_runtime_paddle_returns_structured_failure_without_traceback(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    monkeypatch.setattr("istots.llama_runtime.detect_llama_server_path", lambda explicit=None: None)
+
+    rc = cli.run(["doctor", "runtime", "paddle", "--quiet"])
+
+    assert rc == 1
+
+
 def test_run_doctor_runtime_qwen_passes_family_overrides(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 

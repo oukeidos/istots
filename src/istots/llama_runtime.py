@@ -501,6 +501,7 @@ def build_llama_server_launch_spec(
 ) -> LlamaServerLaunchSpec:
     normalized_role = normalize_llama_server_role(role)
     normalized_overrides = overrides or LlamaServerOverrides()
+    normalized_profile = normalize_llama_server_profile(normalized_overrides.profile)
     assets = resolve_llama_server_role_assets(
         normalized_role,
         models_dir=models_dir,
@@ -508,7 +509,7 @@ def build_llama_server_launch_spec(
     )
     return LlamaServerLaunchSpec(
         role=normalized_role,
-        profile=normalized_overrides.profile,
+        profile=normalized_profile,
         binary_path=binary_path.expanduser().resolve(),
         model_path=assets.model_path,
         mmproj_path=assets.mmproj_path,
@@ -837,6 +838,7 @@ def run_llama_server_doctor(
 ) -> LlamaServerDoctorReport:
     normalized_role = normalize_llama_server_role(role)
     normalized_overrides = overrides or LlamaServerOverrides()
+    normalized_profile = normalize_llama_server_profile(normalized_overrides.profile)
     issues: list[LlamaServerDoctorIssue] = []
 
     binary_path = detect_llama_server_path(explicit_binary_path)
@@ -849,7 +851,7 @@ def run_llama_server_doctor(
         )
         return LlamaServerDoctorReport(
             role=normalized_role,
-            profile=normalized_overrides.profile,
+            profile=normalized_profile,
             launch_spec=None,
             issues=tuple(issues),
         )
@@ -872,7 +874,7 @@ def run_llama_server_doctor(
         )
         return LlamaServerDoctorReport(
             role=normalized_role,
-            profile=normalized_overrides.profile,
+            profile=normalized_profile,
             launch_spec=None,
             issues=tuple(issues),
         )

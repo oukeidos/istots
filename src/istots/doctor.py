@@ -50,9 +50,12 @@ class DoctorSuiteResult:
 
 
 def _report_to_check(name: str, report: LlamaServerDoctorReport) -> DoctorCheckResult:
+    def _detail_value(value: object) -> str:
+        return str(getattr(value, "value", value))
+
     details: list[tuple[str, str]] = [
-        ("role", report.role.value),
-        ("profile", report.profile.value),
+        ("role", _detail_value(report.role)),
+        ("profile", _detail_value(report.profile)),
     ]
     if report.launch_spec is not None:
         details.extend(
