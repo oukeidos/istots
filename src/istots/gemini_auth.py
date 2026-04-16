@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from istots.atomic_writer import atomic_write_json
+
 DEFAULT_GEMINI_AUTH_CONFIG_PATH = Path.home() / ".config" / "istots" / "auth.json"
 GEMINI_KEYRING_SERVICE = "istots"
 GEMINI_KEYRING_USERNAME = "gemini-api-key"
@@ -41,8 +43,7 @@ def _load_auth_config() -> dict[str, str]:
 
 def _write_auth_config(payload: dict[str, str]) -> None:
     path = gemini_auth_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload, ensure_ascii=False, indent=2)
 
 
 def get_configured_gemini_env_file() -> Path | None:

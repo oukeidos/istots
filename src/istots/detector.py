@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from istots.atomic_writer import atomic_write_jsonl
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,4 @@ class HybridDetectorRecord:
 
 
 def write_hybrid_detector_records(path: Path, records: list[HybridDetectorRecord]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+    atomic_write_jsonl(path, (asdict(record) for record in records), ensure_ascii=False)

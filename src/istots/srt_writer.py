@@ -5,6 +5,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Iterable
 
+from istots.atomic_writer import atomic_write_text_file
+
 
 @dataclass
 class SubtitleEntry:
@@ -15,12 +17,13 @@ class SubtitleEntry:
 
 
 def write_srt(entries: Iterable[SubtitleEntry], output_srt: Path) -> None:
-    output_srt.parent.mkdir(parents=True, exist_ok=True)
-    with output_srt.open("w", encoding="utf-8", newline="\n") as fp:
+    def write_entries(fp) -> None:
         for entry in entries:
             fp.write(f"{entry.index}\n")
             fp.write(f"{format_timestamp(entry.start)} --> {format_timestamp(entry.end)}\n")
             fp.write(f"{entry.text}\n\n")
+
+    atomic_write_text_file(output_srt, write_entries, encoding="utf-8", newline="\n")
 
 
 def format_timestamp(ts: timedelta) -> str:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from istots.atomic_writer import atomic_write_json, atomic_write_jsonl
 from istots.gemini_auth import resolve_gemini_api_key
 from istots.ocr.types import Qwen35RuntimeOverrides
 from istots.ocr.hf_backend import normalize_ocr_text
@@ -107,10 +108,7 @@ class RetryableGeminiError(RuntimeError):
 
 
 def write_correction_records(path: Path, records: list[ConservativeCorrectionRecord]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+    atomic_write_jsonl(path, (asdict(record) for record in records), ensure_ascii=False)
 
 
 def corrector_prompt_for_shape(config: CorrectorConfig, shape: str) -> tuple[str, str]:
@@ -212,7 +210,7 @@ def _save_cached_item(cache_dir: Path | None, cache_key: str, payload: dict) -> 
         return
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{cache_key}.json"
-    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(cache_path, payload, ensure_ascii=False, indent=2)
 
 
 def _extract_text_and_thoughts(response_body: dict) -> tuple[str, str]:

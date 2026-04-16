@@ -72,6 +72,7 @@ def test_resolve_gemini_api_key_prefers_keyring_over_env_file_and_environment(
 
 
 def test_resolve_gemini_api_key_uses_env_file_before_environment(monkeypatch, tmp_path: Path) -> None:
+    _install_fake_keyring(monkeypatch, stored_value=None)
     config_path = tmp_path / "auth.json"
     env_path = tmp_path / ".env"
     env_path.write_text("export GOOGLE_API_KEY='env-file-secret'\n", encoding="utf-8")
@@ -86,6 +87,7 @@ def test_resolve_gemini_api_key_uses_env_file_before_environment(monkeypatch, tm
 
 
 def test_get_gemini_auth_status_reports_effective_source(monkeypatch, tmp_path: Path) -> None:
+    _install_fake_keyring(monkeypatch, stored_value=None)
     config_path = tmp_path / "auth.json"
     env_path = tmp_path / ".env"
     env_path.write_text("GEMINI_API_KEY=env-file-secret\n", encoding="utf-8")
