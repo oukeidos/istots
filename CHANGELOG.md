@@ -5,8 +5,7 @@
 - Hardened local setup and runtime safety by restricting `setup --force` to managed cache targets and moving llama-server manager state into a user-private runtime root with advisory metadata only.
 - Fixed `doctor runtime paddle` so Paddle profile overrides are normalized correctly and runtime checks no longer crash while rendering results.
 - Switched SRT, detector/corrector manifests, Gemini cache, and Gemini auth-config writes to shared atomic file writers.
-- Added bounded Gemini correction concurrency, cache-miss lease coordination, and more practical default retry/timeout controls for the Gemini corrector path.
-- Changed Gemini correction failures to fall back per row to baseline text so successful correction rows still apply and SRT generation can complete with degraded correction coverage.
+- Refined the Gemini corrector with bounded concurrency, cache-miss coordination, tuned retry defaults, and per-row fallback to baseline text when request retries are exhausted.
 
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.
