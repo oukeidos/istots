@@ -1778,10 +1778,12 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 result.detector_record_count,
             )
         if corrector_config is not None:
+            fallback_count = getattr(result, "correction_fallback_count", 0)
             logging.getLogger(__name__).info(
-                "conservative correction: rows=%d applied=%d",
+                "conservative correction: rows=%d applied=%d fallback=%d",
                 result.correction_record_count,
                 result.correction_applied_count,
+                fallback_count,
             )
             if corrector_output is not None:
                 logging.getLogger(__name__).info("corrector manifest: %s", corrector_output)

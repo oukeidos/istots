@@ -16,6 +16,7 @@ from PIL import Image
 
 from istots.anchor_merge import apply_union_anchor_merge, build_focus_context
 from istots.corrector import (
+    GeminiRequestFailedError,
     LOCAL_QWEN_CTX_SIZE,
     LOCAL_QWEN_MAX_NEW_TOKENS,
     STRICT_OCR_V1_PROMPT,
@@ -61,6 +62,7 @@ class ConversionResult:
     detector_record_count: int = 0
     correction_record_count: int = 0
     correction_applied_count: int = 0
+    correction_fallback_count: int = 0
 
 
 @dataclass
@@ -80,6 +82,15 @@ class _PreparedOCRInput:
     index: int
     frame: Any
     image: Image.Image
+
+
+@dataclass(frozen=True)
+class _GeminiCorrectionOutcome:
+    corrector_text: str
+    prompt_style: str
+    reasoning_content: str
+    status: str
+    error_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -541,13 +552,17 @@ def _convert_sup_to_srt_default_with_detector(
     ]
     entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
     write_srt(entries, output_srt)
+    correction_fallback_count = sum(
+        1 for record in correction_records if record.corrector_status == "fallback_baseline"
+    )
     if verbose:
         logger.info(
-            "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d output=%s",
+            "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d correction_fallbacks=%d output=%s",
             len(prepared_inputs),
             len(entries),
             len(detector_records),
             len(correction_records),
+            correction_fallback_count,
             output_srt,
         )
     return ConversionResult(
@@ -560,6 +575,7 @@ def _convert_sup_to_srt_default_with_detector(
         correction_applied_count=sum(
             1 for record in correction_records if record.merged_changed
         ),
+        correction_fallback_count=correction_fallback_count,
     )
 
 
@@ -1294,21 +1310,41 @@ def _apply_gemini_corrections(
         image_getter=lambda record: prepared_by_index[record.index].image,
         discriminator_getter=lambda record: record.shape,
     )
+    prompt_styles_by_unique_index = [
+        corrector_prompt_for_shape(corrector_config, detector_record.shape)[1]
+        for detector_record in unique_records
+    ]
     unique_responses = _collect_gemini_correction_responses(
         unique_records=unique_records,
         prepared_by_index=prepared_by_index,
         corrector_config=corrector_config,
         verbose=verbose,
     )
+    fallback_count = sum(1 for outcome in unique_responses if outcome.status == "fallback_baseline")
+    if fallback_count:
+        logger.warning(
+            "Gemini corrector degraded to baseline for %d row(s) after request failures",
+            fallback_count,
+        )
     for detector_record, unique_index in zip(detector_records, record_to_unique_index, strict=True):
-        corrector_text, prompt_style, reasoning_content = unique_responses[unique_index]
+        outcome = unique_responses[unique_index]
+        if outcome.status == "fallback_baseline":
+            records.append(
+                _build_failed_correction_record(
+                    detector_record=detector_record,
+                    corrector_name=corrector_name,
+                    corrector_prompt_style=prompt_styles_by_unique_index[unique_index],
+                    error_message=outcome.error_message,
+                )
+            )
+            continue
         records.append(
             _build_correction_record(
                 detector_record=detector_record,
                 corrector_name=corrector_name,
-                corrector_prompt_style=prompt_style,
-                corrector_text=corrector_text,
-                corrector_reasoning_content=reasoning_content,
+                corrector_prompt_style=outcome.prompt_style,
+                corrector_text=outcome.corrector_text,
+                corrector_reasoning_content=outcome.reasoning_content,
             )
         )
     return records
@@ -1320,7 +1356,7 @@ def _collect_gemini_correction_responses(
     prepared_by_index: dict[int, _PreparedOCRInput],
     corrector_config: CorrectorConfig,
     verbose: bool,
-) -> list[tuple[str, str, str]]:
+) -> list[_GeminiCorrectionOutcome]:
     if not unique_records:
         return []
 
@@ -1347,7 +1383,7 @@ def _collect_gemini_correction_responses(
         ]
 
     abort_event = threading.Event()
-    unique_responses: list[tuple[str, str, str] | None] = [None] * len(unique_records)
+    unique_responses: list[_GeminiCorrectionOutcome | None] = [None] * len(unique_records)
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="istots-gemini") as executor:
         future_to_index = {
             executor.submit(
@@ -1379,7 +1415,7 @@ def _run_gemini_correction_task(
     corrector_config: CorrectorConfig,
     verbose: bool,
     abort_event: threading.Event | None,
-) -> tuple[str, str, str]:
+) -> _GeminiCorrectionOutcome:
     if verbose:
         logger.info(
             "running Gemini corrector: row=%s branch=%s shape=%s",
@@ -1387,12 +1423,27 @@ def _run_gemini_correction_task(
             detector_record.detector_branch,
             detector_record.shape,
         )
-    return request_gemini_correction(
-        config=corrector_config,
-        image=prepared.image,
-        shape=detector_record.shape,
-        verbose=verbose,
-        abort_event=abort_event,
+    try:
+        corrector_text, prompt_style, reasoning_content = request_gemini_correction(
+            config=corrector_config,
+            image=prepared.image,
+            shape=detector_record.shape,
+            verbose=verbose,
+            abort_event=abort_event,
+        )
+    except GeminiRequestFailedError as exc:
+        return _GeminiCorrectionOutcome(
+            corrector_text="",
+            prompt_style=corrector_prompt_for_shape(corrector_config, detector_record.shape)[1],
+            reasoning_content="",
+            status="fallback_baseline",
+            error_message=exc.reason,
+        )
+    return _GeminiCorrectionOutcome(
+        corrector_text=corrector_text,
+        prompt_style=prompt_style,
+        reasoning_content=reasoning_content,
+        status="applied",
     )
 
 
@@ -1445,6 +1496,45 @@ def _build_correction_record(
         raw_changed=corrector_text != detector_record.baseline_text,
         merged_changed=merged.merged_text != detector_record.baseline_text,
         corrector_reasoning_content=corrector_reasoning_content,
+        corrector_status="applied",
+        corrector_error="",
+    )
+
+
+def _build_failed_correction_record(
+    *,
+    detector_record: HybridDetectorRecord,
+    corrector_name: str,
+    corrector_prompt_style: str,
+    error_message: str,
+) -> ConservativeCorrectionRecord:
+    anchor_rows = build_focus_context(detector_record.baseline_text, detector_record.option_text)
+    return ConservativeCorrectionRecord(
+        index=detector_record.index,
+        raw_index=detector_record.raw_index,
+        window_id=detector_record.window_id,
+        start_ms=detector_record.start_ms,
+        end_ms=detector_record.end_ms,
+        detector_branch=detector_record.detector_branch,
+        shape=detector_record.shape,
+        ratio=detector_record.ratio,
+        option_role=detector_record.option_role,
+        baseline_text=detector_record.baseline_text,
+        option_text=detector_record.option_text,
+        diff_label=detector_record.diff_label,
+        meaningful=detector_record.meaningful,
+        char_error_rate=detector_record.char_error_rate,
+        anchor_count=len(anchor_rows),
+        corrector_name=corrector_name,
+        corrector_prompt_style=corrector_prompt_style,
+        corrector_text="",
+        conservative_merged_text=detector_record.baseline_text,
+        applied_op_count=0,
+        raw_changed=False,
+        merged_changed=False,
+        corrector_reasoning_content="",
+        corrector_status="fallback_baseline",
+        corrector_error=error_message,
     )
 
 

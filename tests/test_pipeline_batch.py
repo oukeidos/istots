@@ -10,7 +10,12 @@ import pytest
 from PIL import Image
 
 from istots import pipeline
-from istots.corrector import CorrectorConfig, CorrectorMode
+from istots.corrector import (
+    CorrectorConfig,
+    CorrectorMode,
+    GeminiConfigurationError,
+    GeminiRequestFailedError,
+)
 from istots.detector import HybridDetectorRecord
 from istots.ocr import (
     OCRBackendConfig,
@@ -2380,10 +2385,147 @@ def test_collect_gemini_correction_responses_runs_in_parallel_and_preserves_orde
     )
 
     assert len(thread_names) == 2
-    assert responses == [
-        ("wide-TXT", "strict_ocr_v1", ""),
-        ("tall-TXT", "strict_ocr_v1", ""),
+    assert [response.corrector_text for response in responses] == ["wide-TXT", "tall-TXT"]
+    assert [response.status for response in responses] == ["applied", "applied"]
+
+
+def test_convert_sup_to_srt_keeps_baseline_for_failed_gemini_rows(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    input_sup.write_bytes(b"")
+
+    frames = [
+        SimpleNamespace(
+            raw_index=10,
+            window_id=0,
+            left=0,
+            top=0,
+            right=20,
+            bottom=2,
+            start=timedelta(milliseconds=0),
+            end=timedelta(milliseconds=10),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        SimpleNamespace(
+            raw_index=11,
+            window_id=0,
+            left=0,
+            top=0,
+            right=2,
+            bottom=20,
+            start=timedelta(milliseconds=10),
+            end=timedelta(milliseconds=20),
+            image=Image.new("RGB", (2, 20), "white"),
+        ),
     ]
+    written_entries = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            if self.role == "ocr":
+                return ["ABC" if image.size == (20, 2) else "DEF" for image in images]
+            if self.role == "ocr-fast":
+                return ["AXC" if image.size == (20, 2) else "DZF" for image in images]
+            if self.role == "detector":
+                return ["AXC" if image.size == (20, 2) else "DZF" for image in images]
+            raise AssertionError(f"unexpected role {self.role}")
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](len(frames))
+        return iter(frames)
+
+    def fake_create_backend(config: OCRBackendConfig):
+        return FakeBackend(config.role)
+
+    def fake_write_srt(entries, path):
+        written_entries.extend(entries)
+        path.write_text("", encoding="utf-8")
+
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
+        if shape == "wide":
+            return "AYC", "strict_ocr_v1", "reasoning"
+        raise GeminiRequestFailedError("http_503")
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", fake_write_srt)
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.GEMINI,
+            output_path=corrector_output,
+            gemini_parallel_min_rows=1,
+        ),
+        srt_policy="overlap",
+        verbose=False,
+    )
+
+    manifest = [json.loads(line) for line in corrector_output.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result.correction_record_count == 2
+    assert result.correction_applied_count == 1
+    assert result.correction_fallback_count == 1
+    assert [entry.text for entry in written_entries] == ["AYC", "DEF"]
+    assert [row["corrector_status"] for row in manifest] == ["applied", "fallback_baseline"]
+    assert manifest[1]["corrector_error"] == "http_503"
+    assert manifest[1]["conservative_merged_text"] == "DEF"
+
+
+def test_apply_gemini_corrections_still_fails_fast_on_configuration_error(monkeypatch) -> None:
+    prepared_inputs = [
+        pipeline._PreparedOCRInput(
+            index=0,
+            frame=SimpleNamespace(raw_index=100),
+            image=Image.new("RGB", (20, 2), "white"),
+        )
+    ]
+    detector_records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=100,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="ABC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        )
+    ]
+
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
+        raise GeminiConfigurationError("missing Gemini API key")
+
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    with pytest.raises(GeminiConfigurationError, match="missing Gemini API key"):
+        pipeline._apply_gemini_corrections(  # noqa: SLF001
+            prepared_inputs=prepared_inputs,
+            detector_records=detector_records,
+            corrector_config=CorrectorConfig(mode=CorrectorMode.GEMINI),
+            verbose=False,
+        )
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:

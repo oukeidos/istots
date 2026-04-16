@@ -110,6 +110,8 @@ class ConservativeCorrectionRecord:
     raw_changed: bool
     merged_changed: bool
     corrector_reasoning_content: str = ""
+    corrector_status: str = "applied"
+    corrector_error: str = ""
 
 
 class RetryableGeminiError(RuntimeError):
@@ -126,6 +128,16 @@ class RetryableGeminiError(RuntimeError):
         self.retry_after_sec = retry_after_sec
         self.reason = reason
         self.response_body = response_body
+
+
+class GeminiConfigurationError(RuntimeError):
+    pass
+
+
+class GeminiRequestFailedError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -162,7 +174,7 @@ def request_gemini_correction(
 ) -> tuple[str, str, str]:
     api_key, _ = resolve_gemini_api_key(config.api_key_env)
     if not api_key:
-        raise RuntimeError(
+        raise GeminiConfigurationError(
             "missing Gemini API key. "
             f"Run `istots auth gemini set`, configure `istots auth gemini env-file set PATH`, "
             f"or export {config.api_key_env}."
@@ -715,4 +727,4 @@ def _request_gemini_one(
 
     if last_error is None:
         raise RuntimeError("Gemini request failed without an explicit error")
-    raise RuntimeError(f"Gemini correction failed after retries: {last_error.reason}") from last_error
+    raise GeminiRequestFailedError(last_error.reason) from last_error
