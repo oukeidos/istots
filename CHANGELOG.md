@@ -7,6 +7,7 @@
 - Fixed `doctor runtime paddle` so Paddle profile overrides are normalized to `LlamaServerProfile` and doctor output no longer crashes when rendering structured runtime results.
 - Removed the repository-adjacent default sample fallback from `smoke`; the command now requires `--input-sup` explicitly instead of depending on an external sibling `test/sample.sup`.
 - Added explicit CLI regression coverage for the `convert` path collision where `output_srt` and `corrector_output` resolve to the same file.
+- Added explicit CLI regression coverage for the `convert` path collision where `detector_output` and `corrector_output` resolve to the same file, completing pairwise output-collision coverage.
 
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.

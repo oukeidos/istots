@@ -1363,6 +1363,58 @@ def test_run_convert_rejects_same_output_and_corrector_output_path(
     assert "output_srt and corrector_output must be different paths" in captured.err
 
 
+def test_run_convert_rejects_same_detector_and_corrector_output_path(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    original_bytes = b"PG-input"
+    input_sup.write_bytes(original_bytes)
+    output_srt = tmp_path / "output.srt"
+    shared_sidecar = tmp_path / "shared.jsonl"
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                str(input_sup),
+                str(output_srt),
+                "--quiet",
+                "--detector-output",
+                str(shared_sidecar),
+                "--corrector",
+                "qwen-local",
+                "--corrector-model-path",
+                str(model_path),
+                "--corrector-mmproj-path",
+                str(mmproj_path),
+                "--corrector-output",
+                str(shared_sidecar),
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    assert called is False
+    assert input_sup.read_bytes() == original_bytes
+    captured = capsys.readouterr()
+    assert "detector_output and corrector_output must be different paths" in captured.err
+
+
 def test_run_convert_rejects_output_directory(tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")
