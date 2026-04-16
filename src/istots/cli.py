@@ -1485,6 +1485,29 @@ def run_convert(args: argparse.Namespace) -> int:
     return _run_convert_impl(args, parser)
 
 
+def _validate_distinct_convert_paths(
+    parser: argparse.ArgumentParser,
+    *,
+    input_sup: Path,
+    output_srt: Path,
+    detector_output: Path | None,
+    corrector_output: Path | None,
+) -> None:
+    seen_paths: dict[Path, str] = {}
+    for label, path in (
+        ("input_sup", input_sup),
+        ("output_srt", output_srt),
+        ("detector_output", detector_output),
+        ("corrector_output", corrector_output),
+    ):
+        if path is None:
+            continue
+        previous_label = seen_paths.get(path)
+        if previous_label is not None:
+            parser.error(f"{previous_label} and {label} must be different paths")
+        seen_paths[path] = label
+
+
 def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     _validate_convert_args(parser, args)
 
@@ -1499,12 +1522,17 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
 
     if output_srt.exists() and output_srt.is_dir():
         parser.error("output_srt must be a file path, not an existing directory")
-    if input_sup == output_srt:
-        parser.error("input_sup and output_srt must be different paths")
     if detector_output is not None and detector_output.exists() and detector_output.is_dir():
         parser.error("detector_output must be a file path, not an existing directory")
     if corrector_output is not None and corrector_output.exists() and corrector_output.is_dir():
         parser.error("corrector_output must be a file path, not an existing directory")
+    _validate_distinct_convert_paths(
+        parser,
+        input_sup=input_sup,
+        output_srt=output_srt,
+        detector_output=detector_output,
+        corrector_output=corrector_output,
+    )
     if output_srt.exists() and not args.force:
         if _can_prompt_for_overwrite():
             if not _confirm_overwrite(output_srt):

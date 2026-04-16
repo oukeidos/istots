@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.3] - 2026-04-16
+- Rejected `convert` runs where `input_sup`, `output_srt`, `detector_output`, or `corrector_output` resolve to the same path, preventing auxiliary outputs from overwriting the source `.sup` file.
+
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.
 - Applied a narrow one-shot fallback mitigation for main-OCR token-limit truncation issues in both `llama-server` and HF backends while leaving detector and corrector behavior unchanged.
