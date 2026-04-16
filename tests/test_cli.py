@@ -1072,6 +1072,46 @@ def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path)
     assert config.cache_dir == cache_dir.resolve()
 
 
+def test_run_convert_uses_recommended_default_gemini_policy(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "gemini",
+        ]
+    )
+
+    assert rc == 0
+    config = captured["corrector_config"]
+    assert config.mode is CorrectorMode.GEMINI
+    assert config.max_attempts == 4
+    assert config.retry_initial_sleep == 1.0
+    assert config.retry_max_sleep == 15.0
+    assert config.request_timeout == 90.0
+    assert config.gemini_retry_after_cap_sec == 45.0
+    assert config.gemini_max_workers == 3
+    assert config.gemini_parallel_min_rows == 2
+    assert config.gemini_cache_wait_poll_sec == 0.25
+    assert config.gemini_cache_lease_stale_sec == 165.0
+
+
 def test_run_convert_existing_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")

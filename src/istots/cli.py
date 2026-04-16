@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Sequence
 
 from istots import __version__
+from istots.corrector import (
+    DEFAULT_GEMINI_MAX_ATTEMPTS,
+    DEFAULT_GEMINI_MAX_WORKERS,
+    DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC,
+)
 from istots.model_store import (
     DEFAULT_GGUF_MODEL_ID,
     DEFAULT_MODEL_ID,
@@ -383,19 +388,19 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--corrector-gemini-max-attempts",
         type=int,
-        default=6,
+        default=DEFAULT_GEMINI_MAX_ATTEMPTS,
         help="Maximum Gemini retry attempts for `--corrector gemini`.",
     )
     parser.add_argument(
         "--corrector-gemini-request-timeout-sec",
         type=float,
-        default=180.0,
+        default=DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC,
         help="Per-request timeout in seconds for `--corrector gemini`.",
     )
     parser.add_argument(
         "--corrector-gemini-max-workers",
         type=int,
-        default=2,
+        default=DEFAULT_GEMINI_MAX_WORKERS,
         help="Maximum in-process parallel Gemini requests for `--corrector gemini`.",
     )
     parser.add_argument(
@@ -645,19 +650,19 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--corrector-gemini-max-attempts",
         type=int,
-        default=6,
+        default=DEFAULT_GEMINI_MAX_ATTEMPTS,
         help="Maximum Gemini retry attempts for `--corrector gemini`.",
     )
     parser.add_argument(
         "--corrector-gemini-request-timeout-sec",
         type=float,
-        default=180.0,
+        default=DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC,
         help="Per-request timeout in seconds for `--corrector gemini`.",
     )
     parser.add_argument(
         "--corrector-gemini-max-workers",
         type=int,
-        default=2,
+        default=DEFAULT_GEMINI_MAX_WORKERS,
         help="Maximum in-process parallel Gemini requests for `--corrector gemini`.",
     )
     parser.add_argument(
