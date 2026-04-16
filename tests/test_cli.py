@@ -1173,6 +1173,233 @@ def test_run_convert_existing_output_prompt_no_cancels(monkeypatch, tmp_path: Pa
     assert called is False
 
 
+def test_run_convert_existing_detector_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    detector_output.write_text("existing", encoding="utf-8")
+
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(cli, "_can_prompt_for_overwrite", lambda: False)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--detector-output", str(detector_output)])
+
+    assert rc == 1
+    assert called is False
+    assert detector_output.read_text(encoding="utf-8") == "existing"
+
+
+def test_run_convert_existing_detector_output_force_overwrites(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    detector_output.write_text("existing", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_convert_sup_to_srt(**kwargs):
+        captured.update(kwargs)
+        kwargs["detector_output"].write_text("new", encoding="utf-8")
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+            detector_record_count=1,
+            correction_record_count=0,
+            correction_applied_count=0,
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--detector-output", str(detector_output), "--force"])
+
+    assert rc == 0
+    assert captured["detector_output"] == detector_output.resolve()
+    assert detector_output.read_text(encoding="utf-8") == "new"
+
+
+def test_run_convert_existing_detector_output_prompt_no_cancels(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    detector_output = tmp_path / "detector.jsonl"
+    detector_output.write_text("existing", encoding="utf-8")
+
+    called = False
+    prompted: list[Path] = []
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(cli, "_can_prompt_for_overwrite", lambda: True)
+    monkeypatch.setattr(cli, "_confirm_overwrite", lambda path: prompted.append(path) or False)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run([str(input_sup), str(output_srt), "--quiet", "--detector-output", str(detector_output)])
+
+    assert rc == 1
+    assert called is False
+    assert prompted == [detector_output.resolve()]
+    assert detector_output.read_text(encoding="utf-8") == "existing"
+
+
+def test_run_convert_existing_corrector_output_noninteractive_requires_force(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    corrector_output.write_text("existing", encoding="utf-8")
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(cli, "_can_prompt_for_overwrite", lambda: False)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--corrector-output",
+            str(corrector_output),
+        ]
+    )
+
+    assert rc == 1
+    assert called is False
+    assert corrector_output.read_text(encoding="utf-8") == "existing"
+
+
+def test_run_convert_existing_corrector_output_force_overwrites(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    corrector_output.write_text("existing", encoding="utf-8")
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+
+    captured: dict[str, object] = {}
+
+    def fake_convert_sup_to_srt(**kwargs):
+        captured.update(kwargs)
+        kwargs["corrector_config"].output_path.write_text("new", encoding="utf-8")
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=1,
+            correction_applied_count=1,
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--corrector-output",
+            str(corrector_output),
+            "--force",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["corrector_config"].output_path == corrector_output.resolve()
+    assert corrector_output.read_text(encoding="utf-8") == "new"
+
+
+def test_run_convert_existing_corrector_output_prompt_no_cancels(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    corrector_output = tmp_path / "corrected.jsonl"
+    corrector_output.write_text("existing", encoding="utf-8")
+    model_path = tmp_path / "qwen.gguf"
+    mmproj_path = tmp_path / "qwen-mmproj.gguf"
+
+    called = False
+    prompted: list[Path] = []
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(cli, "_can_prompt_for_overwrite", lambda: True)
+    monkeypatch.setattr(cli, "_confirm_overwrite", lambda path: prompted.append(path) or False)
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "qwen-local",
+            "--corrector-model-path",
+            str(model_path),
+            "--corrector-mmproj-path",
+            str(mmproj_path),
+            "--corrector-output",
+            str(corrector_output),
+        ]
+    )
+
+    assert rc == 1
+    assert called is False
+    assert prompted == [corrector_output.resolve()]
+    assert corrector_output.read_text(encoding="utf-8") == "existing"
+
+
 def test_run_convert_rejects_same_input_and_output_path(tmp_path: Path) -> None:
     input_sup = tmp_path / "same.sup"
     input_sup.write_bytes(b"PG")

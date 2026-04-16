@@ -365,7 +365,7 @@ environment last.
   - `--corrector-media-resolution`: Set the Gemini media resolution hint.
   - `--corrector-cache-dir`: Choose the Gemini request cache directory.
   - `--srt-policy`: Choose `safe` or `overlap` SRT assembly.
-  - `--force`: Overwrite the output file if it already exists.
+  - `--force`: Overwrite existing output artifacts if they already exist.
 
 ### `setup`
 

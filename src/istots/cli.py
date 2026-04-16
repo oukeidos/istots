@@ -389,7 +389,7 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite output file without prompting",
+        help="Overwrite existing output artifacts without prompting",
     )
 
 
@@ -1502,6 +1502,56 @@ def _validate_distinct_convert_paths(
         seen_paths[path] = label
 
 
+def _convert_output_artifacts(
+    *,
+    output_srt: Path,
+    detector_output: Path | None,
+    corrector_output: Path | None,
+) -> tuple[Path, ...]:
+    artifacts = [output_srt]
+    if detector_output is not None:
+        artifacts.append(detector_output)
+    if corrector_output is not None:
+        artifacts.append(corrector_output)
+    return tuple(artifacts)
+
+
+def _check_existing_convert_outputs(
+    *,
+    output_srt: Path,
+    detector_output: Path | None,
+    corrector_output: Path | None,
+    force: bool,
+) -> int:
+    existing_paths = [path for path in _convert_output_artifacts(
+        output_srt=output_srt,
+        detector_output=detector_output,
+        corrector_output=corrector_output,
+    ) if path.exists()]
+    if not existing_paths or force:
+        return 0
+
+    logger = logging.getLogger(__name__)
+    if _can_prompt_for_overwrite():
+        for path in existing_paths:
+            if not _confirm_overwrite(path):
+                logger.error("conversion cancelled")
+                return 1
+        return 0
+
+    if len(existing_paths) == 1:
+        logger.error(
+            "output artifact already exists: %s. Rerun with --force to overwrite.",
+            existing_paths[0],
+        )
+    else:
+        logger.error(
+            "output artifacts already exist: %s. Rerun with --force to overwrite.",
+            ", ".join(str(path) for path in existing_paths),
+        )
+    return 1
+
+
 def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     _validate_convert_args(parser, args)
 
@@ -1527,17 +1577,14 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
         detector_output=detector_output,
         corrector_output=corrector_output,
     )
-    if output_srt.exists() and not args.force:
-        if _can_prompt_for_overwrite():
-            if not _confirm_overwrite(output_srt):
-                logging.getLogger(__name__).error("conversion cancelled")
-                return 1
-        else:
-            logging.getLogger(__name__).error(
-                "output file already exists: %s. Rerun with --force to overwrite.",
-                output_srt,
-            )
-            return 1
+    overwrite_check = _check_existing_convert_outputs(
+        output_srt=output_srt,
+        detector_output=detector_output,
+        corrector_output=corrector_output,
+        force=args.force,
+    )
+    if overwrite_check != 0:
+        return overwrite_check
 
     from istots.model_store import ensure_local_model, ensure_local_qwen_corrector_assets
     from istots.pipeline import convert_sup_to_srt
@@ -1692,8 +1739,8 @@ def _can_prompt_for_overwrite() -> bool:
     return bool(sys.stdin.isatty() and sys.stdout.isatty())
 
 
-def _confirm_overwrite(output_srt: Path) -> bool:
-    response = input(f"output file already exists: {output_srt}\noverwrite? [y/N]: ")
+def _confirm_overwrite(output_path: Path) -> bool:
+    response = input(f"output artifact already exists: {output_path}\noverwrite? [y/N]: ")
     return response.strip().lower() in {"y", "yes"}
 
 
