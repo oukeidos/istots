@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import base64
-import fcntl
 import io
 import json
 import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -32,8 +33,12 @@ from istots.model_store import (
 DEFAULT_LLAMA_SERVER_HOST = "127.0.0.1"
 DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC = 120.0
 DEFAULT_LLAMA_SERVER_SMOKE_MAX_TOKENS = 16
-DEFAULT_LLAMA_SERVER_MANAGER_LOCK_PATH = Path("/tmp/istots-llama-server.lock")
-DEFAULT_LLAMA_SERVER_MANAGER_STATE_PATH = Path("/tmp/istots-llama-server-state.json")
+DEFAULT_LLAMA_SERVER_MANAGER_DIRNAME = "llama-server-manager"
+DEFAULT_LLAMA_SERVER_MANAGER_LOCK_DIRNAME = "lock"
+DEFAULT_LLAMA_SERVER_MANAGER_LOCK_OWNER_FILENAME = "owner.json"
+DEFAULT_LLAMA_SERVER_MANAGER_STATE_FILENAME = "state.json"
+DEFAULT_LLAMA_SERVER_MANAGER_LOCK_POLL_SEC = 0.1
+DEFAULT_LLAMA_SERVER_MANAGER_LOCK_STALE_GRACE_SEC = 5.0
 
 _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS: dict[int, Any] = {}
 
@@ -116,6 +121,8 @@ class LlamaServerDoctorReport:
 
 @dataclass(frozen=True)
 class LlamaServerManagerState:
+    instance_id: str
+    created_at: float
     pid: int
     binary_path: str
     model_path: str
@@ -123,6 +130,28 @@ class LlamaServerManagerState:
     host: str
     port: int
     role: str
+
+
+@dataclass(frozen=True)
+class LlamaServerManagerPaths:
+    runtime_root: Path
+    manager_dir: Path
+    lock_dir: Path
+    lock_owner_path: Path
+    state_path: Path
+
+
+@dataclass(frozen=True)
+class LlamaServerManagerLockOwner:
+    pid: int
+    instance_id: str
+    created_at: float
+
+
+@dataclass(frozen=True)
+class LlamaServerManagerLock:
+    paths: LlamaServerManagerPaths
+    owner: LlamaServerManagerLockOwner
 
 
 @dataclass(frozen=True)
@@ -155,43 +184,209 @@ def shutil_which(binary: str) -> str | None:
     return shutil.which(binary)
 
 
+def llama_server_manager_runtime_root() -> Path:
+    runtime_override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_RUNTIME_DIR")
+    if runtime_override:
+        return Path(runtime_override).expanduser()
+
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data).expanduser() / "istots" / "runtime"
+        return Path.home() / "AppData" / "Local" / "istots" / "runtime"
+
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "istots" / "runtime"
+
+    xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime_dir:
+        return Path(xdg_runtime_dir).expanduser() / "istots"
+    return Path.home() / ".local" / "state" / "istots" / "runtime"
+
+
+def llama_server_manager_paths() -> LlamaServerManagerPaths:
+    runtime_root = llama_server_manager_runtime_root()
+    manager_dir = runtime_root / DEFAULT_LLAMA_SERVER_MANAGER_DIRNAME
+
+    lock_override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH")
+    if lock_override:
+        lock_dir = Path(lock_override).expanduser()
+    else:
+        lock_dir = manager_dir / DEFAULT_LLAMA_SERVER_MANAGER_LOCK_DIRNAME
+
+    state_override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH")
+    if state_override:
+        state_path = Path(state_override).expanduser()
+    else:
+        state_path = manager_dir / DEFAULT_LLAMA_SERVER_MANAGER_STATE_FILENAME
+
+    return LlamaServerManagerPaths(
+        runtime_root=runtime_root,
+        manager_dir=manager_dir,
+        lock_dir=lock_dir,
+        lock_owner_path=lock_dir / DEFAULT_LLAMA_SERVER_MANAGER_LOCK_OWNER_FILENAME,
+        state_path=state_path,
+    )
+
+
 def llama_server_manager_lock_path() -> Path:
-    override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH")
-    if override:
-        return Path(override).expanduser()
-    return DEFAULT_LLAMA_SERVER_MANAGER_LOCK_PATH
+    return llama_server_manager_paths().lock_dir
 
 
 def llama_server_manager_state_path() -> Path:
-    override = os.environ.get("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH")
-    if override:
-        return Path(override).expanduser()
-    return DEFAULT_LLAMA_SERVER_MANAGER_STATE_PATH
+    return llama_server_manager_paths().state_path
 
 
-def _acquire_llama_server_manager_lock() -> Any:
-    lock_path = llama_server_manager_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = lock_path.open("a+", encoding="utf-8")
-    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-    return handle
-
-
-def _release_llama_server_manager_lock(handle: Any | None) -> None:
-    if handle is None:
-        return
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    _ensure_private_directory(path.parent)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        os.chmod(temp_path, 0o600)
+    except OSError:
+        pass
+    temp_path.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _load_manager_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _load_llama_server_manager_lock_owner(paths: LlamaServerManagerPaths | None = None) -> LlamaServerManagerLockOwner | None:
+    normalized_paths = paths or llama_server_manager_paths()
+    payload = _load_manager_json(normalized_paths.lock_owner_path)
+    if payload is None:
+        return None
+    try:
+        return LlamaServerManagerLockOwner(
+            pid=int(payload["pid"]),
+            instance_id=str(payload["instance_id"]),
+            created_at=float(payload["created_at"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _write_llama_server_manager_lock_owner(lock: LlamaServerManagerLock) -> None:
+    _atomic_write_json(
+        lock.paths.lock_owner_path,
+        {
+            "pid": lock.owner.pid,
+            "instance_id": lock.owner.instance_id,
+            "created_at": lock.owner.created_at,
+        },
+    )
+
+
+def _remove_llama_server_manager_lock_dir(paths: LlamaServerManagerPaths) -> None:
+    try:
+        paths.lock_owner_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        paths.lock_dir.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Only manager metadata lives in this directory; fall back to clearing
+        # best-effort if a stale partial startup left extra files behind.
+        for child in paths.lock_dir.iterdir():
+            if child.is_dir():
+                continue
+            try:
+                child.unlink()
+            except OSError:
+                return
+        try:
+            paths.lock_dir.rmdir()
+        except OSError:
+            return
+
+
+def _cleanup_stale_llama_server_manager_lock(paths: LlamaServerManagerPaths) -> bool:
+    if not paths.lock_dir.exists():
+        return False
+    owner = _load_llama_server_manager_lock_owner(paths)
+    if owner is not None:
+        if _is_pid_alive(owner.pid):
+            return False
+        _clear_llama_server_manager_state(instance_id=owner.instance_id)
+        _remove_llama_server_manager_lock_dir(paths)
+        return True
+    try:
+        age_sec = time.time() - paths.lock_dir.stat().st_mtime
+    except OSError:
+        return False
+    if age_sec < DEFAULT_LLAMA_SERVER_MANAGER_LOCK_STALE_GRACE_SEC:
+        return False
+    _remove_llama_server_manager_lock_dir(paths)
+    return True
+
+
+def _acquire_llama_server_manager_lock() -> LlamaServerManagerLock:
+    paths = llama_server_manager_paths()
+    _ensure_private_directory(paths.runtime_root)
+    _ensure_private_directory(paths.manager_dir)
+    _ensure_private_directory(paths.lock_dir.parent)
+    owner = LlamaServerManagerLockOwner(
+        pid=os.getpid(),
+        instance_id=uuid.uuid4().hex,
+        created_at=time.time(),
+    )
+    while True:
+        try:
+            paths.lock_dir.mkdir(mode=0o700)
+        except FileExistsError:
+            if _cleanup_stale_llama_server_manager_lock(paths):
+                continue
+            time.sleep(DEFAULT_LLAMA_SERVER_MANAGER_LOCK_POLL_SEC)
+            continue
+        try:
+            os.chmod(paths.lock_dir, 0o700)
+        except OSError:
+            pass
+        lock = LlamaServerManagerLock(paths=paths, owner=owner)
+        _write_llama_server_manager_lock_owner(lock)
+        return lock
+
+
+def _release_llama_server_manager_lock(lock: LlamaServerManagerLock | None) -> None:
+    if lock is None:
+        return
+    current_owner = _load_llama_server_manager_lock_owner(lock.paths)
+    if current_owner is not None and current_owner.instance_id != lock.owner.instance_id:
+        return
+    _remove_llama_server_manager_lock_dir(lock.paths)
 
 
 def _load_llama_server_manager_state() -> LlamaServerManagerState | None:
     path = llama_server_manager_state_path()
-    if not path.exists():
+    payload = _load_manager_json(path)
+    if payload is None:
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
     return LlamaServerManagerState(
+        instance_id=str(payload.get("instance_id", "")),
+        created_at=float(payload.get("created_at", 0.0)),
         pid=int(payload["pid"]),
         binary_path=str(payload["binary_path"]),
         model_path=str(payload["model_path"]),
@@ -206,10 +401,12 @@ def _write_llama_server_manager_state(
     spec: LlamaServerLaunchSpec,
     *,
     pid: int,
+    instance_id: str,
 ) -> None:
     path = llama_server_manager_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "instance_id": instance_id,
+        "created_at": time.time(),
         "pid": pid,
         "binary_path": str(spec.binary_path),
         "model_path": str(spec.model_path),
@@ -218,18 +415,29 @@ def _write_llama_server_manager_state(
         "port": spec.port,
         "role": spec.role.value,
     }
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    _atomic_write_json(path, payload)
 
 
-def _clear_llama_server_manager_state(*, pid: int | None = None) -> None:
+def _clear_llama_server_manager_state(
+    *,
+    pid: int | None = None,
+    instance_id: str | None = None,
+) -> None:
     path = llama_server_manager_state_path()
     if not path.exists():
         return
-    if pid is not None:
+    if pid is not None or instance_id is not None:
         state = _load_llama_server_manager_state()
-        if state is not None and state.pid != pid:
+        if state is None:
             return
-    path.unlink()
+        if pid is not None and state.pid != pid:
+            return
+        if instance_id is not None and state.instance_id != instance_id:
+            return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -242,67 +450,7 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
-def _read_process_cmdline(pid: int) -> list[str]:
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return []
-    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
-
-
-def _process_matches_manager_state(state: LlamaServerManagerState) -> bool:
-    argv = _read_process_cmdline(state.pid)
-    if not argv:
-        return False
-    try:
-        binary_path = str(Path(argv[0]).expanduser().resolve())
-    except OSError:
-        binary_path = argv[0]
-    return (
-        binary_path == state.binary_path
-        and state.model_path in argv
-        and state.mmproj_path in argv
-        and "--host" in argv
-        and "--port" in argv
-        and state.host in argv
-        and str(state.port) in argv
-    )
-
-
-def _terminate_llama_server_pid(pid: int) -> None:
-    if not _is_pid_alive(pid):
-        return
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if not _is_pid_alive(pid):
-            return
-        time.sleep(0.1)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if not _is_pid_alive(pid):
-            return
-        time.sleep(0.1)
-
-
 def _cleanup_stale_llama_server_manager_state() -> None:
-    state = _load_llama_server_manager_state()
-    if state is None:
-        return
-    if not _is_pid_alive(state.pid):
-        _clear_llama_server_manager_state()
-        return
-    if not _process_matches_manager_state(state):
-        _clear_llama_server_manager_state()
-        return
-    _terminate_llama_server_pid(state.pid)
     _clear_llama_server_manager_state()
 
 
@@ -449,6 +597,28 @@ def _reserved_llama_server_ports(target_port: int) -> list[int]:
     return sorted({*DEFAULT_ROLE_PORTS.values(), target_port})
 
 
+def _terminate_started_llama_server_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
 def start_llama_server(
     spec: LlamaServerLaunchSpec,
     startup_timeout_sec: float,
@@ -467,14 +637,21 @@ def start_llama_server(
         if occupied_ports:
             joined = ", ".join(f"{spec.host}:{port}" for port in occupied_ports)
             raise RuntimeError(f"reserved llama-server ports are already in use: {joined}")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
+        popen_kwargs: dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **popen_kwargs)
+        _write_llama_server_manager_state(
+            spec,
+            pid=process.pid,
+            instance_id=manager_lock.owner.instance_id,
         )
-        _write_llama_server_manager_state(spec, pid=process.pid)
         _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS[process.pid] = manager_lock
         wait_until_ready(
             spec.host,
@@ -495,19 +672,10 @@ def start_llama_server(
 def stop_llama_server(process: subprocess.Popen[str]) -> None:
     manager_lock = _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(process.pid, None)
     try:
-        if process.poll() is not None:
-            return
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=5)
+        _terminate_started_llama_server_process(process)
     finally:
-        _clear_llama_server_manager_state(pid=process.pid)
+        instance_id = manager_lock.owner.instance_id if manager_lock is not None else None
+        _clear_llama_server_manager_state(pid=process.pid, instance_id=instance_id)
         _release_llama_server_manager_lock(manager_lock)
 
 

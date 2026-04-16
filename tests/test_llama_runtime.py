@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from istots import llama_runtime
@@ -136,6 +137,18 @@ def test_resolve_llama_server_role_assets_uses_derived_mmproj_for_fast_role(monk
     assert assets.mmproj_path == (gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf").resolve()
 
 
+def test_llama_server_manager_paths_use_runtime_dir_override(monkeypatch, tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime-root"
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_RUNTIME_DIR", str(runtime_root))
+
+    paths = llama_runtime.llama_server_manager_paths()
+
+    assert paths.runtime_root == runtime_root
+    assert paths.manager_dir == runtime_root / "llama-server-manager"
+    assert paths.lock_dir == runtime_root / "llama-server-manager" / "lock"
+    assert paths.state_path == runtime_root / "llama-server-manager" / "state.json"
+
+
 def test_run_llama_server_doctor_reports_missing_binary(monkeypatch) -> None:
     monkeypatch.setattr(llama_runtime, "detect_llama_server_path", lambda explicit=None: None)
     report = llama_runtime.run_llama_server_doctor(role="ocr")
@@ -235,7 +248,7 @@ class _FakePopen:
         return 0
 
 
-def test_start_llama_server_cleans_stale_managed_runtime_before_launch(
+def test_start_llama_server_reclaims_stale_dead_owner_lock_before_launch(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -250,9 +263,22 @@ def test_start_llama_server_cleans_stale_managed_runtime_before_launch(
         host="127.0.0.1",
         port=18080,
     )
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": 4321,
+                "instance_id": "stale-owner",
+                "created_at": 10.0,
+            }
+        ),
+        encoding="utf-8",
+    )
     state_path.write_text(
         json.dumps(
             {
+                "instance_id": "stale-owner",
+                "created_at": 10.0,
                 "pid": 4321,
                 "binary_path": "/tmp/llama-server",
                 "model_path": "/tmp/old-model.gguf",
@@ -268,11 +294,7 @@ def test_start_llama_server_cleans_stale_managed_runtime_before_launch(
     monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
     monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
     monkeypatch.setattr(llama_runtime, "build_llama_server_command", lambda spec: ["llama-server"])
-    monkeypatch.setattr(llama_runtime, "_is_pid_alive", lambda pid: pid == 4321)
-    monkeypatch.setattr(llama_runtime, "_process_matches_manager_state", lambda state: True)
-
-    terminated: list[int] = []
-    monkeypatch.setattr(llama_runtime, "_terminate_llama_server_pid", lambda pid: terminated.append(pid))
+    monkeypatch.setattr(llama_runtime, "_is_pid_alive", lambda pid: False)
     monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
     monkeypatch.setattr(llama_runtime, "wait_until_ready", lambda host, port, timeout_sec, process=None: None)
     monkeypatch.setattr(
@@ -284,10 +306,10 @@ def test_start_llama_server_cleans_stale_managed_runtime_before_launch(
     process = llama_runtime.start_llama_server(spec, startup_timeout_sec=1.0)
     try:
         assert process.pid == 9876
-        assert terminated == [4321]
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         assert payload["pid"] == 9876
         assert payload["model_path"] == "/tmp/model.gguf"
+        assert payload["instance_id"] != "stale-owner"
     finally:
         llama_runtime.stop_llama_server(process)
 
@@ -316,20 +338,22 @@ def test_stop_llama_server_clears_manager_state(monkeypatch, tmp_path: Path) -> 
         lambda *args, **kwargs: _FakePopen(pid=2468),
     )
 
-    killpg_calls: list[tuple[int, int]] = []
-
-    def fake_killpg(pid: int, sig: int) -> None:
-        killpg_calls.append((pid, sig))
-
-    monkeypatch.setattr(llama_runtime.os, "killpg", fake_killpg)
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        llama_runtime,
+        "_terminate_started_llama_server_process",
+        lambda process: terminated.append(process.pid),
+    )
 
     process = llama_runtime.start_llama_server(spec, startup_timeout_sec=1.0)
     assert state_path.exists()
+    assert lock_path.exists()
 
     llama_runtime.stop_llama_server(process)
 
-    assert killpg_calls == [(2468, llama_runtime.signal.SIGTERM)]
+    assert terminated == [2468]
     assert state_path.exists() is False
+    assert lock_path.exists() is False
     assert llama_runtime._ACTIVE_LLAMA_SERVER_MANAGER_LOCKS == {}
 
 
@@ -361,3 +385,34 @@ def test_start_llama_server_rejects_occupied_reserved_ports(monkeypatch, tmp_pat
         assert str(exc) == "reserved llama-server ports are already in use: 127.0.0.1:18080, 127.0.0.1:18083"
     else:
         raise AssertionError("expected reserved-port conflict")
+
+
+def test_manager_lock_and_state_use_private_permissions(monkeypatch, tmp_path: Path) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+
+    lock = llama_runtime._acquire_llama_server_manager_lock()
+    try:
+        spec = llama_runtime.LlamaServerLaunchSpec(
+            role=llama_runtime.LlamaServerRole.OCR,
+            profile=llama_runtime.LlamaServerProfile.AUTO,
+            binary_path=Path("/tmp/llama-server"),
+            model_path=Path("/tmp/model.gguf"),
+            mmproj_path=Path("/tmp/mmproj.gguf"),
+            host="127.0.0.1",
+            port=18080,
+        )
+        llama_runtime._write_llama_server_manager_state(
+            spec,
+            pid=1234,
+            instance_id=lock.owner.instance_id,
+        )
+
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o700
+        assert stat.S_IMODE((lock_path / "owner.json").stat().st_mode) == 0o600
+        assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+    finally:
+        llama_runtime._clear_llama_server_manager_state(instance_id=lock.owner.instance_id)
+        llama_runtime._release_llama_server_manager_lock(lock)
