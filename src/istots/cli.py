@@ -398,7 +398,7 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         "--input-sup",
         type=Path,
         default=None,
-        help="Quick-validation SUP path (default: ../test/sample.sup)",
+        help="Quick-validation SUP path (required)",
     )
     parser.add_argument(
         "--output-dir",
@@ -1403,10 +1403,6 @@ def _has_qwen_runtime_override_request(args: argparse.Namespace) -> bool:
     )
 
 
-def _default_smoke_input_sup() -> Path:
-    return (Path(__file__).resolve().parents[3] / "test" / "sample.sup").resolve()
-
-
 def run_smoke(args: argparse.Namespace) -> int:
     parser = _build_smoke_parser()
 
@@ -1418,11 +1414,9 @@ def run_smoke(args: argparse.Namespace) -> int:
         output_dir = Path(tempfile.mkdtemp(prefix="istots-smoke-")).resolve()
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    input_sup = (
-        args.input_sup.expanduser().resolve()
-        if args.input_sup is not None
-        else _default_smoke_input_sup()
-    )
+    if args.input_sup is None:
+        parser.error("--input-sup is required for smoke")
+    input_sup = args.input_sup.expanduser().resolve()
     output_srt = output_dir / f"{input_sup.stem}.smoke.srt"
     detector_output = None
     if args.ocr_mode == "default" and not args.no_detector:

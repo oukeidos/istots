@@ -5,6 +5,7 @@
 - Hardened `setup --force` so setup downloads always use managed cache targets, reject existing local-path `model_id` values, and refuse to delete unmanaged pre-existing targets.
 - Moved the llama-server manager out of shared `/tmp` defaults into a user-private runtime root, replaced the global `flock` file with an atomic lock directory, and downgraded manager state to advisory metadata instead of a foreign-process control plane.
 - Fixed `doctor runtime paddle` so Paddle profile overrides are normalized to `LlamaServerProfile` and doctor output no longer crashes when rendering structured runtime results.
+- Removed the repository-adjacent default sample fallback from `smoke`; the command now requires `--input-sup` explicitly instead of depending on an external sibling `test/sample.sup`.
 
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.

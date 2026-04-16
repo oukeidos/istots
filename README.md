@@ -391,7 +391,7 @@ environment last.
 - Purpose:
   - Run a quick validation workflow over the retained product surface.
 - Flags:
-  - `--input-sup`: Choose the SUP file used for smoke validation.
+  - `--input-sup`: Required. Choose the SUP file used for smoke validation.
   - `--output-dir`: Choose the directory for smoke artifacts.
   - `--models-dir`: Override the local model cache root.
   - `--max-new-tokens`: Set the OCR token budget per image.

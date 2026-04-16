@@ -555,13 +555,21 @@ def test_run_convert_defaults_to_llama_server(monkeypatch, tmp_path: Path) -> No
     assert captured["models_dir"] is None
 
 
-def test_run_smoke_uses_default_sample_and_auto_detector(monkeypatch, tmp_path: Path) -> None:
+def test_run_smoke_requires_input_sup(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(["smoke", "--quiet"])
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "--input-sup is required for smoke" in captured.err
+
+
+def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path: Path) -> None:
     sample_sup = tmp_path / "sample.sup"
     sample_sup.write_bytes(b"PG")
     output_dir = tmp_path / "smoke"
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
     monkeypatch.setattr(
         pipeline,
         "convert_sup_to_srt",
@@ -575,7 +583,7 @@ def test_run_smoke_uses_default_sample_and_auto_detector(monkeypatch, tmp_path: 
         ),
     )
 
-    rc = cli.run(["smoke", "--output-dir", str(output_dir), "--quiet"])
+    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--output-dir", str(output_dir), "--quiet"])
 
     assert rc == 0
     assert captured["input_sup"] == sample_sup.resolve()
@@ -592,7 +600,6 @@ def test_run_smoke_disables_detector_for_fast_mode(monkeypatch, tmp_path: Path) 
     output_dir = tmp_path / "smoke"
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
     monkeypatch.setattr(
         pipeline,
         "convert_sup_to_srt",
@@ -603,7 +610,9 @@ def test_run_smoke_disables_detector_for_fast_mode(monkeypatch, tmp_path: Path) 
         ),
     )
 
-    rc = cli.run(["smoke", "--output-dir", str(output_dir), "--ocr-mode", "fast", "--quiet"])
+    rc = cli.run(
+        ["smoke", "--input-sup", str(sample_sup), "--output-dir", str(output_dir), "--ocr-mode", "fast", "--quiet"]
+    )
 
     assert rc == 0
     assert captured["ocr_mode"] == "fast"
@@ -618,7 +627,6 @@ def test_run_smoke_auto_writes_corrector_manifest(monkeypatch, tmp_path: Path) -
     mmproj_path = tmp_path / "qwen-mmproj.gguf"
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli, "_default_smoke_input_sup", lambda: sample_sup.resolve())
     monkeypatch.setattr(
         pipeline,
         "convert_sup_to_srt",
@@ -635,6 +643,8 @@ def test_run_smoke_auto_writes_corrector_manifest(monkeypatch, tmp_path: Path) -
     rc = cli.run(
         [
             "smoke",
+            "--input-sup",
+            str(sample_sup),
             "--output-dir",
             str(output_dir),
             "--quiet",
