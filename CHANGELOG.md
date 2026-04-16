@@ -1,15 +1,10 @@
 # Changelog
 
 ## [0.3.3] - 2026-04-16
-- Rejected `convert` runs where `input_sup`, `output_srt`, `detector_output`, or `corrector_output` resolve to the same path, preventing auxiliary outputs from overwriting the source `.sup` file.
-- Hardened `setup --force` so setup downloads always use managed cache targets, reject existing local-path `model_id` values, and refuse to delete unmanaged pre-existing targets.
-- Moved the llama-server manager out of shared `/tmp` defaults into a user-private runtime root, replaced the global `flock` file with an atomic lock directory, and downgraded manager state to advisory metadata instead of a foreign-process control plane.
-- Fixed `doctor runtime paddle` so Paddle profile overrides are normalized to `LlamaServerProfile` and doctor output no longer crashes when rendering structured runtime results.
-- Removed the repository-adjacent default sample fallback from `smoke`; the command now requires `--input-sup` explicitly instead of depending on an external sibling `test/sample.sup`.
-- Added explicit CLI regression coverage for the `convert` path collision where `output_srt` and `corrector_output` resolve to the same file.
-- Added explicit CLI regression coverage for the `convert` path collision where `detector_output` and `corrector_output` resolve to the same file, completing pairwise output-collision coverage.
-- Applied `--force` / overwrite-prompt protection consistently across `convert` output artifacts so existing detector and corrector manifests no longer get silently replaced on reruns.
-- Centralized SRT, detector manifest, correction manifest, Gemini cache, and Gemini auth-config writes behind shared atomic file writers so interrupted updates keep the previous artifact contents intact until replace time.
+- Hardened `convert` and `smoke` artifact handling by rejecting path collisions, applying overwrite protection to sidecar outputs, and requiring explicit `--input-sup` for `smoke`.
+- Hardened local setup and runtime safety by restricting `setup --force` to managed cache targets and moving llama-server manager state into a user-private runtime root with advisory metadata only.
+- Fixed `doctor runtime paddle` so Paddle profile overrides are normalized correctly and runtime checks no longer crash while rendering results.
+- Switched SRT, detector/corrector manifests, Gemini cache, and Gemini auth-config writes to shared atomic file writers.
 
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.
