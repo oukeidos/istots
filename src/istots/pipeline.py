@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from collections import Counter
 import difflib
@@ -7,6 +8,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable, Iterator, TypeVar
 
@@ -1292,23 +1294,12 @@ def _apply_gemini_corrections(
         image_getter=lambda record: prepared_by_index[record.index].image,
         discriminator_getter=lambda record: record.shape,
     )
-    unique_responses: list[tuple[str, str, str]] = []
-    for detector_record in unique_records:
-        if verbose:
-            logger.info(
-                "running Gemini corrector: row=%s branch=%s shape=%s",
-                detector_record.index,
-                detector_record.detector_branch,
-                detector_record.shape,
-            )
-        prepared = prepared_by_index[detector_record.index]
-        unique_responses.append(
-            request_gemini_correction(
-                config=corrector_config,
-                image=prepared.image,
-                shape=detector_record.shape,
-            )
-        )
+    unique_responses = _collect_gemini_correction_responses(
+        unique_records=unique_records,
+        prepared_by_index=prepared_by_index,
+        corrector_config=corrector_config,
+        verbose=verbose,
+    )
     for detector_record, unique_index in zip(detector_records, record_to_unique_index, strict=True):
         corrector_text, prompt_style, reasoning_content = unique_responses[unique_index]
         records.append(
@@ -1321,6 +1312,99 @@ def _apply_gemini_corrections(
             )
         )
     return records
+
+
+def _collect_gemini_correction_responses(
+    *,
+    unique_records: list[HybridDetectorRecord],
+    prepared_by_index: dict[int, _PreparedOCRInput],
+    corrector_config: CorrectorConfig,
+    verbose: bool,
+) -> list[tuple[str, str, str]]:
+    if not unique_records:
+        return []
+
+    worker_count = _gemini_parallel_worker_count(
+        corrector_config=corrector_config,
+        unique_record_count=len(unique_records),
+    )
+    if verbose:
+        logger.info(
+            "running Gemini corrector: unique_rows=%s workers=%s",
+            len(unique_records),
+            worker_count,
+        )
+    if worker_count < 2:
+        return [
+            _run_gemini_correction_task(
+                detector_record=detector_record,
+                prepared=prepared_by_index[detector_record.index],
+                corrector_config=corrector_config,
+                verbose=verbose,
+                abort_event=None,
+            )
+            for detector_record in unique_records
+        ]
+
+    abort_event = threading.Event()
+    unique_responses: list[tuple[str, str, str] | None] = [None] * len(unique_records)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="istots-gemini") as executor:
+        future_to_index = {
+            executor.submit(
+                _run_gemini_correction_task,
+                detector_record=detector_record,
+                prepared=prepared_by_index[detector_record.index],
+                corrector_config=corrector_config,
+                verbose=verbose,
+                abort_event=abort_event,
+            ): unique_index
+            for unique_index, detector_record in enumerate(unique_records)
+        }
+        try:
+            for future in as_completed(future_to_index):
+                unique_index = future_to_index[future]
+                unique_responses[unique_index] = future.result()
+        except Exception:
+            abort_event.set()
+            for future in future_to_index:
+                future.cancel()
+            raise
+    return [response for response in unique_responses if response is not None]
+
+
+def _run_gemini_correction_task(
+    *,
+    detector_record: HybridDetectorRecord,
+    prepared: _PreparedOCRInput,
+    corrector_config: CorrectorConfig,
+    verbose: bool,
+    abort_event: threading.Event | None,
+) -> tuple[str, str, str]:
+    if verbose:
+        logger.info(
+            "running Gemini corrector: row=%s branch=%s shape=%s",
+            detector_record.index,
+            detector_record.detector_branch,
+            detector_record.shape,
+        )
+    return request_gemini_correction(
+        config=corrector_config,
+        image=prepared.image,
+        shape=detector_record.shape,
+        verbose=verbose,
+        abort_event=abort_event,
+    )
+
+
+def _gemini_parallel_worker_count(
+    *,
+    corrector_config: CorrectorConfig,
+    unique_record_count: int,
+) -> int:
+    max_workers = max(1, corrector_config.gemini_max_workers)
+    if unique_record_count < max(1, corrector_config.gemini_parallel_min_rows):
+        return 1
+    return min(unique_record_count, max_workers)
 
 
 def _build_correction_record(

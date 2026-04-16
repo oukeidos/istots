@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -1903,7 +1904,7 @@ def test_convert_sup_to_srt_applies_gemini_tall_prompt_gating(monkeypatch, tmp_p
         written_entries.extend(entries)
         path.write_text("", encoding="utf-8")
 
-    def fake_request_gemini_correction(*, config, image, shape):
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
         gemini_calls.append(shape)
         return "AECZ", "general_vertical_hint_v1", ""
 
@@ -2231,7 +2232,7 @@ def test_apply_gemini_corrections_reuses_exact_duplicate_images(monkeypatch) -> 
 
     gemini_calls: list[tuple[tuple[int, int], str]] = []
 
-    def fake_request_gemini_correction(*, config, image, shape):
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
         gemini_calls.append((image.size, shape))
         return "AXC", "strict_ocr_v1", ""
 
@@ -2293,7 +2294,7 @@ def test_apply_gemini_corrections_does_not_reuse_when_shape_differs(monkeypatch)
 
     gemini_calls: list[tuple[tuple[int, int], str]] = []
 
-    def fake_request_gemini_correction(*, config, image, shape):
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
         gemini_calls.append((image.size, shape))
         return f"{shape}-TXT", "strict_ocr_v1", ""
 
@@ -2308,6 +2309,81 @@ def test_apply_gemini_corrections_does_not_reuse_when_shape_differs(monkeypatch)
 
     assert gemini_calls == [((20, 2), "wide"), ((20, 2), "tall")]
     assert [record.corrector_text for record in records] == ["wide-TXT", "tall-TXT"]
+
+
+def test_collect_gemini_correction_responses_runs_in_parallel_and_preserves_order(monkeypatch) -> None:
+    prepared_by_index = {
+        0: pipeline._PreparedOCRInput(
+            index=0,
+            frame=SimpleNamespace(raw_index=100),
+            image=Image.new("RGB", (20, 2), "white"),
+        ),
+        1: pipeline._PreparedOCRInput(
+            index=1,
+            frame=SimpleNamespace(raw_index=101),
+            image=Image.new("RGB", (20, 2), "black"),
+        ),
+    }
+    unique_records = [
+        HybridDetectorRecord(
+            index=0,
+            raw_index=100,
+            window_id=0,
+            start_ms=0,
+            end_ms=10,
+            detector_branch="alternate_read_non_tall",
+            shape="wide",
+            ratio=0.1,
+            option_role="ocr-fast",
+            baseline_text="ABC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+        HybridDetectorRecord(
+            index=1,
+            raw_index=101,
+            window_id=0,
+            start_ms=10,
+            end_ms=20,
+            detector_branch="repeat_drift_tall",
+            shape="tall",
+            ratio=2.0,
+            option_role="detector",
+            baseline_text="AEC",
+            option_text="ADC",
+            diff_label="meaningful_difference",
+            meaningful=True,
+            char_error_rate=0.1,
+        ),
+    ]
+    barrier = threading.Barrier(2, timeout=1.0)
+    thread_names: set[str] = set()
+
+    def fake_request_gemini_correction(*, config, image, shape, verbose=False, abort_event=None):
+        thread_names.add(threading.current_thread().name)
+        barrier.wait()
+        return f"{shape}-TXT", "strict_ocr_v1", ""
+
+    monkeypatch.setattr(pipeline, "request_gemini_correction", fake_request_gemini_correction)
+
+    responses = pipeline._collect_gemini_correction_responses(  # noqa: SLF001
+        unique_records=unique_records,
+        prepared_by_index=prepared_by_index,
+        corrector_config=CorrectorConfig(
+            mode=CorrectorMode.GEMINI,
+            gemini_max_workers=2,
+            gemini_parallel_min_rows=1,
+        ),
+        verbose=False,
+    )
+
+    assert len(thread_names) == 2
+    assert responses == [
+        ("wide-TXT", "strict_ocr_v1", ""),
+        ("tall-TXT", "strict_ocr_v1", ""),
+    ]
 
 
 def test_merge_window_segments_splits_timeline_and_merges_active_texts() -> None:

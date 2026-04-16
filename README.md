@@ -364,6 +364,9 @@ environment last.
   - `--corrector-thinking-level`: Set the Gemini thinking level.
   - `--corrector-media-resolution`: Set the Gemini media resolution hint.
   - `--corrector-cache-dir`: Choose the Gemini request cache directory.
+  - `--corrector-gemini-max-attempts`: Set the Gemini retry-attempt limit.
+  - `--corrector-gemini-request-timeout-sec`: Set the Gemini per-request timeout.
+  - `--corrector-gemini-max-workers`: Set the in-process Gemini parallelism limit.
   - `--srt-policy`: Choose `safe` or `overlap` SRT assembly.
   - `--force`: Overwrite existing output artifacts if they already exist.
 
@@ -427,6 +430,9 @@ environment last.
   - `--corrector-thinking-level`: Set the Gemini thinking level.
   - `--corrector-media-resolution`: Set the Gemini media resolution hint.
   - `--corrector-cache-dir`: Choose the Gemini request cache directory.
+  - `--corrector-gemini-max-attempts`: Set the Gemini retry-attempt limit.
+  - `--corrector-gemini-request-timeout-sec`: Set the Gemini per-request timeout.
+  - `--corrector-gemini-max-workers`: Set the in-process Gemini parallelism limit.
   - `--srt-policy`: Choose `safe` or `overlap` SRT assembly.
   - `--force`: Overwrite any existing smoke artifacts.
 

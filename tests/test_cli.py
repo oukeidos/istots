@@ -1050,6 +1050,12 @@ def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path)
             "gemini-test",
             "--corrector-thinking-level",
             "low",
+            "--corrector-gemini-max-attempts",
+            "7",
+            "--corrector-gemini-request-timeout-sec",
+            "45",
+            "--corrector-gemini-max-workers",
+            "3",
             "--corrector-cache-dir",
             str(cache_dir),
         ]
@@ -1060,6 +1066,9 @@ def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path)
     assert config.mode is CorrectorMode.GEMINI
     assert config.gemini_model == "gemini-test"
     assert config.thinking_level == "low"
+    assert config.max_attempts == 7
+    assert config.request_timeout == 45
+    assert config.gemini_max_workers == 3
     assert config.cache_dir == cache_dir.resolve()
 
 

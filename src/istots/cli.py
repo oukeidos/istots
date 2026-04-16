@@ -381,6 +381,24 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="Optional cache directory for `--corrector gemini` requests.",
     )
     parser.add_argument(
+        "--corrector-gemini-max-attempts",
+        type=int,
+        default=6,
+        help="Maximum Gemini retry attempts for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-request-timeout-sec",
+        type=float,
+        default=180.0,
+        help="Per-request timeout in seconds for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-max-workers",
+        type=int,
+        default=2,
+        help="Maximum in-process parallel Gemini requests for `--corrector gemini`.",
+    )
+    parser.add_argument(
         "--srt-policy",
         choices=("safe", "overlap"),
         default="safe",
@@ -623,6 +641,24 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="Optional cache directory for `--corrector gemini` requests.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-max-attempts",
+        type=int,
+        default=6,
+        help="Maximum Gemini retry attempts for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-request-timeout-sec",
+        type=float,
+        default=180.0,
+        help="Per-request timeout in seconds for `--corrector gemini`.",
+    )
+    parser.add_argument(
+        "--corrector-gemini-max-workers",
+        type=int,
+        default=2,
+        help="Maximum in-process parallel Gemini requests for `--corrector gemini`.",
     )
     parser.add_argument(
         "--srt-policy",
@@ -1468,6 +1504,9 @@ def run_smoke(args: argparse.Namespace) -> int:
         corrector_thinking_level=args.corrector_thinking_level,
         corrector_media_resolution=args.corrector_media_resolution,
         corrector_cache_dir=args.corrector_cache_dir,
+        corrector_gemini_max_attempts=args.corrector_gemini_max_attempts,
+        corrector_gemini_request_timeout_sec=args.corrector_gemini_request_timeout_sec,
+        corrector_gemini_max_workers=args.corrector_gemini_max_workers,
         srt_policy=args.srt_policy,
         force=args.force,
     )
@@ -1585,6 +1624,12 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
     )
     if overwrite_check != 0:
         return overwrite_check
+    if args.corrector_gemini_max_attempts < 1:
+        parser.error("--corrector-gemini-max-attempts must be >= 1")
+    if args.corrector_gemini_request_timeout_sec <= 0:
+        parser.error("--corrector-gemini-request-timeout-sec must be > 0")
+    if args.corrector_gemini_max_workers < 1:
+        parser.error("--corrector-gemini-max-workers must be >= 1")
 
     from istots.model_store import ensure_local_model, ensure_local_qwen_corrector_assets
     from istots.pipeline import convert_sup_to_srt
@@ -1635,6 +1680,9 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 if args.corrector_cache_dir is not None
                 else None
             ),
+            max_attempts=args.corrector_gemini_max_attempts,
+            request_timeout=args.corrector_gemini_request_timeout_sec,
+            gemini_max_workers=args.corrector_gemini_max_workers,
         )
 
     model_id = args.model_id

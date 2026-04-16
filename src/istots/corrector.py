@@ -5,11 +5,15 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
+import os
 import random
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -35,8 +39,16 @@ GENERAL_VERTICAL_HINT_V1_PROMPT = (
 )
 DEFAULT_GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_GEMINI_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_GEMINI_MAX_WORKERS = 2
+DEFAULT_GEMINI_PARALLEL_MIN_ROWS = 4
+DEFAULT_GEMINI_RETRY_AFTER_CAP_SEC = 120.0
+DEFAULT_GEMINI_CACHE_WAIT_POLL_SEC = 0.5
+DEFAULT_GEMINI_CACHE_LEASE_STALE_SEC = 240.0
+DEFAULT_RETRYABLE_GEMINI_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+DEFAULT_GEMINI_CACHE_LEASE_OWNER_FILENAME = "owner.json"
 LOCAL_QWEN_CTX_SIZE = 4096
 LOCAL_QWEN_MAX_NEW_TOKENS = 128
+logger = logging.getLogger(__name__)
 
 
 class CorrectorMode(StrEnum):
@@ -62,6 +74,11 @@ class CorrectorConfig:
     retry_initial_sleep: float = 2.0
     retry_max_sleep: float = 30.0
     request_timeout: float = 180.0
+    gemini_retry_after_cap_sec: float = DEFAULT_GEMINI_RETRY_AFTER_CAP_SEC
+    gemini_max_workers: int = DEFAULT_GEMINI_MAX_WORKERS
+    gemini_parallel_min_rows: int = DEFAULT_GEMINI_PARALLEL_MIN_ROWS
+    gemini_cache_wait_poll_sec: float = DEFAULT_GEMINI_CACHE_WAIT_POLL_SEC
+    gemini_cache_lease_stale_sec: float = DEFAULT_GEMINI_CACHE_LEASE_STALE_SEC
 
 
 @dataclass(frozen=True)
@@ -107,6 +124,12 @@ class RetryableGeminiError(RuntimeError):
         self.response_body = response_body
 
 
+@dataclass(frozen=True)
+class _GeminiCacheLeasePaths:
+    lease_dir: Path
+    owner_path: Path
+
+
 def write_correction_records(path: Path, records: list[ConservativeCorrectionRecord]) -> None:
     atomic_write_jsonl(path, (asdict(record) for record in records), ensure_ascii=False)
 
@@ -130,6 +153,8 @@ def request_gemini_correction(
     config: CorrectorConfig,
     image: Image.Image,
     shape: str,
+    verbose: bool = False,
+    abort_event: threading.Event | None = None,
 ) -> tuple[str, str, str]:
     api_key, _ = resolve_gemini_api_key(config.api_key_env)
     if not api_key:
@@ -154,6 +179,11 @@ def request_gemini_correction(
         retry_initial_sleep=config.retry_initial_sleep,
         retry_max_sleep=config.retry_max_sleep,
         request_timeout=config.request_timeout,
+        retry_after_cap_sec=config.gemini_retry_after_cap_sec,
+        cache_wait_poll_sec=config.gemini_cache_wait_poll_sec,
+        cache_lease_stale_sec=config.gemini_cache_lease_stale_sec,
+        verbose=verbose,
+        abort_event=abort_event,
     )
     return normalize_ocr_text(payload["text"]), prompt_style, str(payload.get("reasoning_content", ""))
 
@@ -202,7 +232,10 @@ def _load_cached_item(cache_dir: Path | None, cache_key: str) -> dict | None:
     cache_path = cache_dir / f"{cache_key}.json"
     if not cache_path.exists():
         return None
-    return json.loads(cache_path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _save_cached_item(cache_dir: Path | None, cache_key: str, payload: dict) -> None:
@@ -211,6 +244,148 @@ def _save_cached_item(cache_dir: Path | None, cache_key: str, payload: dict) -> 
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{cache_key}.json"
     atomic_write_json(cache_path, payload, ensure_ascii=False, indent=2)
+
+
+def _cache_lease_paths(cache_dir: Path | None, cache_key: str) -> _GeminiCacheLeasePaths | None:
+    if cache_dir is None:
+        return None
+    lease_dir = cache_dir / f".{cache_key}.lease"
+    return _GeminiCacheLeasePaths(
+        lease_dir=lease_dir,
+        owner_path=lease_dir / DEFAULT_GEMINI_CACHE_LEASE_OWNER_FILENAME,
+    )
+
+
+def _load_cache_lease_owner(paths: _GeminiCacheLeasePaths) -> dict[str, object] | None:
+    if not paths.owner_path.exists():
+        return None
+    try:
+        payload = json.loads(paths.owner_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _atomic_write_cache_lease_owner(
+    paths: _GeminiCacheLeasePaths,
+    *,
+    cache_key: str,
+    instance_id: str,
+    created_at: float,
+) -> None:
+    now = time.time()
+    atomic_write_json(
+        paths.owner_path,
+        {
+            "pid": os.getpid(),
+            "cache_key": cache_key,
+            "instance_id": instance_id,
+            "created_at": created_at,
+            "updated_at": now,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _touch_cache_lease_owner(
+    paths: _GeminiCacheLeasePaths | None,
+    *,
+    cache_key: str,
+    instance_id: str | None,
+    created_at: float | None,
+) -> None:
+    if paths is None or instance_id is None or created_at is None:
+        return
+    _atomic_write_cache_lease_owner(
+        paths,
+        cache_key=cache_key,
+        instance_id=instance_id,
+        created_at=created_at,
+    )
+
+
+def _remove_cache_lease_dir(paths: _GeminiCacheLeasePaths) -> None:
+    try:
+        paths.owner_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        paths.lease_dir.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        for child in paths.lease_dir.iterdir():
+            if child.is_dir():
+                continue
+            try:
+                child.unlink()
+            except OSError:
+                return
+        try:
+            paths.lease_dir.rmdir()
+        except OSError:
+            return
+
+
+def _release_cache_lease(
+    paths: _GeminiCacheLeasePaths | None,
+    *,
+    instance_id: str | None,
+) -> None:
+    if paths is None or instance_id is None:
+        return
+    owner = _load_cache_lease_owner(paths)
+    if owner is not None and str(owner.get("instance_id")) != instance_id:
+        return
+    _remove_cache_lease_dir(paths)
+
+
+def _cache_lease_is_stale(
+    owner: dict[str, object] | None,
+    *,
+    stale_after_sec: float,
+) -> bool:
+    if owner is None:
+        return True
+    updated_at = owner.get("updated_at", owner.get("created_at"))
+    try:
+        updated_at_float = float(updated_at)
+    except (TypeError, ValueError):
+        return True
+    return (time.time() - updated_at_float) > max(0.0, stale_after_sec)
+
+
+def _try_acquire_cache_lease(
+    paths: _GeminiCacheLeasePaths | None,
+    *,
+    cache_key: str,
+) -> tuple[str | None, float | None]:
+    if paths is None:
+        return None, None
+    try:
+        paths.lease_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return None, None
+    instance_id = uuid.uuid4().hex
+    created_at = time.time()
+    try:
+        _atomic_write_cache_lease_owner(
+            paths,
+            cache_key=cache_key,
+            instance_id=instance_id,
+            created_at=created_at,
+        )
+    except Exception:
+        _remove_cache_lease_dir(paths)
+        raise
+    return instance_id, created_at
+
+
+def _abort_requested(abort_event: threading.Event | None) -> bool:
+    return abort_event.is_set() if abort_event is not None else False
 
 
 def _extract_text_and_thoughts(response_body: dict) -> tuple[str, str]:
@@ -293,6 +468,7 @@ def _request_gemini_one_once(
     media_resolution: str | None,
     temperature: float,
     request_timeout: float,
+    retry_after_cap_sec: float,
 ) -> tuple[dict, float]:
     image_part, image_bytes = _image_to_inline_data(image)
     cache_key, request_meta = _cache_request_key(
@@ -335,13 +511,15 @@ def _request_gemini_one_once(
             response_body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="replace")
-        if exc.code in {429, 500, 503, 504}:
+        if exc.code in DEFAULT_RETRYABLE_GEMINI_STATUS_CODES:
             retry_after = _parse_retry_after(exc.headers)
             body_retry = _parse_retry_delay_from_error_body(body_text)
             retry_after = max(
                 retry_after if retry_after is not None else 0.0,
                 body_retry if body_retry is not None else 0.0,
             )
+            if retry_after > 0:
+                retry_after = min(retry_after, max(0.0, retry_after_cap_sec))
             raise RetryableGeminiError(
                 status_code=exc.code,
                 retry_after_sec=retry_after if retry_after > 0 else None,
@@ -388,6 +566,11 @@ def _request_gemini_one(
     retry_initial_sleep: float,
     retry_max_sleep: float,
     request_timeout: float,
+    retry_after_cap_sec: float,
+    cache_wait_poll_sec: float,
+    cache_lease_stale_sec: float,
+    verbose: bool,
+    abort_event: threading.Event | None,
 ) -> dict:
     image_part, image_bytes = _image_to_inline_data(image)
     del image_part
@@ -411,31 +594,120 @@ def _request_gemini_one(
             "request_meta": request_meta,
         }
 
+    lease_paths = _cache_lease_paths(cache_dir, cache_key)
+    lease_instance_id: str | None = None
+    lease_created_at: float | None = None
+    while cache_dir is not None and lease_instance_id is None:
+        if _abort_requested(abort_event):
+            raise RuntimeError("Gemini correction aborted")
+        cached = _load_cached_item(cache_dir, cache_key)
+        if cached is not None:
+            return {
+                "elapsed_sec": float(cached["elapsed_sec"]),
+                "text": str(cached["text"]),
+                "reasoning_content": str(cached.get("reasoning_content", "")),
+                "response": cached["response"],
+                "cache_hit": True,
+                "cache_key": cache_key,
+                "request_meta": request_meta,
+            }
+        owner = _load_cache_lease_owner(lease_paths) if lease_paths is not None else None
+        lease_needs_reclaim = lease_paths is not None and lease_paths.lease_dir.exists() and (
+            owner is None
+            or _cache_lease_is_stale(
+                owner,
+                stale_after_sec=cache_lease_stale_sec,
+            )
+        )
+        if lease_needs_reclaim:
+            if verbose:
+                logger.info(
+                    "reclaiming stale Gemini cache lease: cache_key=%s owner_pid=%s",
+                    cache_key,
+                    owner.get("pid") if owner is not None else None,
+                )
+            _remove_cache_lease_dir(lease_paths)
+            owner = None
+        lease_instance_id, lease_created_at = _try_acquire_cache_lease(
+            lease_paths,
+            cache_key=cache_key,
+        )
+        if lease_instance_id is not None:
+            break
+        if verbose:
+            logger.info("waiting for active Gemini cache lease: cache_key=%s", cache_key)
+        time.sleep(max(0.0, cache_wait_poll_sec))
+
     sleep_sec = retry_initial_sleep
     last_error: RetryableGeminiError | None = None
-    for attempt in range(1, max(1, max_attempts) + 1):
-        try:
-            payload, _ = _request_gemini_one_once(
-                api_key=api_key,
-                api_base=api_base,
-                model=model,
-                prompt=prompt,
-                image=image,
-                thinking_level=thinking_level,
-                media_resolution=media_resolution,
-                temperature=temperature,
-                request_timeout=request_timeout,
-            )
-            _save_cached_item(cache_dir, cache_key, payload)
-            return payload
-        except RetryableGeminiError as exc:
-            last_error = exc
-            if attempt >= max_attempts:
-                break
-            retry_after = exc.retry_after_sec if exc.retry_after_sec is not None else sleep_sec
-            jittered = retry_after * random.uniform(0.9, 1.1)
-            time.sleep(min(retry_max_sleep, max(0.0, jittered)))
-            sleep_sec = min(retry_max_sleep, max(sleep_sec * 2.0, retry_initial_sleep))
+    try:
+        if cache_dir is not None:
+            cached = _load_cached_item(cache_dir, cache_key)
+            if cached is not None:
+                return {
+                    "elapsed_sec": float(cached["elapsed_sec"]),
+                    "text": str(cached["text"]),
+                    "reasoning_content": str(cached.get("reasoning_content", "")),
+                    "response": cached["response"],
+                    "cache_hit": True,
+                    "cache_key": cache_key,
+                    "request_meta": request_meta,
+                }
+        for attempt in range(1, max(1, max_attempts) + 1):
+            if _abort_requested(abort_event):
+                raise RuntimeError("Gemini correction aborted")
+            try:
+                _touch_cache_lease_owner(
+                    lease_paths,
+                    cache_key=cache_key,
+                    instance_id=lease_instance_id,
+                    created_at=lease_created_at,
+                )
+                payload, _ = _request_gemini_one_once(
+                    api_key=api_key,
+                    api_base=api_base,
+                    model=model,
+                    prompt=prompt,
+                    image=image,
+                    thinking_level=thinking_level,
+                    media_resolution=media_resolution,
+                    temperature=temperature,
+                    request_timeout=request_timeout,
+                    retry_after_cap_sec=retry_after_cap_sec,
+                )
+                _save_cached_item(cache_dir, cache_key, payload)
+                return payload
+            except RetryableGeminiError as exc:
+                last_error = exc
+                if attempt >= max_attempts:
+                    break
+                if exc.retry_after_sec is not None:
+                    delay_sec = min(retry_max_sleep, max(0.0, exc.retry_after_sec))
+                else:
+                    delay_cap = min(retry_max_sleep, max(0.0, sleep_sec))
+                    delay_sec = random.uniform(0.0, delay_cap)
+                if verbose:
+                    logger.info(
+                        "retrying Gemini request: cache_key=%s attempt=%s/%s reason=%s delay=%.3fs",
+                        cache_key,
+                        attempt + 1,
+                        max(1, max_attempts),
+                        exc.reason,
+                        delay_sec,
+                    )
+                _touch_cache_lease_owner(
+                    lease_paths,
+                    cache_key=cache_key,
+                    instance_id=lease_instance_id,
+                    created_at=lease_created_at,
+                )
+                time.sleep(delay_sec)
+                sleep_sec = min(retry_max_sleep, max(sleep_sec * 2.0, retry_initial_sleep))
+    finally:
+        _release_cache_lease(
+            lease_paths,
+            instance_id=lease_instance_id,
+        )
 
     if last_error is None:
         raise RuntimeError("Gemini request failed without an explicit error")
