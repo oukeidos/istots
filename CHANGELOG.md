@@ -2,6 +2,7 @@
 
 ## [0.3.3] - 2026-04-16
 - Rejected `convert` runs where `input_sup`, `output_srt`, `detector_output`, or `corrector_output` resolve to the same path, preventing auxiliary outputs from overwriting the source `.sup` file.
+- Hardened `setup --force` so setup downloads always use managed cache targets, reject existing local-path `model_id` values, and refuse to delete unmanaged pre-existing targets.
 
 ## [0.3.2] - 2026-04-14
 - Added post-parse exact-image deduplication in the pipeline for baseline OCR, `ocr-fast`, detector reuse, local Qwen reuse, and Gemini correction reuse.

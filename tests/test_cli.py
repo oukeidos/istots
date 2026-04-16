@@ -202,6 +202,15 @@ def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Pat
     assert captured["qwen_corrector_mmproj_filename"] == "mmproj-BF16.gguf"
 
 
+def test_run_setup_rejects_existing_local_model_id(tmp_path: Path) -> None:
+    local_dir = tmp_path / "existing-model-dir"
+    local_dir.mkdir()
+
+    rc = cli.run(["setup", "--model-id", str(local_dir), "--quiet"])
+
+    assert rc == 1
+
+
 def test_run_materialize_mmproj_applies_requested_value(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     output = tmp_path / "derived.gguf"

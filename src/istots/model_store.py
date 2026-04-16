@@ -12,6 +12,7 @@ DEFAULT_GGUF_MMPROJ_FILENAME = "PaddleOCR-VL-1.5-mmproj.gguf"
 DEFAULT_QWEN_CORRECTOR_MODEL_ID = "unsloth/Qwen3.5-35B-A3B-GGUF"
 DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME = "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
 DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME = "mmproj-BF16.gguf"
+MANAGED_SETUP_TARGET_SENTINEL = ".istots-managed-model-target"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,46 @@ def model_dir_name(model_id: str) -> str:
     return model_id.replace("/", "__")
 
 
+def managed_setup_target_marker_path(target: Path) -> Path:
+    return target / MANAGED_SETUP_TARGET_SENTINEL
+
+
+def _validate_setup_model_id(model_id: str) -> None:
+    direct = Path(model_id).expanduser()
+    if direct.exists():
+        raise RuntimeError(
+            "setup model_id must be a Hugging Face repo ID, not an existing local path: "
+            f"{direct.resolve()}"
+        )
+
+
+def resolve_setup_download_path(model_id: str, models_dir: Path | None = None) -> Path:
+    _validate_setup_model_id(model_id)
+    root = (models_dir or default_models_dir()).expanduser().resolve()
+    return (root / model_dir_name(model_id)).resolve()
+
+
+def _ensure_safe_force_delete_target(target: Path) -> None:
+    if target.is_symlink() or not target.is_dir():
+        raise RuntimeError(f"refusing to delete non-directory setup target: {target}")
+    marker = managed_setup_target_marker_path(target)
+    if not marker.exists():
+        raise RuntimeError(
+            "refusing to delete existing setup target that is not marked as istots-managed: "
+            f"{target}. Rerun `istots setup` without `--force` to initialize this target first, "
+            "or remove it manually if the path is unintended."
+        )
+
+
+def _mark_setup_target_managed(target: Path, *, model_id: str) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    managed_setup_target_marker_path(target).write_text(
+        "managed_by=istots_setup\n"
+        f"repo_id={model_id}\n",
+        encoding="utf-8",
+    )
+
+
 def resolve_local_model_path(model_id: str, models_dir: Path | None = None) -> Path:
     direct = Path(model_id).expanduser()
     if direct.exists():
@@ -57,15 +98,16 @@ def ensure_local_model(model_id: str, models_dir: Path | None = None) -> Path:
 
 
 def download_model(model_id: str, models_dir: Path | None = None, force: bool = False) -> Path:
+    target = resolve_setup_download_path(model_id=model_id, models_dir=models_dir)
     try:
         from huggingface_hub import snapshot_download
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for `istots setup`.") from exc
 
-    target = resolve_local_model_path(model_id=model_id, models_dir=models_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if force and target.exists():
+        _ensure_safe_force_delete_target(target)
         shutil.rmtree(target)
 
     snapshot_download(
@@ -74,6 +116,7 @@ def download_model(model_id: str, models_dir: Path | None = None, force: bool = 
         local_dir_use_symlinks=False,
         local_files_only=False,
     )
+    _mark_setup_target_managed(target, model_id=model_id)
     return target
 
 
@@ -84,15 +127,16 @@ def _download_snapshot_files(
     models_dir: Path | None = None,
     force: bool = False,
 ) -> tuple[Path, tuple[Path, ...]]:
+    target = resolve_setup_download_path(model_id=model_id, models_dir=models_dir)
     try:
         from huggingface_hub import snapshot_download
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for `istots setup`.") from exc
 
-    target = resolve_local_model_path(model_id=model_id, models_dir=models_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if force and target.exists():
+        _ensure_safe_force_delete_target(target)
         shutil.rmtree(target)
 
     snapshot_download(
@@ -114,6 +158,7 @@ def _download_snapshot_files(
         if not path.exists():
             raise RuntimeError(f"required file missing after setup: {path}")
         resolved_paths.append(path.resolve())
+    _mark_setup_target_managed(target, model_id=model_id)
     return target.resolve(), tuple(resolved_paths)
 
 

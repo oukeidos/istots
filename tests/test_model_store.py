@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,11 @@ def test_model_dir_name_replaces_slash() -> None:
 
 def test_resolve_local_model_path_uses_cache_root(tmp_path: Path) -> None:
     path = model_store.resolve_local_model_path("org/model", models_dir=tmp_path)
+    assert path == (tmp_path / "org__model").resolve()
+
+
+def test_resolve_setup_download_path_uses_cache_root(tmp_path: Path) -> None:
+    path = model_store.resolve_setup_download_path("org/model", models_dir=tmp_path)
     assert path == (tmp_path / "org__model").resolve()
 
 
@@ -61,6 +67,7 @@ def test_download_gguf_runtime_assets_requests_expected_files(monkeypatch, tmp_p
         "README*",
         "*.json",
     ]
+    assert model_store.managed_setup_target_marker_path(target).exists()
 
 
 def test_download_qwen_corrector_assets_requests_expected_files(monkeypatch, tmp_path: Path) -> None:
@@ -92,6 +99,121 @@ def test_download_qwen_corrector_assets_requests_expected_files(monkeypatch, tmp
         "README*",
         "*.json",
     ]
+    assert model_store.managed_setup_target_marker_path(target).exists()
+
+
+def test_download_model_marks_target_as_managed(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_snapshot_download(**kwargs) -> None:
+        captured.update(kwargs)
+        target = Path(kwargs["local_dir"])
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+
+    target = model_store.download_model("org/model", models_dir=tmp_path)
+
+    assert target == (tmp_path / "org__model").resolve()
+    assert captured["repo_id"] == "org/model"
+    assert model_store.managed_setup_target_marker_path(target).exists()
+
+
+def test_download_model_rejects_existing_local_path_model_id(tmp_path: Path) -> None:
+    local_dir = tmp_path / "existing-model-dir"
+    local_dir.mkdir()
+
+    with pytest.raises(RuntimeError, match="must be a Hugging Face repo ID"):
+        model_store.download_model(str(local_dir), force=True)
+
+
+def test_download_model_force_rejects_unmanaged_existing_target(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "org__model"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "config.json").write_text("{}", encoding="utf-8")
+    called = False
+
+    def fake_snapshot_download(**kwargs) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+
+    with pytest.raises(RuntimeError, match="not marked as istots-managed"):
+        model_store.download_model("org/model", models_dir=tmp_path, force=True)
+
+    assert called is False
+    assert target.exists()
+
+
+def test_download_model_force_allows_managed_existing_target(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "org__model"
+    target.mkdir(parents=True, exist_ok=True)
+    marker = model_store.managed_setup_target_marker_path(target)
+    marker.write_text("managed_by=istots_setup\nrepo_id=org/model\n", encoding="utf-8")
+    deleted: list[Path] = []
+    captured: dict[str, object] = {}
+    original_rmtree = shutil.rmtree
+
+    def fake_rmtree(path: str | Path) -> None:
+        deleted.append(Path(path).resolve())
+        original_rmtree(path)
+
+    def fake_snapshot_download(**kwargs) -> None:
+        captured.update(kwargs)
+        restored_target = Path(kwargs["local_dir"])
+        restored_target.mkdir(parents=True, exist_ok=True)
+        (restored_target / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(model_store.shutil, "rmtree", fake_rmtree)
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+
+    result = model_store.download_model("org/model", models_dir=tmp_path, force=True)
+
+    assert result == target.resolve()
+    assert deleted == [target.resolve()]
+    assert captured["local_dir"] == str(target.resolve())
+    assert model_store.managed_setup_target_marker_path(target).exists()
+
+
+def test_download_gguf_runtime_assets_force_rejects_unmanaged_existing_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "PaddlePaddle__PaddleOCR-VL-1.5-GGUF"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"model")
+    (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).write_bytes(b"mmproj")
+    called = False
+
+    def fake_snapshot_download(**kwargs) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+
+    with pytest.raises(RuntimeError, match="not marked as istots-managed"):
+        model_store.download_gguf_runtime_assets(models_dir=tmp_path, force=True)
+
+    assert called is False
+    assert target.exists()
 
 
 def test_ensure_local_qwen_corrector_assets_resolves_default_download(monkeypatch, tmp_path: Path) -> None:
