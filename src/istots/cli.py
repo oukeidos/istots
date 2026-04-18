@@ -120,6 +120,19 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_temp_ocr_image_file_argument(parser: argparse.ArgumentParser, *, help_suffix: str = "") -> None:
+    suffix = f" {help_suffix}" if help_suffix else ""
+    parser.add_argument(
+        "--no-temp-ocr-image-files",
+        action="store_true",
+        help=(
+            "Keep prepared OCR images only in memory instead of writing temporary OCR image files."
+            " This avoids temporary OCR image files on disk but uses more RAM."
+            f"{suffix}"
+        ),
+    )
+
+
 def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("input_sup", type=Path, help="Input .sup file")
     parser.add_argument("output_srt", type=Path, help="Output .srt file")
@@ -251,6 +264,7 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Enable optional furigana masking before OCR (default: disabled)",
     )
+    _add_temp_ocr_image_file_argument(parser)
     parser.add_argument(
         "--detector-output",
         type=Path,
@@ -529,6 +543,7 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Enable optional furigana masking before OCR (default: disabled)",
     )
+    _add_temp_ocr_image_file_argument(parser, help_suffix="Applies to smoke conversion.")
     parser.add_argument(
         "--no-detector",
         action="store_true",
@@ -980,6 +995,7 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=f"Override PaddleOCR-VL llama-server context size for structured doctor runs (default policy: {LOCAL_PADDLE_CTX_SIZE}).",
     )
+    _add_temp_ocr_image_file_argument(parser, help_suffix="Applies to `doctor workflow ...` only.")
     parser.add_argument(
         "--corrector-model-path",
         type=Path,
@@ -1376,6 +1392,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             explicit_qwen_mmproj_path=args.corrector_mmproj_path,
             api_key_env=args.api_key_env,
             startup_timeout_sec=max(args.paddle_startup_timeout_sec, args.qwen_startup_timeout_sec),
+            use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
         )
         return _log_doctor_suite_result(result, quiet=args.quiet)
 
@@ -1442,7 +1459,6 @@ def _has_paddle_runtime_override_request(args: argparse.Namespace) -> bool:
             args.paddle_gpu_layers is not None,
             args.paddle_no_mmproj_offload,
             args.paddle_startup_timeout_sec != 120.0,
-            args.paddle_ctx_size is not None,
         )
     )
 
@@ -1508,6 +1524,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         paddle_ctx_size=args.paddle_ctx_size,
         quiet=args.quiet,
         furigana_mask=args.furigana_mask,
+        no_temp_ocr_image_files=args.no_temp_ocr_image_files,
         detector_output=detector_output,
         detector_mode=args.detector_mode,
         detector_family_addon=args.detector_family_addon,
@@ -1772,6 +1789,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
             srt_policy=args.srt_policy,
             runtime_binary_path=args.llama_server_path,
             paddle_runtime_overrides=paddle_runtime_overrides,
+            use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
             verbose=not args.quiet,
         )
     except Exception as exc:

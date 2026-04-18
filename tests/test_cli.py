@@ -55,6 +55,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--qwen-profile {auto,cpu}" in captured.out
     assert "--output-dir OUTPUT_DIR" in captured.out
     assert "--no-detector" in captured.out
+    assert "--no-temp-ocr-image-files" in captured.out
     assert "--force" in captured.out
     assert "{runtime,auth,workflow}" in captured.out
     assert "--input-sup INPUT_SUP" in captured.out
@@ -272,8 +273,6 @@ def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path
             "12",
             "--paddle-threads-batch",
             "8",
-            "--paddle-ctx-size",
-            "3072",
             "--paddle-no-mmproj-offload",
             "--quiet",
         ]
@@ -286,7 +285,6 @@ def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path
     assert overrides.port == 19001
     assert overrides.threads == 12
     assert overrides.threads_batch == 8
-    assert overrides.ctx_size == 3072
     assert overrides.no_mmproj_offload is True
 
 
@@ -381,6 +379,33 @@ def test_run_doctor_workflow_passes_input_sup(monkeypatch, tmp_path: Path) -> No
     assert rc == 0
     assert captured["workflow"] == "wider"
     assert captured["input_sup"] == input_sup.resolve()
+
+
+def test_run_doctor_workflow_passes_no_temp_ocr_image_files(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_workflow_doctor(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(category="workflow", target="default", ok=True, checks=())
+
+    monkeypatch.setattr("istots.doctor.run_workflow_doctor", fake_run_workflow_doctor)
+
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    rc = cli.run(
+        [
+            "doctor",
+            "workflow",
+            "default",
+            "--input-sup",
+            str(input_sup),
+            "--no-temp-ocr-image-files",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["use_temp_ocr_image_files"] is False
 
 
 def test_run_routes_legacy_convert(monkeypatch) -> None:
@@ -586,18 +611,7 @@ def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path:
         ),
     )
 
-    rc = cli.run(
-        [
-            "smoke",
-            "--input-sup",
-            str(sample_sup),
-            "--output-dir",
-            str(output_dir),
-            "--paddle-ctx-size",
-            "3072",
-            "--quiet",
-        ]
-    )
+    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--output-dir", str(output_dir), "--quiet"])
 
     assert rc == 0
     assert captured["input_sup"] == sample_sup.resolve()
@@ -606,7 +620,39 @@ def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path:
     assert captured["engine"] == "llama-server"
     assert captured["ocr_mode"] == "default"
     assert captured["models_dir"] is None
-    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(ctx_size=3072)
+    assert captured["use_temp_ocr_image_files"] is True
+
+
+def test_run_smoke_passes_no_temp_ocr_image_files(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_dir / "sample.smoke.srt",
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run(
+        [
+            "smoke",
+            "--input-sup",
+            str(sample_sup),
+            "--output-dir",
+            str(output_dir),
+            "--no-temp-ocr-image-files",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["use_temp_ocr_image_files"] is False
 
 
 def test_run_smoke_disables_detector_for_fast_mode(monkeypatch, tmp_path: Path) -> None:
@@ -730,6 +776,29 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
         startup_timeout_sec=30.0,
         ctx_size=3072,
     )
+    assert captured["use_temp_ocr_image_files"] is True
+
+
+def test_run_convert_passes_no_temp_ocr_image_files(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert_sup_to_srt",
+        lambda **kwargs: captured.update(kwargs) or SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt,
+            device_used="cpu",
+        ),
+    )
+
+    rc = cli.run([str(input_sup), str(output_srt), "--no-temp-ocr-image-files", "--quiet"])
+
+    assert rc == 0
+    assert captured["use_temp_ocr_image_files"] is False
 
 
 def test_run_convert_passes_fast_ocr_mode(monkeypatch, tmp_path: Path) -> None:

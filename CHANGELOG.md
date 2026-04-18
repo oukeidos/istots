@@ -3,6 +3,7 @@
 ## [0.3.4] - 2026-04-18
 - Started the retained EXP-008 stack port by promoting PaddleOCR-VL llama-server defaults to `ctx-size=2048`, adding a Paddle-only request-budget restart policy of `200`, and preserving the separate local Qwen `ctx-size=4096` policy.
 - Ported the retained parser/pipeline memory seam by releasing parser predecode workers after frame collection, defaulting pre-OCR preparation to a subprocess path, and spilling prepared OCR images to temporary PNG files while keeping lightweight metadata rows in the parent process.
+- Exposed `--no-temp-ocr-image-files` on `convert`, `smoke`, and `doctor workflow`, keeping disk-backed prepared OCR images as the default retained path and adding focused CLI regression coverage for the opt-out wiring.
 
 ## [0.3.3] - 2026-04-16
 - Hardened `convert` and `smoke` artifact handling by rejecting path collisions, applying overwrite protection to sidecar outputs, and requiring explicit `--input-sup` for `smoke`.

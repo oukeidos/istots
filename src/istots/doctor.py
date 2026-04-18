@@ -26,12 +26,8 @@ from istots.llama_runtime import (
     run_llama_server_launch_spec_doctor,
 )
 from istots.model_store import ensure_local_qwen_corrector_assets
-from istots.ocr import (
-    LOCAL_PADDLE_CTX_SIZE,
-    OCREngine,
-    PaddleOCRVLRuntimeOverrides,
-    Qwen35RuntimeOverrides,
-)
+from istots.ocr import OCREngine, PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
+from istots.ocr import LOCAL_PADDLE_CTX_SIZE
 from istots.pipeline import convert_sup_to_srt
 
 
@@ -264,6 +260,7 @@ def run_workflow_doctor(
     explicit_qwen_mmproj_path: Path | None = None,
     api_key_env: str = "GEMINI_API_KEY",
     startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
+    use_temp_ocr_image_files: bool = True,
 ) -> DoctorSuiteResult:
     normalized = workflow.strip().lower()
     checks: list[DoctorCheckResult] = []
@@ -339,6 +336,7 @@ def run_workflow_doctor(
                     min_pixels=min_pixels,
                     paddle_overrides=paddle_overrides or PaddleOCRVLRuntimeOverrides(),
                     corrector_config=workflow_corrector,
+                    use_temp_ocr_image_files=use_temp_ocr_image_files,
                 )
             )
 
@@ -355,6 +353,7 @@ def _run_workflow_smoke_check(
     min_pixels: int,
     paddle_overrides: PaddleOCRVLRuntimeOverrides,
     corrector_config: CorrectorConfig | None,
+    use_temp_ocr_image_files: bool,
 ) -> DoctorCheckResult:
     output_dir = Path(tempfile.mkdtemp(prefix="istots-doctor-workflow-")).resolve()
     output_srt = output_dir / "doctor.srt"
@@ -377,6 +376,7 @@ def _run_workflow_smoke_check(
             runtime_binary_path=explicit_binary_path,
             runtime_host=host,
             paddle_runtime_overrides=paddle_overrides,
+            use_temp_ocr_image_files=use_temp_ocr_image_files,
             verbose=False,
         )
     except Exception as exc:
