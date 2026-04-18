@@ -43,6 +43,37 @@ def _generated_dialogue_text(speaker: str, line_index: int) -> str:
     return f"({speaker}{_generated_token('speaker', 0)}) {_generated_token('line', line_index)}"
 
 
+def _prepared_input(
+    *,
+    index: int,
+    image: Image.Image,
+    raw_index: int | None = None,
+    window_id: int = 0,
+    left: int = 0,
+    top: int = 0,
+    right: int | None = None,
+    bottom: int | None = None,
+    start: timedelta | None = None,
+    end: timedelta | None = None,
+) -> pipeline._PreparedOCRInput:
+    width, height = image.size
+    return pipeline._PreparedOCRInput(
+        index=index,
+        raw_index=index if raw_index is None else raw_index,
+        window_id=window_id,
+        left=left,
+        top=top,
+        right=width if right is None else right,
+        bottom=height if bottom is None else bottom,
+        start=timedelta() if start is None else start,
+        end=timedelta(milliseconds=1) if end is None else end,
+        image_width=width,
+        image_height=height,
+        image_mode=image.mode,
+        image=image,
+    )
+
+
 def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     output_srt = tmp_path / "output.srt"
@@ -93,6 +124,7 @@ def test_convert_sup_to_srt_releases_backend_on_error(monkeypatch, tmp_path: Pat
     input_sup.write_bytes(b"")
 
     frame = SimpleNamespace(
+        raw_index=0,
         window_id=0,
         left=0,
         top=0,
@@ -147,6 +179,7 @@ def test_convert_sup_to_srt_applies_furigana_mask_when_enabled(monkeypatch, tmp_
     original = Image.new("RGB", (2, 2), "white")
     masked = Image.new("RGB", (2, 2), "black")
     frame = SimpleNamespace(
+        raw_index=0,
         window_id=0,
         left=0,
         top=0,
@@ -205,6 +238,7 @@ def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_p
 
     original = Image.new("RGB", (2, 2), "white")
     frame = SimpleNamespace(
+        raw_index=0,
         window_id=0,
         left=0,
         top=0,
@@ -257,6 +291,225 @@ def test_convert_sup_to_srt_skips_furigana_mask_when_disabled(monkeypatch, tmp_p
 
     assert calls["count"] == 0
     assert FakeBackend.captured[0] is original
+
+
+def test_collect_prepared_ocr_inputs_releases_parser_predecode_workers(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+
+    frame = SimpleNamespace(
+        raw_index=7,
+        window_id=3,
+        left=10,
+        top=11,
+        right=20,
+        bottom=21,
+        start=timedelta(milliseconds=5),
+        end=timedelta(milliseconds=15),
+        image=Image.new("RGB", (2, 2), "white"),
+    )
+    release_calls = {"count": 0}
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        return iter([frame])
+
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(
+        pipeline,
+        "release_parser_predecode_workers",
+        lambda: release_calls.__setitem__("count", release_calls["count"] + 1),
+    )
+
+    prepared_inputs = pipeline._collect_prepared_ocr_inputs(  # noqa: SLF001
+        input_sup,
+        max_items=None,
+        enable_furigana_mask=False,
+        verbose=False,
+    )
+
+    assert release_calls["count"] == 1
+    assert prepared_inputs == [
+        pipeline._PreparedOCRInput(
+            index=0,
+            raw_index=7,
+            window_id=3,
+            left=10,
+            top=11,
+            right=20,
+            bottom=21,
+            start=timedelta(milliseconds=5),
+            end=timedelta(milliseconds=15),
+            image_width=2,
+            image_height=2,
+            image_mode="RGB",
+            image=frame.image,
+        )
+    ]
+
+
+def test_collect_prepared_ocr_inputs_releases_parser_predecode_workers_on_error(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    release_calls = {"count": 0}
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        raise RuntimeError("parse boom")
+
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(
+        pipeline,
+        "release_parser_predecode_workers",
+        lambda: release_calls.__setitem__("count", release_calls["count"] + 1),
+    )
+
+    with pytest.raises(RuntimeError, match="parse boom"):
+        pipeline._collect_prepared_ocr_inputs(  # noqa: SLF001
+            input_sup,
+            max_items=None,
+            enable_furigana_mask=False,
+            verbose=False,
+        )
+
+    assert release_calls["count"] == 1
+
+
+def test_spill_prepared_inputs_to_directory_deduplicates_equal_images(tmp_path: Path) -> None:
+    first = _prepared_input(index=0, image=Image.new("RGB", (2, 2), "white"))
+    second = _prepared_input(index=1, image=Image.new("RGB", (2, 2), "white"))
+    third = _prepared_input(index=2, image=Image.new("RGB", (2, 2), "black"))
+
+    spilled = pipeline._spill_prepared_inputs_to_directory(  # noqa: SLF001
+        [first, second, third],
+        output_dir=tmp_path,
+    )
+
+    assert spilled[0].image is None
+    assert spilled[1].image is None
+    assert spilled[2].image is None
+    assert spilled[0].image_path is not None
+    assert spilled[1].image_path == spilled[0].image_path
+    assert spilled[2].image_path != spilled[0].image_path
+    assert spilled[0].image_path.exists()
+    assert spilled[2].image_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("spill_format", "expected_suffix"),
+    [
+        ("png-fast", ".png"),
+        ("bmp", ".bmp"),
+    ],
+)
+def test_spill_prepared_inputs_to_directory_respects_format_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    spill_format: str,
+    expected_suffix: str,
+) -> None:
+    first = _prepared_input(index=0, image=Image.new("RGB", (2, 2), "white"))
+    monkeypatch.setenv("ISTOTS_PREPARED_INPUT_SPILL_FORMAT", spill_format)
+
+    spilled = pipeline._spill_prepared_inputs_to_directory(  # noqa: SLF001
+        [first],
+        output_dir=tmp_path,
+    )
+
+    assert spilled[0].image_path is not None
+    assert spilled[0].image_path.suffix == expected_suffix
+    assert spilled[0].image_path.exists()
+
+
+def test_convert_sup_to_srt_uses_subprocess_prepared_inputs_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    prepared_inputs = [
+        _prepared_input(
+            index=0,
+            image=Image.new("RGB", (2, 2), "white"),
+            end=timedelta(milliseconds=10),
+        )
+    ]
+    subprocess_calls = {"count": 0}
+
+    class FakeBackend:
+        def recognize_batch(self, images):
+            return [""]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("ISTOTS_PREPARE_OCR_INPUTS_IN_SUBPROCESS", "1")
+    monkeypatch.setattr(
+        pipeline,
+        "_collect_prepared_ocr_inputs_via_subprocess",
+        lambda *args, **kwargs: subprocess_calls.__setitem__("count", subprocess_calls["count"] + 1) or prepared_inputs,
+    )
+    monkeypatch.setattr(pipeline, "create_ocr_backend", lambda config: FakeBackend())
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+
+    result = pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        verbose=False,
+    )
+
+    assert subprocess_calls["count"] == 1
+    assert result.processed_count == 1
+
+
+def test_prepare_inputs_in_subprocess_defaults_to_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ISTOTS_PREPARE_OCR_INPUTS_IN_SUBPROCESS", raising=False)
+
+    assert pipeline._prepare_inputs_in_subprocess_enabled() is True  # noqa: SLF001
+
+
+def test_prepare_inputs_in_subprocess_explicit_flag_overrides_default() -> None:
+    assert pipeline._prepare_inputs_in_subprocess_enabled(False) is False  # noqa: SLF001
+
+
+def test_recognize_prepared_inputs_supports_disk_backed_rows(tmp_path: Path) -> None:
+    image = Image.new("RGB", (2, 2), "white")
+    image_path = tmp_path / "row.png"
+    image.save(image_path, format="PNG")
+    prepared_input = pipeline._PreparedOCRInput(
+        index=0,
+        raw_index=0,
+        window_id=0,
+        left=0,
+        top=0,
+        right=2,
+        bottom=2,
+        start=timedelta(),
+        end=timedelta(milliseconds=10),
+        image_width=2,
+        image_height=2,
+        image_mode="RGB",
+        image=None,
+        image_path=image_path,
+    )
+
+    class FakeBackend:
+        captured_modes: list[str] = []
+
+        def recognize(self, image: Image.Image) -> str:
+            FakeBackend.captured_modes.append(image.mode)
+            return "ok"
+
+    texts = pipeline._recognize_prepared_inputs(  # noqa: SLF001
+        [prepared_input],
+        backend=FakeBackend(),
+        verbose=False,
+        branch_label="test",
+    )
+
+    assert texts == ["ok"]
+    assert FakeBackend.captured_modes == ["RGB"]
 
 
 def test_convert_sup_to_srt_builds_hf_backend_config(monkeypatch, tmp_path: Path) -> None:
@@ -431,6 +684,7 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
 
     frames = [
         SimpleNamespace(
+            raw_index=0,
             window_id=0,
             left=0,
             top=0,
@@ -441,6 +695,7 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
             image=Image.new("RGB", (20, 2), "white"),
         ),
         SimpleNamespace(
+            raw_index=1,
             window_id=0,
             left=0,
             top=0,
@@ -451,6 +706,7 @@ def test_convert_sup_to_srt_fast_mode_partitions_rows_and_restores_order(
             image=Image.new("RGB", (2, 20), "white"),
         ),
         SimpleNamespace(
+            raw_index=2,
             window_id=0,
             left=0,
             top=0,
@@ -540,6 +796,7 @@ def test_convert_sup_to_srt_fast_mode_uses_hf_min_pixels_on_non_tall_only(
 
     frames = [
         SimpleNamespace(
+            raw_index=0,
             window_id=0,
             left=0,
             top=0,
@@ -550,6 +807,7 @@ def test_convert_sup_to_srt_fast_mode_uses_hf_min_pixels_on_non_tall_only(
             image=Image.new("RGB", (20, 2), "white"),
         ),
         SimpleNamespace(
+            raw_index=1,
             window_id=0,
             left=0,
             top=0,
@@ -1532,11 +1790,7 @@ def test_select_dominant_kanji_family_prefers_purer_row_level_candidate() -> Non
         ),
     ]
     prepared_inputs = [
-        pipeline._PreparedOCRInput(
-            index=index,
-            frame=SimpleNamespace(raw_index=index, window_id=0, start=timedelta(), end=timedelta()),
-            image=Image.new("RGB", (1, 1), "white"),
-        )
+        _prepared_input(index=index, image=Image.new("RGB", (1, 1), "white"))
         for index in range(7)
     ]
     baseline_texts = [
@@ -1638,11 +1892,7 @@ def test_select_dominant_kanji_family_rejects_overly_broad_family() -> None:
     baseline_texts.extend([f"{family_primary}{_generated_token('suffix', 0)}"] * 21)
     baseline_texts.extend([f"{secondary_primary}{_generated_token('suffix', 0)}"] * 2)
     prepared_inputs = [
-        pipeline._PreparedOCRInput(
-            index=index,
-            frame=SimpleNamespace(raw_index=index, window_id=0, start=timedelta(), end=timedelta()),
-            image=Image.new("RGB", (1, 1), "white"),
-        )
+        _prepared_input(index=index, image=Image.new("RGB", (1, 1), "white"))
         for index in range(len(baseline_texts))
     ]
 
@@ -2282,9 +2532,9 @@ def test_recognize_prepared_inputs_reuses_exact_duplicate_images() -> None:
     white_b = Image.new("RGB", (2, 2), "white")
     black = Image.new("RGB", (2, 2), "black")
     prepared_inputs = [
-        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=0), image=white_a),
-        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=1), image=white_b),
-        pipeline._PreparedOCRInput(index=2, frame=SimpleNamespace(raw_index=2), image=black),
+        _prepared_input(index=0, raw_index=0, image=white_a),
+        _prepared_input(index=1, raw_index=1, image=white_b),
+        _prepared_input(index=2, raw_index=2, image=black),
     ]
 
     class FakeBackend:
@@ -2312,8 +2562,8 @@ def test_apply_gemini_corrections_reuses_exact_duplicate_images(monkeypatch) -> 
     shared_a = Image.new("RGB", (20, 2), "white")
     shared_b = Image.new("RGB", (20, 2), "white")
     prepared_inputs = [
-        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=100), image=shared_a),
-        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=101), image=shared_b),
+        _prepared_input(index=0, raw_index=100, image=shared_a),
+        _prepared_input(index=1, raw_index=101, image=shared_b),
     ]
     detector_records = [
         HybridDetectorRecord(
@@ -2374,8 +2624,8 @@ def test_apply_gemini_corrections_does_not_reuse_when_shape_differs(monkeypatch)
     shared_a = Image.new("RGB", (20, 2), "white")
     shared_b = Image.new("RGB", (20, 2), "white")
     prepared_inputs = [
-        pipeline._PreparedOCRInput(index=0, frame=SimpleNamespace(raw_index=100), image=shared_a),
-        pipeline._PreparedOCRInput(index=1, frame=SimpleNamespace(raw_index=101), image=shared_b),
+        _prepared_input(index=0, raw_index=100, image=shared_a),
+        _prepared_input(index=1, raw_index=101, image=shared_b),
     ]
     detector_records = [
         HybridDetectorRecord(
@@ -2433,16 +2683,8 @@ def test_apply_gemini_corrections_does_not_reuse_when_shape_differs(monkeypatch)
 
 def test_collect_gemini_correction_responses_runs_in_parallel_and_preserves_order(monkeypatch) -> None:
     prepared_by_index = {
-        0: pipeline._PreparedOCRInput(
-            index=0,
-            frame=SimpleNamespace(raw_index=100),
-            image=Image.new("RGB", (20, 2), "white"),
-        ),
-        1: pipeline._PreparedOCRInput(
-            index=1,
-            frame=SimpleNamespace(raw_index=101),
-            image=Image.new("RGB", (20, 2), "black"),
-        ),
+        0: _prepared_input(index=0, raw_index=100, image=Image.new("RGB", (20, 2), "white")),
+        1: _prepared_input(index=1, raw_index=101, image=Image.new("RGB", (20, 2), "black")),
     }
     unique_records = [
         HybridDetectorRecord(
@@ -2604,11 +2846,7 @@ def test_convert_sup_to_srt_keeps_baseline_for_failed_gemini_rows(monkeypatch, t
 
 def test_apply_gemini_corrections_still_fails_fast_on_configuration_error(monkeypatch) -> None:
     prepared_inputs = [
-        pipeline._PreparedOCRInput(
-            index=0,
-            frame=SimpleNamespace(raw_index=100),
-            image=Image.new("RGB", (20, 2), "white"),
-        )
+        _prepared_input(index=0, raw_index=100, image=Image.new("RGB", (20, 2), "white"))
     ]
     detector_records = [
         HybridDetectorRecord(

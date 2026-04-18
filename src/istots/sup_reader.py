@@ -10,7 +10,7 @@ from typing import Callable, Iterator
 
 from PIL import Image
 
-from istots.pgs_engine import PgsEngine, hash_gray_pixels
+from istots.pgs_engine import PgsEngine, hash_gray_pixels, shutdown_predecode_pools
 from istots.pgs_engine.assembly import (
     DEDUPE_MAX_GAP_PTS,
     build_frame_candidates,
@@ -124,6 +124,10 @@ def iter_sup_window_frames(
             end=timedelta(milliseconds=end_ms),
             image=_pixels_to_image(frame.pixels),
         )
+
+
+def release_parser_predecode_workers() -> None:
+    shutdown_predecode_pools()
 
 
 def _pixels_to_image(pixels: list[list[int]]) -> Image.Image:

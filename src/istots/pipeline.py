@@ -4,6 +4,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from collections import Counter
 import difflib
+import multiprocessing
+import os
+from tempfile import TemporaryDirectory
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
@@ -43,7 +46,7 @@ from istots.ocr import (
     normalize_ocr_engine,
 )
 from istots.srt_writer import SubtitleEntry, write_srt
-from istots.sup_reader import iter_sup_window_frames
+from istots.sup_reader import iter_sup_window_frames, release_parser_predecode_workers
 from istots.text_diff import DEFAULT_TEXT_DIFF_PROFILE, assess_difference
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,8 @@ TALL_SUBTITLE_RATIO_THRESHOLD = 2.0
 HF_FAST_MIN_PIXELS = 32768
 KANJI_FAMILY_MIN_COUNT = 2
 MAX_FAMILY_AGREEMENT_ROWS_PER_SUPPORT_ROW = 10
+_PREPARED_INPUT_SUBPROCESS_ENV = "ISTOTS_PREPARE_OCR_INPUTS_IN_SUBPROCESS"
+_PREPARED_INPUT_SPILL_FORMAT_ENV = "ISTOTS_PREPARED_INPUT_SPILL_FORMAT"
 _T = TypeVar("_T")
 
 
@@ -81,8 +86,19 @@ class _WindowTextSegment:
 @dataclass(frozen=True)
 class _PreparedOCRInput:
     index: int
-    frame: Any
-    image: Image.Image
+    raw_index: int
+    window_id: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+    start: timedelta
+    end: timedelta
+    image_width: int
+    image_height: int
+    image_mode: str
+    image: Image.Image | None
+    image_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +121,147 @@ class _KanjiFamilyCandidateStats:
 
 def _exact_image_identity_key(image: Image.Image) -> tuple[str, tuple[int, int], bytes]:
     return (image.mode, image.size, image.tobytes())
+
+
+def _prepared_image(prepared: _PreparedOCRInput) -> Image.Image:
+    if prepared.image is not None:
+        return prepared.image
+    if prepared.image_path is None:
+        raise RuntimeError("prepared OCR input is missing both in-memory image and image_path")
+    with Image.open(prepared.image_path) as image:
+        if image.mode == prepared.image_mode:
+            return image.copy()
+        return image.convert(prepared.image_mode)
+
+
+def _prepared_identity_key(prepared: _PreparedOCRInput) -> Any:
+    if prepared.image_path is not None:
+        return ("disk", prepared.image_mode, prepared.image_width, prepared.image_height, str(prepared.image_path))
+    if prepared.image is None:
+        raise RuntimeError("prepared OCR input is missing both in-memory image and image_path")
+    return ("memory", _exact_image_identity_key(prepared.image))
+
+
+def _prepared_aspect_ratio(prepared: _PreparedOCRInput) -> float:
+    if prepared.image_width <= 0:
+        return 0.0
+    return float(prepared.image_height) / float(prepared.image_width)
+
+
+def _prepared_is_tall(prepared: _PreparedOCRInput) -> bool:
+    return _prepared_aspect_ratio(prepared) >= TALL_SUBTITLE_RATIO_THRESHOLD
+
+
+def _prepare_inputs_in_subprocess_enabled(explicit: bool | None = None) -> bool:
+    if explicit is not None:
+        return explicit
+    raw = os.getenv(_PREPARED_INPUT_SUBPROCESS_ENV)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"", "0", "false", "no"}
+
+
+def _prepared_input_spill_encoding() -> tuple[str, str, dict[str, Any]]:
+    raw = os.getenv(_PREPARED_INPUT_SPILL_FORMAT_ENV, "png").strip().lower()
+    if raw in {"", "png", "png-default"}:
+        return ".png", "PNG", {}
+    if raw in {"png-fast", "png0"}:
+        return ".png", "PNG", {"compress_level": 0, "optimize": False}
+    if raw == "bmp":
+        return ".bmp", "BMP", {}
+    raise ValueError(
+        f"unsupported prepared input spill format: {raw!r}; expected one of 'png', 'png-fast', 'bmp'"
+    )
+
+
+def _spill_prepared_inputs_to_directory(
+    prepared_inputs: list[_PreparedOCRInput],
+    *,
+    output_dir: Path,
+) -> list[_PreparedOCRInput]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    identity_to_path: dict[tuple[str, tuple[int, int], bytes], Path] = {}
+    spilled_inputs: list[_PreparedOCRInput] = []
+    suffix, image_format, save_kwargs = _prepared_input_spill_encoding()
+
+    for item in prepared_inputs:
+        if item.image is None:
+            raise RuntimeError("prepared OCR input already spilled before disk materialization")
+        identity = _exact_image_identity_key(item.image)
+        image_path = identity_to_path.get(identity)
+        if image_path is None:
+            image_path = output_dir / f"{len(identity_to_path):06d}{suffix}"
+            item.image.save(image_path, format=image_format, **save_kwargs)
+            identity_to_path[identity] = image_path
+        spilled_inputs.append(replace(item, image=None, image_path=image_path))
+
+    return spilled_inputs
+
+
+def _prepare_ocr_inputs_worker_entry(
+    input_sup: str,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    spill_dir: str,
+    connection: Any,
+) -> None:
+    try:
+        prepared_inputs = _collect_prepared_ocr_inputs_inprocess(
+            Path(input_sup),
+            max_items=max_items,
+            enable_furigana_mask=enable_furigana_mask,
+            verbose=False,
+        )
+        connection.send(
+            (
+                "ok",
+                _spill_prepared_inputs_to_directory(
+                    prepared_inputs,
+                    output_dir=Path(spill_dir),
+                ),
+            )
+        )
+    except Exception as exc:  # pragma: no cover - exercised through parent wrapper
+        connection.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:  # pragma: no branch
+        connection.close()
+
+
+def _collect_prepared_ocr_inputs_via_subprocess(
+    input_sup: Path,
+    *,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    verbose: bool,
+    spill_dir: Path,
+) -> list[_PreparedOCRInput]:
+    context = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_prepare_ocr_inputs_worker_entry,
+        args=(
+            str(input_sup),
+            max_items,
+            enable_furigana_mask,
+            str(spill_dir),
+            child_conn,
+        ),
+        daemon=False,
+    )
+    process.start()
+    child_conn.close()
+    try:
+        status, payload = parent_conn.recv()
+    finally:
+        parent_conn.close()
+        process.join()
+    if process.exitcode != 0:
+        raise RuntimeError(f"prepared-input subprocess failed with exit code {process.exitcode}")
+    if status != "ok":
+        raise RuntimeError(f"prepared-input subprocess failed: {payload}")
+    if verbose:
+        logger.info("prepared-input subprocess finished: rows=%d spill_dir=%s", len(payload), spill_dir)
+    return payload
 
 
 def _dedupe_by_exact_image_identity(
@@ -229,6 +386,7 @@ def convert_sup_to_srt(
     runtime_binary_path: Path | None = None,
     runtime_host: str = "127.0.0.1",
     paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides | None = None,
+    use_temp_ocr_image_files: bool | None = None,
     verbose: bool = True,
 ) -> ConversionResult:
     if not input_sup.exists():
@@ -272,6 +430,10 @@ def convert_sup_to_srt(
         if detector_output is not None or corrector_config is not None:
             logger.info("detector mode: %s", normalized_detector_mode)
         logger.info("furigana masking: %s", "enabled" if enable_furigana_mask else "disabled")
+        logger.info(
+            "temp OCR image files: %s",
+            "enabled" if _prepare_inputs_in_subprocess_enabled(use_temp_ocr_image_files) else "disabled",
+        )
         logger.info("srt policy: %s", srt_policy)
 
     if normalized_ocr_mode == "fast":
@@ -284,6 +446,7 @@ def convert_sup_to_srt(
             allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
+            use_temp_ocr_image_files=use_temp_ocr_image_files,
             srt_policy=srt_policy,
             verbose=verbose,
         )
@@ -300,37 +463,157 @@ def convert_sup_to_srt(
             detector_family_addon=detector_family_addon,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
+            use_temp_ocr_image_files=use_temp_ocr_image_files,
             srt_policy=srt_policy,
             verbose=verbose,
         )
 
-    prepared_inputs = _collect_prepared_ocr_inputs(
+    with _managed_prepared_ocr_inputs(
         input_sup,
         max_items=max_items,
         enable_furigana_mask=enable_furigana_mask,
+        use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
-    )
-    with _managed_ocr_backend(
-        _build_paddle_backend_config(
-            base_config=backend_config,
-            role="ocr",
-            overrides=resolved_paddle_runtime,
-        ) if normalized_engine is OCREngine.LLAMA_SERVER else backend_config,
-        allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
-        verbose=verbose,
-    ) as (active_backend, runtime_used):
-        if verbose:
-            _log_runtime_selection(engine=normalized_engine, runtime_used=runtime_used)
-        texts = _recognize_prepared_inputs(
-            prepared_inputs,
-            backend=active_backend,
+    ) as prepared_inputs:
+        with _managed_ocr_backend(
+            _build_paddle_backend_config(
+                base_config=backend_config,
+                role="ocr",
+                overrides=resolved_paddle_runtime,
+            ) if normalized_engine is OCREngine.LLAMA_SERVER else backend_config,
+            allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
             verbose=verbose,
-            branch_label="default",
-        )
+        ) as (active_backend, runtime_used):
+            if verbose:
+                _log_runtime_selection(engine=normalized_engine, runtime_used=runtime_used)
+            texts = _recognize_prepared_inputs(
+                prepared_inputs,
+                backend=active_backend,
+                verbose=verbose,
+                branch_label="default",
+            )
+            segments = [
+                segment
+                for item, text in zip(prepared_inputs, texts, strict=True)
+                if (segment := _build_window_text_segment(item, text)) is not None
+            ]
+            entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+            write_srt(entries, output_srt)
+            if verbose:
+                logger.info(
+                    "conversion finished: processed=%d written=%d output=%s",
+                    len(prepared_inputs),
+                    len(entries),
+                    output_srt,
+                )
+            return ConversionResult(
+                output_srt=output_srt,
+                processed_count=len(prepared_inputs),
+                written_count=len(entries),
+                device_used=runtime_used,
+            )
+
+
+def _convert_sup_to_srt_fast(
+    *,
+    input_sup: Path,
+    output_srt: Path,
+    backend_config: OCRBackendConfig,
+    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
+    runtime_label: str,
+    allow_hf_auto_cpu_fallback: bool,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    use_temp_ocr_image_files: bool | None,
+    srt_policy: str,
+    verbose: bool,
+) -> ConversionResult:
+    with _managed_prepared_ocr_inputs(
+        input_sup,
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        use_temp_ocr_image_files=use_temp_ocr_image_files,
+        verbose=verbose,
+    ) as prepared_inputs:
+        wide_inputs = [item for item in prepared_inputs if not _prepared_is_tall(item)]
+        tall_inputs = [item for item in prepared_inputs if _prepared_is_tall(item)]
+
+        if verbose:
+            logger.info(
+                "hybrid OCR partitioned rows: non_tall=%d tall=%d threshold=%.1f",
+                len(wide_inputs),
+                len(tall_inputs),
+                TALL_SUBTITLE_RATIO_THRESHOLD,
+            )
+
+        backend_specs: list[tuple[str, OCRBackendConfig]] = []
+        if wide_inputs:
+            backend_specs.append(
+                (
+                    "ocr-fast",
+                    _build_fast_backend_config(
+                        base_config=backend_config,
+                        role="ocr-fast",
+                        paddle_runtime_overrides=paddle_runtime_overrides,
+                    ),
+                )
+            )
+        if tall_inputs:
+            backend_specs.append(
+                (
+                    "ocr",
+                    _build_fast_backend_config(
+                        base_config=backend_config,
+                        role="ocr",
+                        paddle_runtime_overrides=paddle_runtime_overrides,
+                    ),
+                )
+            )
+
+        device_logged = False
+        active_runtime_label = runtime_label
+        active_hf_device = backend_config.device
+        recognized_by_index: dict[int, str] = {}
+
+        for role, config in backend_specs:
+            branch_inputs = wide_inputs if role == "ocr-fast" else tall_inputs
+            branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
+            if not branch_inputs:
+                continue
+            active_config = (
+                replace(config, device=active_hf_device)
+                if backend_config.engine is OCREngine.HF
+                else config
+            )
+            with _managed_ocr_backend(
+                active_config,
+                allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
+                verbose=verbose,
+            ) as (backend, runtime_used):
+                if backend_config.engine is OCREngine.HF:
+                    active_hf_device = runtime_used
+                    active_runtime_label = runtime_used
+                if verbose and not device_logged:
+                    _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_used)
+                device_logged = True
+                if role == "ocr-fast":
+                    if verbose:
+                        logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(branch_inputs))
+                elif verbose:
+                    logger.info("running default OCR branch: tall=%d role=ocr", len(branch_inputs))
+                branch_texts = _recognize_prepared_inputs(
+                    branch_inputs,
+                    backend=backend,
+                    verbose=verbose,
+                    branch_label=branch_label,
+                )
+                for item, text in zip(branch_inputs, branch_texts, strict=True):
+                    recognized_by_index[item.index] = text
+
         segments = [
             segment
-            for item, text in zip(prepared_inputs, texts, strict=True)
-            if (segment := _build_window_text_segment(item.frame, text)) is not None
+            for item in prepared_inputs
+            if (segment := _build_window_text_segment(item, recognized_by_index.get(item.index, ""))) is not None
         ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
         write_srt(entries, output_srt)
@@ -345,124 +628,8 @@ def convert_sup_to_srt(
             output_srt=output_srt,
             processed_count=len(prepared_inputs),
             written_count=len(entries),
-            device_used=runtime_used,
+            device_used=active_runtime_label,
         )
-
-
-def _convert_sup_to_srt_fast(
-    *,
-    input_sup: Path,
-    output_srt: Path,
-    backend_config: OCRBackendConfig,
-    paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
-    runtime_label: str,
-    allow_hf_auto_cpu_fallback: bool,
-    max_items: int | None,
-    enable_furigana_mask: bool,
-    srt_policy: str,
-    verbose: bool,
-) -> ConversionResult:
-    prepared_inputs = _collect_prepared_ocr_inputs(
-        input_sup,
-        max_items=max_items,
-        enable_furigana_mask=enable_furigana_mask,
-        verbose=verbose,
-    )
-    wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
-    tall_inputs = [item for item in prepared_inputs if _is_tall_subtitle_image(item.image)]
-
-    if verbose:
-        logger.info(
-            "hybrid OCR partitioned rows: non_tall=%d tall=%d threshold=%.1f",
-            len(wide_inputs),
-            len(tall_inputs),
-            TALL_SUBTITLE_RATIO_THRESHOLD,
-        )
-
-    backend_specs: list[tuple[str, OCRBackendConfig]] = []
-    if wide_inputs:
-        backend_specs.append(
-            (
-                "ocr-fast",
-                _build_fast_backend_config(
-                    base_config=backend_config,
-                    role="ocr-fast",
-                    paddle_runtime_overrides=paddle_runtime_overrides,
-                ),
-            )
-        )
-    if tall_inputs:
-        backend_specs.append(
-            (
-                "ocr",
-                _build_fast_backend_config(
-                    base_config=backend_config,
-                    role="ocr",
-                    paddle_runtime_overrides=paddle_runtime_overrides,
-                ),
-            )
-        )
-
-    device_logged = False
-    active_runtime_label = runtime_label
-    active_hf_device = backend_config.device
-    recognized_by_index: dict[int, str] = {}
-
-    for role, config in backend_specs:
-        branch_inputs = wide_inputs if role == "ocr-fast" else tall_inputs
-        branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
-        if not branch_inputs:
-            continue
-        active_config = (
-            replace(config, device=active_hf_device)
-            if backend_config.engine is OCREngine.HF
-            else config
-        )
-        with _managed_ocr_backend(
-            active_config,
-            allow_hf_auto_cpu_fallback=allow_hf_auto_cpu_fallback,
-            verbose=verbose,
-        ) as (backend, runtime_used):
-            if backend_config.engine is OCREngine.HF:
-                active_hf_device = runtime_used
-                active_runtime_label = runtime_used
-            if verbose and not device_logged:
-                _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_used)
-            device_logged = True
-            if role == "ocr-fast":
-                if verbose:
-                    logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(branch_inputs))
-            elif verbose:
-                logger.info("running default OCR branch: tall=%d role=ocr", len(branch_inputs))
-            branch_texts = _recognize_prepared_inputs(
-                branch_inputs,
-                backend=backend,
-                verbose=verbose,
-                branch_label=branch_label,
-            )
-            for item, text in zip(branch_inputs, branch_texts, strict=True):
-                recognized_by_index[item.index] = text
-
-    segments = [
-        segment
-        for item in prepared_inputs
-        if (segment := _build_window_text_segment(item.frame, recognized_by_index.get(item.index, ""))) is not None
-    ]
-    entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
-    write_srt(entries, output_srt)
-    if verbose:
-        logger.info(
-            "conversion finished: processed=%d written=%d output=%s",
-            len(prepared_inputs),
-            len(entries),
-            output_srt,
-        )
-    return ConversionResult(
-        output_srt=output_srt,
-        processed_count=len(prepared_inputs),
-        written_count=len(entries),
-        device_used=active_runtime_label,
-    )
 
 
 def _convert_sup_to_srt_default_with_detector(
@@ -478,108 +645,110 @@ def _convert_sup_to_srt_default_with_detector(
     detector_family_addon: bool,
     max_items: int | None,
     enable_furigana_mask: bool,
+    use_temp_ocr_image_files: bool | None,
     srt_policy: str,
     verbose: bool,
 ) -> ConversionResult:
-    prepared_inputs = _collect_prepared_ocr_inputs(
+    with _managed_prepared_ocr_inputs(
         input_sup,
         max_items=max_items,
         enable_furigana_mask=enable_furigana_mask,
+        use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
-    )
-    with _managed_ocr_backend(
-        _build_paddle_backend_config(
-            base_config=backend_config,
-            role="ocr",
-            overrides=paddle_runtime_overrides,
-        ),
-        allow_hf_auto_cpu_fallback=False,
-        verbose=verbose,
-    ) as (baseline_backend, _):
-        if verbose:
-            _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_label)
-        baseline_texts = _recognize_prepared_inputs(
-            prepared_inputs,
-            backend=baseline_backend,
+    ) as prepared_inputs:
+        with _managed_ocr_backend(
+            _build_paddle_backend_config(
+                base_config=backend_config,
+                role="ocr",
+                overrides=paddle_runtime_overrides,
+            ),
+            allow_hf_auto_cpu_fallback=False,
             verbose=verbose,
-            branch_label="default",
-        )
+        ) as (baseline_backend, _):
+            if verbose:
+                _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_label)
+            baseline_texts = _recognize_prepared_inputs(
+                prepared_inputs,
+                backend=baseline_backend,
+                verbose=verbose,
+                branch_label="default",
+            )
 
-    detector_records = _build_detector_surface_records(
-        prepared_inputs=prepared_inputs,
-        baseline_texts=baseline_texts,
-        detector_backend_config=backend_config,
-        paddle_runtime_overrides=paddle_runtime_overrides,
-        detector_mode=detector_mode,
-        verbose=verbose,
-    )
-    if detector_family_addon:
-        dominant_family, addon_records = _build_dominant_family_addon_records(
+        detector_records = _build_detector_surface_records(
             prepared_inputs=prepared_inputs,
             baseline_texts=baseline_texts,
-            s1_detector_records=detector_records,
-        )
-        detector_records.extend(addon_records)
-        if verbose:
-            if dominant_family is None:
-                logger.info("dominant-family detector add-on: no repeated single-char kanji family found")
-            else:
-                logger.info(
-                    "dominant-family detector add-on: family=%s added_rows=%d",
-                    dominant_family,
-                    len(addon_records),
-                )
-    if detector_output is not None:
-        write_hybrid_detector_records(detector_output, detector_records)
-
-    correction_records: list[ConservativeCorrectionRecord] = []
-    final_texts = list(baseline_texts)
-    if corrector_config is not None:
-        correction_records = _apply_conservative_corrections(
-            prepared_inputs=prepared_inputs,
-            detector_records=detector_records,
-            corrector_config=corrector_config,
-            runtime_binary_path=backend_config.binary_path,
-            runtime_host=backend_config.host,
+            detector_backend_config=backend_config,
+            paddle_runtime_overrides=paddle_runtime_overrides,
+            detector_mode=detector_mode,
             verbose=verbose,
         )
-        for record in correction_records:
-            final_texts[record.index] = record.conservative_merged_text
-        if corrector_config.output_path is not None:
-            write_correction_records(corrector_config.output_path, correction_records)
+        if detector_family_addon:
+            dominant_family, addon_records = _build_dominant_family_addon_records(
+                prepared_inputs=prepared_inputs,
+                baseline_texts=baseline_texts,
+                s1_detector_records=detector_records,
+            )
+            detector_records.extend(addon_records)
+            if verbose:
+                if dominant_family is None:
+                    logger.info("dominant-family detector add-on: no repeated single-char kanji family found")
+                else:
+                    logger.info(
+                        "dominant-family detector add-on: family=%s added_rows=%d",
+                        dominant_family,
+                        len(addon_records),
+                    )
+        if detector_output is not None:
+            write_hybrid_detector_records(detector_output, detector_records)
 
-    segments = [
-        segment
-        for item, text in zip(prepared_inputs, final_texts, strict=True)
-        if (segment := _build_window_text_segment(item.frame, text)) is not None
-    ]
-    entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
-    write_srt(entries, output_srt)
-    correction_fallback_count = sum(
-        1 for record in correction_records if record.corrector_status == "fallback_baseline"
-    )
-    if verbose:
-        logger.info(
-            "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d correction_fallbacks=%d output=%s",
-            len(prepared_inputs),
-            len(entries),
-            len(detector_records),
-            len(correction_records),
-            correction_fallback_count,
-            output_srt,
+        correction_records: list[ConservativeCorrectionRecord] = []
+        final_texts = list(baseline_texts)
+        if corrector_config is not None:
+            correction_records = _apply_conservative_corrections(
+                prepared_inputs=prepared_inputs,
+                detector_records=detector_records,
+                corrector_config=corrector_config,
+                runtime_binary_path=backend_config.binary_path,
+                runtime_host=backend_config.host,
+                verbose=verbose,
+            )
+            for record in correction_records:
+                final_texts[record.index] = record.conservative_merged_text
+            if corrector_config.output_path is not None:
+                write_correction_records(corrector_config.output_path, correction_records)
+
+        segments = [
+            segment
+            for item, text in zip(prepared_inputs, final_texts, strict=True)
+            if (segment := _build_window_text_segment(item, text)) is not None
+        ]
+        entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        write_srt(entries, output_srt)
+        correction_fallback_count = sum(
+            1 for record in correction_records if record.corrector_status == "fallback_baseline"
         )
-    return ConversionResult(
-        output_srt=output_srt,
-        processed_count=len(prepared_inputs),
-        written_count=len(entries),
-        device_used=runtime_label,
-        detector_record_count=len(detector_records),
-        correction_record_count=len(correction_records),
-        correction_applied_count=sum(
-            1 for record in correction_records if record.merged_changed
-        ),
-        correction_fallback_count=correction_fallback_count,
-    )
+        if verbose:
+            logger.info(
+                "conversion finished: processed=%d written=%d detector_disagreements=%d correction_rows=%d correction_fallbacks=%d output=%s",
+                len(prepared_inputs),
+                len(entries),
+                len(detector_records),
+                len(correction_records),
+                correction_fallback_count,
+                output_srt,
+            )
+        return ConversionResult(
+            output_srt=output_srt,
+            processed_count=len(prepared_inputs),
+            written_count=len(entries),
+            device_used=runtime_label,
+            detector_record_count=len(detector_records),
+            correction_record_count=len(correction_records),
+            correction_applied_count=sum(
+                1 for record in correction_records if record.merged_changed
+            ),
+            correction_fallback_count=correction_fallback_count,
+        )
 
 
 def _normalize_ocr_mode(ocr_mode: str) -> str:
@@ -596,7 +765,53 @@ def _normalize_detector_mode(detector_mode: str) -> str:
     raise ValueError(f"unsupported detector mode: {detector_mode!r}")
 
 
+@contextmanager
+def _managed_prepared_ocr_inputs(
+    input_sup: Path,
+    *,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    use_temp_ocr_image_files: bool | None,
+    verbose: bool,
+) -> Iterator[list[_PreparedOCRInput]]:
+    if not _prepare_inputs_in_subprocess_enabled(use_temp_ocr_image_files):
+        yield _collect_prepared_ocr_inputs_inprocess(
+            input_sup,
+            max_items=max_items,
+            enable_furigana_mask=enable_furigana_mask,
+            verbose=verbose,
+        )
+        return
+
+    with TemporaryDirectory(prefix="istots-prepared-inputs-") as temp_dir:
+        spill_dir = Path(temp_dir)
+        if verbose:
+            logger.info("collecting prepared OCR inputs in subprocess: spill_dir=%s", spill_dir)
+        yield _collect_prepared_ocr_inputs_via_subprocess(
+            input_sup,
+            max_items=max_items,
+            enable_furigana_mask=enable_furigana_mask,
+            verbose=verbose,
+            spill_dir=spill_dir,
+        )
+
+
 def _collect_prepared_ocr_inputs(
+    input_sup: Path,
+    *,
+    max_items: int | None,
+    enable_furigana_mask: bool,
+    verbose: bool,
+) -> list[_PreparedOCRInput]:
+    return _collect_prepared_ocr_inputs_inprocess(
+        input_sup,
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        verbose=verbose,
+    )
+
+
+def _collect_prepared_ocr_inputs_inprocess(
     input_sup: Path,
     *,
     max_items: int | None,
@@ -611,7 +826,10 @@ def _collect_prepared_ocr_inputs(
         if verbose:
             logger.info("parsed SUP OCR inputs: total=%d", total)
 
-    frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
+    try:
+        frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
+    finally:
+        release_parser_predecode_workers()
     if enable_furigana_mask:
         if verbose:
             logger.info("building furigana mask statistics by orientation")
@@ -619,7 +837,21 @@ def _collect_prepared_ocr_inputs(
     else:
         images = [frame.image for frame in frames]
     return [
-        _PreparedOCRInput(index=index, frame=frame, image=image)
+        _PreparedOCRInput(
+            index=index,
+            raw_index=frame.raw_index,
+            window_id=frame.window_id,
+            left=frame.left,
+            top=frame.top,
+            right=frame.right,
+            bottom=frame.bottom,
+            start=frame.start,
+            end=frame.end,
+            image_width=image.width,
+            image_height=image.height,
+            image_mode=image.mode,
+            image=image,
+        )
         for index, (frame, image) in enumerate(zip(frames, images, strict=True))
     ]
 
@@ -703,10 +935,21 @@ def _recognize_prepared_inputs(
     if not prepared_inputs:
         return []
 
-    unique_inputs, item_to_unique_index, unique_group_sizes = _dedupe_by_exact_image_identity(
-        prepared_inputs,
-        image_getter=lambda item: item.image,
-    )
+    key_to_unique_index: dict[Any, int] = {}
+    unique_inputs: list[_PreparedOCRInput] = []
+    item_to_unique_index: list[int] = []
+    unique_group_sizes: list[int] = []
+
+    for item in prepared_inputs:
+        key = _prepared_identity_key(item)
+        unique_index = key_to_unique_index.get(key)
+        if unique_index is None:
+            unique_index = len(unique_inputs)
+            key_to_unique_index[key] = unique_index
+            unique_inputs.append(item)
+            unique_group_sizes.append(0)
+        unique_group_sizes[unique_index] += 1
+        item_to_unique_index.append(unique_index)
 
     recognized_unique: list[str] = []
     total = len(unique_inputs)
@@ -720,7 +963,7 @@ def _recognize_prepared_inputs(
                 unique_group_sizes[unique_index],
             )
         ocr_started = time.monotonic()
-        text = _recognize_single_image(backend, item.image)
+        text = _recognize_single_image(backend, _prepared_image(item))
         recognized_unique.append(text)
         if verbose:
             state = "accepted" if text else "skipped (empty)"
@@ -758,8 +1001,8 @@ def _build_hybrid_detector_records(
     paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides,
     verbose: bool,
 ) -> list[HybridDetectorRecord]:
-    wide_inputs = [item for item in prepared_inputs if not _is_tall_subtitle_image(item.image)]
-    tall_inputs = [item for item in prepared_inputs if _is_tall_subtitle_image(item.image)]
+    wide_inputs = [item for item in prepared_inputs if not _prepared_is_tall(item)]
+    tall_inputs = [item for item in prepared_inputs if _prepared_is_tall(item)]
 
     detector_specs: list[tuple[str, str, list[_PreparedOCRInput], OCRBackendConfig]] = []
     if wide_inputs:
@@ -810,7 +1053,7 @@ def _build_hybrid_detector_records(
                 baseline_text = baseline_by_index[item.index]
                 if baseline_text == option_text:
                     continue
-                ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+                ratio = _prepared_aspect_ratio(item)
                 diff = assess_difference(
                     baseline_text,
                     option_text,
@@ -819,10 +1062,10 @@ def _build_hybrid_detector_records(
                 detector_records.append(
                     HybridDetectorRecord(
                         index=item.index,
-                        raw_index=item.frame.raw_index,
-                        window_id=item.frame.window_id,
-                        start_ms=_timedelta_to_ms(item.frame.start),
-                        end_ms=_timedelta_to_ms(item.frame.end),
+                        raw_index=item.raw_index,
+                        window_id=item.window_id,
+                        start_ms=_timedelta_to_ms(item.start),
+                        end_ms=_timedelta_to_ms(item.end),
                         detector_branch=branch_name,
                         shape="tall" if branch_name == "repeat_drift_tall" else "wide",
                         ratio=ratio,
@@ -916,7 +1159,7 @@ def _build_p2_meaningful_temp0_records(
             baseline_text = baseline_by_index[item.index]
             if baseline_text == option_text:
                 continue
-            ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+            ratio = _prepared_aspect_ratio(item)
             diff = assess_difference(
                 baseline_text,
                 option_text,
@@ -927,12 +1170,12 @@ def _build_p2_meaningful_temp0_records(
             detector_records.append(
                 HybridDetectorRecord(
                     index=item.index,
-                    raw_index=item.frame.raw_index,
-                    window_id=item.frame.window_id,
-                    start_ms=_timedelta_to_ms(item.frame.start),
-                    end_ms=_timedelta_to_ms(item.frame.end),
+                    raw_index=item.raw_index,
+                    window_id=item.window_id,
+                    start_ms=_timedelta_to_ms(item.start),
+                    end_ms=_timedelta_to_ms(item.end),
                     detector_branch="p2_meaningful_temp0",
-                    shape="tall" if _is_tall_subtitle_image(item.image) else "wide",
+                    shape="tall" if _prepared_is_tall(item) else "wide",
                     ratio=ratio,
                     option_role="detector",
                     baseline_text=baseline_text,
@@ -1001,7 +1244,7 @@ def _build_dominant_family_addon_records(
         if family_swap is None:
             continue
         option_text, current_char, alternate_char = family_swap
-        ratio = float(item.image.height) / float(item.image.width) if item.image.width > 0 else 0.0
+        ratio = _prepared_aspect_ratio(item)
         diff = assess_difference(
             baseline_text,
             option_text,
@@ -1010,12 +1253,12 @@ def _build_dominant_family_addon_records(
         addon_records.append(
             HybridDetectorRecord(
                 index=item.index,
-                raw_index=item.frame.raw_index,
-                window_id=item.frame.window_id,
-                start_ms=_timedelta_to_ms(item.frame.start),
-                end_ms=_timedelta_to_ms(item.frame.end),
+                raw_index=item.raw_index,
+                window_id=item.window_id,
+                start_ms=_timedelta_to_ms(item.start),
+                end_ms=_timedelta_to_ms(item.end),
                 detector_branch="dominant_family_addon",
-                shape="tall" if _is_tall_subtitle_image(item.image) else "wide",
+                shape="tall" if _prepared_is_tall(item) else "wide",
                 ratio=ratio,
                 option_role="dominant-family-addon",
                 baseline_text=baseline_text,
@@ -1308,11 +1551,23 @@ def _apply_gemini_corrections(
     prepared_by_index = {item.index: item for item in prepared_inputs}
     corrector_name = corrector_name_for_config(corrector_config)
     records: list[ConservativeCorrectionRecord] = []
-    unique_records, record_to_unique_index, _ = _dedupe_by_exact_image_identity(
-        detector_records,
-        image_getter=lambda record: prepared_by_index[record.index].image,
-        discriminator_getter=lambda record: record.shape,
-    )
+    key_to_unique_index: dict[Any, int] = {}
+    unique_records: list[HybridDetectorRecord] = []
+    record_to_unique_index: list[int] = []
+    unique_group_sizes: list[int] = []
+
+    for detector_record in detector_records:
+        prepared = prepared_by_index[detector_record.index]
+        key = (_prepared_identity_key(prepared), detector_record.shape)
+        unique_index = key_to_unique_index.get(key)
+        if unique_index is None:
+            unique_index = len(unique_records)
+            key_to_unique_index[key] = unique_index
+            unique_records.append(detector_record)
+            unique_group_sizes.append(0)
+        unique_group_sizes[unique_index] += 1
+        record_to_unique_index.append(unique_index)
+
     prompt_styles_by_unique_index = [
         corrector_prompt_for_shape(corrector_config, detector_record.shape)[1]
         for detector_record in unique_records
@@ -1429,7 +1684,7 @@ def _run_gemini_correction_task(
     try:
         corrector_text, prompt_style, reasoning_content = request_gemini_correction(
             config=corrector_config,
-            image=prepared.image,
+            image=_prepared_image(prepared),
             shape=detector_record.shape,
             verbose=verbose,
             abort_event=abort_event,
@@ -1548,23 +1803,23 @@ def _is_tall_subtitle_image(image: Image.Image) -> bool:
     return (float(height) / float(width)) >= TALL_SUBTITLE_RATIO_THRESHOLD
 
 
-def _build_window_text_segment(frame: Any, text: str) -> _WindowTextSegment | None:
+def _build_window_text_segment(prepared: _PreparedOCRInput, text: str) -> _WindowTextSegment | None:
     if not text:
         return None
 
-    end = frame.end
-    if end <= frame.start:
-        end = frame.start + timedelta(milliseconds=1)
+    end = prepared.end
+    if end <= prepared.start:
+        end = prepared.start + timedelta(milliseconds=1)
 
     return _WindowTextSegment(
-        start=frame.start,
+        start=prepared.start,
         end=end,
         text=text,
-        window_id=frame.window_id,
-        left=frame.left,
-        top=frame.top,
-        right=frame.right,
-        bottom=frame.bottom,
+        window_id=prepared.window_id,
+        left=prepared.left,
+        top=prepared.top,
+        right=prepared.right,
+        bottom=prepared.bottom,
     )
 
 

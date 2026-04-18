@@ -4,6 +4,7 @@ from .parser import (
     PgsEngine,
     hash_gray_pixels,
     iter_engine_frames,
+    shutdown_predecode_pools,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "PgsEngine",
     "hash_gray_pixels",
     "iter_engine_frames",
+    "shutdown_predecode_pools",
 ]

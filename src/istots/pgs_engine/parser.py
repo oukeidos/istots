@@ -465,15 +465,14 @@ def _get_predecode_pool(worker_count: int) -> ProcessPoolExecutor:
         return pool
 
 
-def _shutdown_predecode_pools() -> None:
+def shutdown_predecode_pools() -> None:
     with _PREDECODE_POOL_LOCK:
         pools = list(_PREDECODE_POOLS.values())
         _PREDECODE_POOLS.clear()
     for pool in pools:
         pool.shutdown(wait=True, cancel_futures=False)
 
-
-atexit.register(_shutdown_predecode_pools)
+atexit.register(shutdown_predecode_pools)
 
 
 def _collect_unique_completed_objects(
