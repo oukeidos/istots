@@ -272,6 +272,8 @@ def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path
             "12",
             "--paddle-threads-batch",
             "8",
+            "--paddle-ctx-size",
+            "3072",
             "--paddle-no-mmproj-offload",
             "--quiet",
         ]
@@ -284,6 +286,7 @@ def test_run_doctor_runtime_paddle_passes_family_overrides(monkeypatch, tmp_path
     assert overrides.port == 19001
     assert overrides.threads == 12
     assert overrides.threads_batch == 8
+    assert overrides.ctx_size == 3072
     assert overrides.no_mmproj_offload is True
 
 
@@ -583,7 +586,18 @@ def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path:
         ),
     )
 
-    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--output-dir", str(output_dir), "--quiet"])
+    rc = cli.run(
+        [
+            "smoke",
+            "--input-sup",
+            str(sample_sup),
+            "--output-dir",
+            str(output_dir),
+            "--paddle-ctx-size",
+            "3072",
+            "--quiet",
+        ]
+    )
 
     assert rc == 0
     assert captured["input_sup"] == sample_sup.resolve()
@@ -592,6 +606,7 @@ def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path:
     assert captured["engine"] == "llama-server"
     assert captured["ocr_mode"] == "default"
     assert captured["models_dir"] is None
+    assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(ctx_size=3072)
 
 
 def test_run_smoke_disables_detector_for_fast_mode(monkeypatch, tmp_path: Path) -> None:
@@ -697,6 +712,8 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
             "--paddle-no-mmproj-offload",
             "--paddle-startup-timeout-sec",
             "30",
+            "--paddle-ctx-size",
+            "3072",
         ]
     )
 
@@ -711,6 +728,7 @@ def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path)
         gpu_layers=0,
         no_mmproj_offload=True,
         startup_timeout_sec=30.0,
+        ctx_size=3072,
     )
 
 

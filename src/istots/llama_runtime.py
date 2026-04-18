@@ -76,6 +76,7 @@ class LlamaServerOverrides:
     threads: int | None = None
     threads_batch: int | None = None
     port: int | None = None
+    ctx_size: int | None = None
     gpu_layers: int | None = None
     no_mmproj_offload: bool | None = None
 
@@ -517,6 +518,7 @@ def build_llama_server_launch_spec(
         port=normalized_overrides.port or DEFAULT_ROLE_PORTS[normalized_role],
         threads=normalized_overrides.threads,
         threads_batch=normalized_overrides.threads_batch,
+        ctx_size=normalized_overrides.ctx_size,
         gpu_layers=normalized_overrides.gpu_layers,
         no_mmproj_offload=bool(normalized_overrides.no_mmproj_offload),
     )

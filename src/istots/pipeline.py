@@ -33,6 +33,7 @@ from istots.device import resolve_hf_device
 from istots.furigana_mask import build_furigana_masks
 from istots.llama_runtime import DEFAULT_ROLE_PORTS, LlamaServerRole
 from istots.ocr import (
+    LOCAL_PADDLE_CTX_SIZE,
     OCRBackendConfig,
     OCREngine,
     PaddleOCRVLRuntimeOverrides,
@@ -145,6 +146,7 @@ def _resolve_paddle_runtime_overrides(
         port=overrides.port if overrides.port is not None else DEFAULT_ROLE_PORTS[normalized_role],
         threads=overrides.threads,
         threads_batch=overrides.threads_batch,
+        ctx_size=overrides.ctx_size if overrides.ctx_size is not None else LOCAL_PADDLE_CTX_SIZE,
         gpu_layers=overrides.gpu_layers,
         no_mmproj_offload=overrides.no_mmproj_offload,
         startup_timeout_sec=overrides.startup_timeout_sec,
@@ -182,6 +184,7 @@ def _build_paddle_backend_config(
         port=resolved.port,
         threads=resolved.threads,
         threads_batch=resolved.threads_batch,
+        ctx_size=resolved.ctx_size,
         gpu_layers=resolved.gpu_layers,
         no_mmproj_offload=resolved.no_mmproj_offload,
         startup_timeout_sec=resolved.startup_timeout_sec,

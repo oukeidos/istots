@@ -43,7 +43,8 @@ def test_build_llama_server_launch_spec_normalizes_string_profile(monkeypatch, t
         role=llama_runtime.LlamaServerRole.OCR,
         binary_path=tmp_path / "llama-server",
         models_dir=tmp_path,
-        overrides=llama_runtime.LlamaServerOverrides(profile="cpu"),
+        overrides=llama_runtime.LlamaServerOverrides(profile="cpu", ctx_size=3072),
     )
 
     assert spec.profile is llama_runtime.LlamaServerProfile.CPU
+    assert spec.ctx_size == 3072

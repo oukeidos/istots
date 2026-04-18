@@ -26,7 +26,12 @@ from istots.llama_runtime import (
     run_llama_server_launch_spec_doctor,
 )
 from istots.model_store import ensure_local_qwen_corrector_assets
-from istots.ocr import OCREngine, PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
+from istots.ocr import (
+    LOCAL_PADDLE_CTX_SIZE,
+    OCREngine,
+    PaddleOCRVLRuntimeOverrides,
+    Qwen35RuntimeOverrides,
+)
 from istots.pipeline import convert_sup_to_srt
 
 
@@ -86,6 +91,9 @@ def run_paddle_runtime_doctor(
     overrides: PaddleOCRVLRuntimeOverrides | None = None,
     startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
 ) -> DoctorSuiteResult:
+    normalized_overrides = overrides or PaddleOCRVLRuntimeOverrides()
+    if normalized_overrides.ctx_size is None:
+        normalized_overrides = replace(normalized_overrides, ctx_size=LOCAL_PADDLE_CTX_SIZE)
     checks = [
         _report_to_check(
             f"runtime:{role.value}",
@@ -95,7 +103,7 @@ def run_paddle_runtime_doctor(
                 min_pixels=min_pixels,
                 explicit_binary_path=explicit_binary_path,
                 host=host,
-                overrides=overrides,
+                overrides=normalized_overrides,
                 startup_timeout_sec=startup_timeout_sec,
             ),
         )

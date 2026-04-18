@@ -21,7 +21,7 @@ from istots.model_store import (
     DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
     DEFAULT_QWEN_CORRECTOR_MODEL_ID,
 )
-from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
+from istots.ocr import LOCAL_PADDLE_CTX_SIZE, PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -235,6 +235,12 @@ def _add_convert_arguments(parser: argparse.ArgumentParser) -> None:
         help="PaddleOCR-VL llama-server startup timeout in seconds",
     )
     parser.add_argument("--startup-timeout-sec", dest="paddle_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--paddle-ctx-size",
+        type=int,
+        default=None,
+        help=f"Override PaddleOCR-VL llama-server context size (default policy: {LOCAL_PADDLE_CTX_SIZE})",
+    )
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -507,6 +513,12 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         help="PaddleOCR-VL llama-server startup timeout in seconds for smoke validation",
     )
     parser.add_argument("--startup-timeout-sec", dest="paddle_startup_timeout_sec", type=float, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--paddle-ctx-size",
+        type=int,
+        default=None,
+        help=f"Override PaddleOCR-VL llama-server context size for smoke validation (default policy: {LOCAL_PADDLE_CTX_SIZE})",
+    )
     parser.add_argument(
         "--quiet",
         action="store_true",
@@ -963,6 +975,12 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         help="PaddleOCR-VL llama-server startup timeout for structured doctor runs.",
     )
     parser.add_argument(
+        "--paddle-ctx-size",
+        type=int,
+        default=None,
+        help=f"Override PaddleOCR-VL llama-server context size for structured doctor runs (default policy: {LOCAL_PADDLE_CTX_SIZE}).",
+    )
+    parser.add_argument(
         "--corrector-model-path",
         type=Path,
         default=None,
@@ -1259,6 +1277,7 @@ def _build_doctor_paddle_runtime_overrides(args: argparse.Namespace) -> PaddleOC
         gpu_layers=args.paddle_gpu_layers,
         no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
         startup_timeout_sec=args.paddle_startup_timeout_sec,
+        ctx_size=args.paddle_ctx_size,
     )
 
 
@@ -1423,6 +1442,7 @@ def _has_paddle_runtime_override_request(args: argparse.Namespace) -> bool:
             args.paddle_gpu_layers is not None,
             args.paddle_no_mmproj_offload,
             args.paddle_startup_timeout_sec != 120.0,
+            args.paddle_ctx_size is not None,
         )
     )
 
@@ -1485,6 +1505,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         paddle_gpu_layers=args.paddle_gpu_layers,
         paddle_no_mmproj_offload=args.paddle_no_mmproj_offload,
         paddle_startup_timeout_sec=args.paddle_startup_timeout_sec,
+        paddle_ctx_size=args.paddle_ctx_size,
         quiet=args.quiet,
         furigana_mask=args.furigana_mask,
         detector_output=detector_output,
@@ -1727,6 +1748,7 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
         gpu_layers=args.paddle_gpu_layers,
         no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
         startup_timeout_sec=args.paddle_startup_timeout_sec,
+        ctx_size=args.paddle_ctx_size,
     )
 
     try:

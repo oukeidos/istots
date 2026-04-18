@@ -2,6 +2,8 @@
 
 from .factory import create_ocr_backend
 from .types import (
+    LOCAL_PADDLE_MAX_REQUESTS_PER_INSTANCE,
+    LOCAL_PADDLE_CTX_SIZE,
     OCRBackend,
     OCRBackendConfig,
     OCREngine,
@@ -12,6 +14,8 @@ from .types import (
 )
 
 __all__ = [
+    "LOCAL_PADDLE_MAX_REQUESTS_PER_INSTANCE",
+    "LOCAL_PADDLE_CTX_SIZE",
     "OCRBackend",
     "OCRBackendConfig",
     "OCREngine",

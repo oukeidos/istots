@@ -26,6 +26,7 @@ from .fallback_policy import (
     is_main_ocr_length_fallback_eligible,
 )
 from .hf_backend import normalize_ocr_text
+from .types import LOCAL_PADDLE_MAX_REQUESTS_PER_INSTANCE, resolve_llama_server_request_budget
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,9 @@ class _LlamaServerRecognitionResult:
     normalized_text: str
     finish_reason: str | None
     completion_tokens: int | None
+
+
+_REQUEST_BUDGET_ROLES = frozenset({"ocr", "ocr-fast", "detector"})
 
 
 @dataclass
@@ -56,6 +60,7 @@ class LlamaServerOCRBackend:
     no_mmproj_offload: bool | None = None
     startup_timeout_sec: float = 120.0
     prompt_text: str = MAIN_OCR_BASELINE_PROMPT
+    max_requests_per_instance: int | None = None
 
     def __post_init__(self) -> None:
         resolved_binary = detect_llama_server_path(self.binary_path)
@@ -129,18 +134,47 @@ class LlamaServerOCRBackend:
             joined = ", ".join(str(path) for path in missing_paths)
             raise RuntimeError(f"required llama-server runtime assets are missing: {joined}")
 
+        if normalized_role in _REQUEST_BUDGET_ROLES:
+            self.max_requests_per_instance = resolve_llama_server_request_budget(
+                self.max_requests_per_instance,
+                default=LOCAL_PADDLE_MAX_REQUESTS_PER_INSTANCE,
+            )
+        else:
+            self.max_requests_per_instance = None
+        self._request_count = 0
+        self._process = None
+        self._start_server()
+
+    def _start_server(self) -> None:
         self._process = start_llama_server(
             self._launch_spec,
             startup_timeout_sec=self.startup_timeout_sec,
         )
+        self._request_count = 0
+
+    def _restart_server(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is not None:
+            stop_llama_server(process)
+        self._process = None
+        self._start_server()
+
+    def _ensure_request_budget(self) -> None:
+        budget = self.max_requests_per_instance
+        if budget is None:
+            return
+        if self._request_count >= budget:
+            self._restart_server()
 
     def _recognize_once(self, image: Image.Image, *, prompt_text: str) -> _LlamaServerRecognitionResult:
+        self._ensure_request_budget()
         response: LlamaServerOCRResponse = request_llama_server_ocr_response(
             self._launch_spec,
             image,
             max_new_tokens=self.max_new_tokens,
             prompt_text=prompt_text,
         )
+        self._request_count += 1
         return _LlamaServerRecognitionResult(
             normalized_text=normalize_ocr_text(response.text),
             finish_reason=response.finish_reason,

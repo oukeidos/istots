@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import os
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
@@ -11,6 +12,10 @@ from PIL import Image
 class OCREngine(StrEnum):
     HF = "hf"
     LLAMA_SERVER = "llama-server"
+
+
+LOCAL_PADDLE_CTX_SIZE = 2048
+LOCAL_PADDLE_MAX_REQUESTS_PER_INSTANCE = 200
 
 
 def normalize_ocr_engine(engine: str | OCREngine) -> OCREngine:
@@ -53,6 +58,7 @@ class OCRBackendConfig:
     gpu_layers: int | None = None
     no_mmproj_offload: bool | None = None
     startup_timeout_sec: float = 120.0
+    max_requests_per_instance: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,7 @@ class PaddleOCRVLRuntimeOverrides:
     gpu_layers: int | None = None
     no_mmproj_offload: bool | None = None
     startup_timeout_sec: float = 120.0
+    ctx_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -107,3 +114,15 @@ class OCRBackend(Protocol):
 
     def close(self) -> None:
         ...
+
+
+def resolve_llama_server_request_budget(explicit: int | None, *, default: int | None = None) -> int | None:
+    if explicit is not None:
+        return explicit if explicit > 0 else None
+    raw = os.environ.get("ISTOTS_LLAMA_SERVER_MAX_REQUESTS_PER_INSTANCE")
+    if raw is not None:
+        value = int(raw)
+        return value if value > 0 else None
+    if default is None:
+        return None
+    return default if default > 0 else None

@@ -18,6 +18,7 @@ from istots.corrector import (
 )
 from istots.detector import HybridDetectorRecord
 from istots.ocr import (
+    LOCAL_PADDLE_CTX_SIZE,
     OCRBackendConfig,
     OCREngine,
     PaddleOCRVLRuntimeOverrides,
@@ -1777,6 +1778,120 @@ def test_convert_sup_to_srt_applies_local_conservative_correction(monkeypatch, t
     assert manifest[0]["corrector_prompt_style"] == "strict_ocr_v1"
     assert manifest[0]["conservative_merged_text"] == "AEC"
     assert manifest[0]["applied_op_count"] == 1
+
+
+def test_convert_sup_to_srt_applies_paddle_ctx_size_override(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    frame = SimpleNamespace(
+        raw_index=0,
+        window_id=0,
+        left=0,
+        top=0,
+        right=1,
+        bottom=1,
+        start=timedelta(milliseconds=0),
+        end=timedelta(milliseconds=10),
+        image=Image.new("RGB", (2, 2), "white"),
+    )
+    created_configs: list[OCRBackendConfig] = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            return [""]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](1)
+        return iter([frame])
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_configs.append(config)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        paddle_runtime_overrides=PaddleOCRVLRuntimeOverrides(profile="cpu", ctx_size=3072),
+        verbose=False,
+    )
+
+    assert [config.role for config in created_configs] == ["ocr"]
+    assert created_configs[0].ctx_size == 3072
+
+
+def test_convert_sup_to_srt_applies_default_paddle_ctx_size(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    output_srt = tmp_path / "output.srt"
+    input_sup.write_bytes(b"")
+
+    frame = SimpleNamespace(
+        raw_index=0,
+        window_id=0,
+        left=0,
+        top=0,
+        right=1,
+        bottom=1,
+        start=timedelta(milliseconds=0),
+        end=timedelta(milliseconds=10),
+        image=Image.new("RGB", (2, 2), "white"),
+    )
+    created_configs: list[OCRBackendConfig] = []
+
+    class FakeBackend:
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def recognize_batch(self, images):
+            return [""]
+
+        def clear_device_cache(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        if kwargs.get("on_total") is not None:
+            kwargs["on_total"](1)
+        return iter([frame])
+
+    def fake_create_backend(config: OCRBackendConfig):
+        created_configs.append(config)
+        return FakeBackend(config.role)
+
+    monkeypatch.setattr(pipeline, "resolve_hf_device", lambda preferred_device: "cpu")
+    monkeypatch.setattr(pipeline, "create_ocr_backend", fake_create_backend)
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "write_srt", lambda entries, path: path.write_text("", encoding="utf-8"))
+
+    pipeline.convert_sup_to_srt(
+        input_sup=input_sup,
+        output_srt=output_srt,
+        engine=OCREngine.LLAMA_SERVER,
+        paddle_runtime_overrides=PaddleOCRVLRuntimeOverrides(profile="cpu"),
+        verbose=False,
+    )
+
+    assert [config.role for config in created_configs] == ["ocr"]
+    assert created_configs[0].ctx_size == LOCAL_PADDLE_CTX_SIZE
 
 
 def test_convert_sup_to_srt_applies_qwen_mmproj_offload_override_when_requested(

@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.4] - 2026-04-18
+- Started the retained EXP-008 stack port by promoting PaddleOCR-VL llama-server defaults to `ctx-size=2048`, adding a Paddle-only request-budget restart policy of `200`, and preserving the separate local Qwen `ctx-size=4096` policy.
+
 ## [0.3.3] - 2026-04-16
 - Hardened `convert` and `smoke` artifact handling by rejecting path collisions, applying overwrite protection to sidecar outputs, and requiring explicit `--input-sup` for `smoke`.
 - Hardened local setup and runtime safety by restricting `setup --force` to managed cache targets and moving llama-server manager state into a user-private runtime root with advisory metadata only.

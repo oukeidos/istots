@@ -31,6 +31,7 @@ def create_ocr_backend(config: OCRBackendConfig) -> OCRBackend:
         gpu_layers=config.gpu_layers,
         no_mmproj_offload=config.no_mmproj_offload,
         startup_timeout_sec=config.startup_timeout_sec,
+        max_requests_per_instance=config.max_requests_per_instance,
     )
     if engine is OCREngine.HF:
         return _create_hf_backend(normalized)
@@ -77,4 +78,5 @@ def _create_llama_server_backend(config: OCRBackendConfig) -> OCRBackend:
         gpu_layers=config.gpu_layers,
         no_mmproj_offload=config.no_mmproj_offload,
         startup_timeout_sec=config.startup_timeout_sec,
+        max_requests_per_instance=config.max_requests_per_instance,
     )
