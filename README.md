@@ -236,6 +236,21 @@ text workflow you care about.
 uv run istots input.sup output.srt --furigana-mask
 ```
 
+### Temporary OCR Image Files
+
+To keep RAM use lower, the default local OCR path may write temporary OCR image
+files to the OS temporary directory during conversion. These files are normal
+subtitle image crops, not the full source video. On a normal run, `istots`
+removes them when the workflow finishes. If the process is killed or the system
+crashes, they can remain in the temporary directory.
+
+If your local policy does not allow temporary OCR image files on disk, disable
+that path and keep the OCR images in memory instead:
+
+```bash
+uv run istots input.sup output.srt --no-temp-ocr-image-files
+```
+
 ## Validation and Support Tools
 
 `doctor` is structured around the actual product surfaces. `doctor runtime
@@ -342,6 +357,7 @@ environment last.
   - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
   - `--quiet`: Suppress progress logs.
   - `--furigana-mask`: Enable the pre-OCR furigana masking pass.
+  - `--no-temp-ocr-image-files`: Keep prepared OCR images only in memory instead of writing temporary OCR image files.
   - `--detector-output`: Write detector disagreements to a JSONL manifest.
   - `--detector-mode`: Choose the retained `default` or `wider` detector surface.
   - `--detector-family-addon`: Enable the dominant-family detector add-on.
@@ -409,6 +425,7 @@ environment last.
   - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
   - `--quiet`: Suppress progress logs.
   - `--furigana-mask`: Enable the pre-OCR furigana masking pass.
+  - `--no-temp-ocr-image-files`: Keep prepared OCR images only in memory instead of writing temporary OCR image files.
   - `--no-detector`: Skip detector manifest generation during smoke validation.
   - `--detector-mode`: Choose the retained `default` or `wider` detector surface.
   - `--detector-family-addon`: Enable the dominant-family detector add-on.
@@ -457,6 +474,7 @@ environment last.
   - `--paddle-gpu-layers`: Override PaddleOCR-VL GPU layer count.
   - `--paddle-no-mmproj-offload`: Disable mmproj offload for PaddleOCR-VL doctor runs.
   - `--paddle-startup-timeout-sec`: Set the PaddleOCR-VL startup timeout.
+  - `--no-temp-ocr-image-files`: Keep prepared OCR images only in memory instead of writing temporary OCR image files during `doctor workflow ...`.
   - `--corrector-model-path`: Point at an explicit local Qwen GGUF model.
   - `--corrector-mmproj-path`: Point at an explicit local Qwen mmproj.
   - `--qwen-profile`: Select the Qwen runtime profile.

@@ -94,6 +94,7 @@ Local execution may create or use:
 - input `SUP` files
 - generated `SRT` files
 - exported subtitle images
+- temporary OCR image files in the OS temporary directory
 - logs and temporary runtime data
 
 You are responsible for choosing safe storage locations, access controls, and
@@ -101,6 +102,13 @@ backup policies for that data.
 
 If the subtitle content is sensitive, private, or not yours to redistribute,
 handle the input and output files accordingly.
+
+On the default local OCR path, these temporary OCR image files are removed when
+the workflow finishes normally. If the process is killed or the system crashes,
+they can remain in the temporary directory. If your local policy does not allow
+that behavior, use:
+
+- `--no-temp-ocr-image-files`
 
 ## 7) Rights and Legal Compliance
 
