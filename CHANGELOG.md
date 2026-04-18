@@ -5,6 +5,7 @@
 - Ported the retained parser/pipeline memory seam by releasing parser predecode workers after frame collection, defaulting pre-OCR preparation to a subprocess path, and spilling prepared OCR images to temporary PNG files while keeping lightweight metadata rows in the parent process.
 - Exposed `--no-temp-ocr-image-files` on `convert`, `smoke`, and `doctor workflow`, keeping disk-backed prepared OCR images as the default retained path and adding focused CLI regression coverage for the opt-out wiring.
 - Documented the retained temporary OCR image file behavior in `README.md` and `DISCLAIMER.md`, including normal cleanup, residue risk on forced termination, and the `--no-temp-ocr-image-files` opt-out.
+- Verified the retained stack with the targeted pytest set at `141 passed` and a real `../test/sample.sup` smoke run that wrote `sample.smoke.srt` and `sample.detector.jsonl`.
 
 ## [0.3.3] - 2026-04-16
 - Hardened `convert` and `smoke` artifact handling by rejecting path collisions, applying overwrite protection to sidecar outputs, and requiring explicit `--input-sup` for `smoke`.
