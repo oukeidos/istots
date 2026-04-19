@@ -635,6 +635,57 @@ def test_run_smoke_requires_input_sup(capsys) -> None:
     assert "--input-sup is required for smoke" in captured.err
 
 
+def test_run_smoke_rejects_detector_mode_without_detector_or_corrector(capsys, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                "smoke",
+                "--input-sup",
+                str(sample_sup),
+                "--quiet",
+                "--no-detector",
+                "--detector-mode",
+                "wider",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "--detector-mode wider requires detector-enabled smoke validation" in captured.err
+    assert "--no-detector" in captured.err
+    assert "--ocr-mode default" in captured.err
+    assert "--corrector" in captured.err
+    assert "--detector-output" not in captured.err
+
+
+def test_run_smoke_rejects_detector_family_addon_without_detector_or_corrector(capsys, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                "smoke",
+                "--input-sup",
+                str(sample_sup),
+                "--quiet",
+                "--no-detector",
+                "--detector-family-addon",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    assert "--detector-family-addon requires detector-enabled smoke validation" in captured.err
+    assert "--no-detector" in captured.err
+    assert "--ocr-mode default" in captured.err
+    assert "--corrector" in captured.err
+    assert "--detector-output" not in captured.err
+
+
 def test_run_smoke_uses_explicit_sample_and_auto_detector(monkeypatch, tmp_path: Path) -> None:
     sample_sup = tmp_path / "sample.sup"
     sample_sup.write_bytes(b"PG")

@@ -1522,11 +1522,25 @@ def _remove_temp_artifact_dir(output_dir: Path, *, label: str) -> None:
         raise RuntimeError(f"failed to remove {label} temporary artifacts at {output_dir}: {exc}") from exc
 
 
+def _validate_smoke_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.detector_mode != "default" and args.no_detector and args.corrector == "off":
+        parser.error(
+            f"--detector-mode {args.detector_mode} requires detector-enabled smoke validation; "
+            "remove --no-detector, keep --ocr-mode default, or enable --corrector"
+        )
+    if args.detector_family_addon and args.no_detector and args.corrector == "off":
+        parser.error(
+            "--detector-family-addon requires detector-enabled smoke validation; "
+            "remove --no-detector, keep --ocr-mode default, or enable --corrector"
+        )
+
+
 def run_smoke(args: argparse.Namespace) -> int:
     parser = _build_smoke_parser()
 
     if args.input_sup is None:
         parser.error("--input-sup is required for smoke")
+    _validate_smoke_args(parser, args)
 
     is_auto_output_dir = args.output_dir is None
     if args.output_dir is not None:
