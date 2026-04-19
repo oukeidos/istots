@@ -1112,7 +1112,12 @@ def run(argv: Sequence[str] | None = None) -> int:
 def run_setup(args: argparse.Namespace) -> int:
     configure_logging(verbose=not args.quiet)
 
-    from istots.model_store import setup_default_runtime_assets
+    from istots.model_store import (
+        is_default_pinned_gguf_model,
+        is_default_pinned_hf_model,
+        is_default_pinned_qwen_bundle,
+        setup_default_runtime_assets,
+    )
 
     try:
         artifacts = setup_default_runtime_assets(
@@ -1134,24 +1139,44 @@ def run_setup(args: argparse.Namespace) -> int:
         return 1
 
     if not args.quiet:
-        logging.getLogger(__name__).info("HF fallback model downloaded to: %s", artifacts.hf_model_dir)
-        logging.getLogger(__name__).info("GGUF runtime assets downloaded to: %s", artifacts.gguf_model_dir)
-        logging.getLogger(__name__).info("GGUF model path: %s", artifacts.gguf_model_path)
-        logging.getLogger(__name__).info("GGUF base mmproj path: %s", artifacts.gguf_mmproj_path)
-        logging.getLogger(__name__).info(
+        logger = logging.getLogger(__name__)
+        if not is_default_pinned_hf_model(args.model_id):
+            logger.info(
+                "HF fallback setup uses custom values; revision pinning and artifact hash "
+                "verification remain user-managed for this bundle."
+            )
+        if not is_default_pinned_gguf_model(args.gguf_model_id):
+            logger.info(
+                "GGUF runtime setup uses custom values; revision pinning and artifact hash "
+                "verification remain user-managed for this bundle."
+            )
+        if args.with_qwen_corrector and not is_default_pinned_qwen_bundle(
+            model_id=args.qwen_corrector_model_id,
+            model_filename=args.qwen_corrector_model_filename,
+            mmproj_filename=args.qwen_corrector_mmproj_filename,
+        ):
+            logger.info(
+                "Qwen corrector setup uses custom values; revision pinning and artifact hash "
+                "verification remain user-managed for this bundle."
+            )
+        logger.info("HF fallback model downloaded to: %s", artifacts.hf_model_dir)
+        logger.info("GGUF runtime assets downloaded to: %s", artifacts.gguf_model_dir)
+        logger.info("GGUF model path: %s", artifacts.gguf_model_path)
+        logger.info("GGUF base mmproj path: %s", artifacts.gguf_mmproj_path)
+        logger.info(
             "GGUF derived mmproj path: %s",
             artifacts.gguf_mmproj_minpix32768_path,
         )
         if artifacts.qwen_corrector_dir is not None:
-            logging.getLogger(__name__).info(
+            logger.info(
                 "Qwen corrector assets downloaded to: %s",
                 artifacts.qwen_corrector_dir,
             )
-            logging.getLogger(__name__).info(
+            logger.info(
                 "Qwen corrector model path: %s",
                 artifacts.qwen_corrector_model_path,
             )
-            logging.getLogger(__name__).info(
+            logger.info(
                 "Qwen corrector mmproj path: %s",
                 artifacts.qwen_corrector_mmproj_path,
             )

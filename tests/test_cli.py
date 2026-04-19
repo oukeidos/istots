@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -201,6 +202,46 @@ def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Pat
     assert captured["qwen_corrector_model_id"] == "unsloth/Qwen3.5-35B-A3B-GGUF"
     assert captured["qwen_corrector_model_filename"] == "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
     assert captured["qwen_corrector_mmproj_filename"] == "mmproj-BF16.gguf"
+
+
+def test_run_setup_logs_custom_bundle_notice(monkeypatch, caplog, tmp_path: Path) -> None:
+    artifacts = SimpleNamespace(
+        hf_model_dir=tmp_path / "hf_model",
+        gguf_model_dir=tmp_path / "gguf_model",
+        gguf_model_path=tmp_path / "gguf_model" / "custom.gguf",
+        gguf_mmproj_path=tmp_path / "gguf_model" / "custom-mmproj.gguf",
+        gguf_mmproj_minpix32768_path=tmp_path / "gguf_model" / "custom-mmproj.minpix32768.gguf",
+        qwen_corrector_dir=tmp_path / "qwen_model",
+        qwen_corrector_model_path=tmp_path / "qwen_model" / "custom-qwen.gguf",
+        qwen_corrector_mmproj_path=tmp_path / "qwen_model" / "custom-qwen-mmproj.gguf",
+    )
+
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    monkeypatch.setattr(model_store, "setup_default_runtime_assets", lambda **kwargs: artifacts)
+    caplog.set_level(logging.INFO)
+
+    rc = cli.run(
+        [
+            "setup",
+            "--model-id",
+            "custom/hf",
+            "--gguf-model-id",
+            "custom/gguf",
+            "--with-qwen-corrector",
+            "--qwen-corrector-model-id",
+            "custom/qwen",
+            "--qwen-corrector-model-filename",
+            "custom-qwen.gguf",
+            "--qwen-corrector-mmproj-filename",
+            "custom-qwen-mmproj.gguf",
+        ]
+    )
+
+    assert rc == 0
+    messages = [record.message for record in caplog.records]
+    assert any("HF fallback setup uses custom values" in message for message in messages)
+    assert any("GGUF runtime setup uses custom values" in message for message in messages)
+    assert any("Qwen corrector setup uses custom values" in message for message in messages)
 
 
 def test_run_setup_rejects_existing_local_model_id(tmp_path: Path) -> None:

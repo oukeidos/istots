@@ -49,7 +49,9 @@ This installs the core Python dependencies and prepares the default local
 runtime assets. The setup command downloads the retained PaddleOCR-VL GGUF
 model, the base mmproj, the derived `min_pixels=32768` mmproj used by the
 fast OCR branch, and the local files needed for the optional Hugging Face
-fallback.
+fallback. For the built-in default model bundles, `istots setup` pins explicit
+upstream revisions and verifies the downloaded artifacts against
+repository-maintained SHA-256 hashes.
 
 If you want to run actual OCR inference through `--engine hf`, install the HF
 runtime dependencies as well:
@@ -75,6 +77,10 @@ The current default local Qwen corrector assets are
 `unsloth/Qwen3.5-35B-A3B-GGUF`, with
 `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` as the model file and
 `mmproj-BF16.gguf` as the default mmproj file.
+
+If you override the setup model IDs or the default Qwen filenames, `istots`
+still allows that custom setup path, but revision pinning and artifact hash
+verification become user-managed for that bundle.
 
 Gemini API key setup is handled separately through `istots auth gemini`. A
 typical first step for the cloud corrector is:

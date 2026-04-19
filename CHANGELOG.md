@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.3.5] - 2026-04-19
+- Made default local setup reproducible by pinning the built-in model bundles to explicit upstream revisions and verifying their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.
+
 ## [0.3.4] - 2026-04-18
 - Reduced memory pressure and made local OCR runs easier to operate safely on constrained systems, while giving users clearer control over temporary OCR image handling.
 
