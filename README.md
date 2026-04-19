@@ -406,8 +406,8 @@ environment last.
   - `--models-dir`: Override the local model cache root.
   - `--force`: Re-download and re-materialize cached assets.
   - `--support-dir`: Override the local support cache root.
-  - `--gguf-py-base-url`: Override the source root for the pinned `gguf-py` snapshot.
-  - `--gguf-source-mode`: Choose how the pinned `gguf` implementation is sourced.
+  - `--gguf-py-base-url`: Override the source root for the optional pinned `gguf-py` snapshot fallback.
+  - `--gguf-source-mode`: Choose how the `gguf` implementation is sourced.
   - `--min-pixels`: Set the derived `mmproj` `min_pixels` value.
   - `--quiet`: Suppress progress logs.
 
@@ -519,8 +519,8 @@ environment last.
   - `--output`: Choose the derived `mmproj` output path.
   - `--min-pixels`: Set the derived `mmproj` `min_pixels` value.
   - `--support-dir`: Override the local support cache root.
-  - `--gguf-py-base-url`: Override the source root for the pinned `gguf-py` snapshot.
-  - `--gguf-source-mode`: Choose how the pinned `gguf` implementation is sourced.
+  - `--gguf-py-base-url`: Override the source root for the optional pinned `gguf-py` snapshot fallback.
+  - `--gguf-source-mode`: Choose how the `gguf` implementation is sourced.
   - `--force`: Overwrite an existing derived `mmproj`.
   - `--quiet`: Suppress progress logs.
 
@@ -528,7 +528,7 @@ environment last.
 
 The most relevant environment variables are `ISTOTS_LLAMA_SERVER_PATH` for the
 `llama-server` binary, `ISTOTS_MODELS_DIR` for the local model cache root,
-`ISTOTS_SUPPORT_DIR` for the pinned `gguf` support cache,
+`ISTOTS_SUPPORT_DIR` for the optional pinned `gguf` snapshot support cache,
 `ISTOTS_AUTH_CONFIG_PATH` for the local Gemini auth config file, and
 `GEMINI_API_KEY` for shell-based Gemini API key resolution.
 

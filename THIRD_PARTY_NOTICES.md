@@ -51,7 +51,7 @@ Important scope notes:
 | Primary OCR GGUF model and base mmproj | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF> | Review the upstream repository license at download time | `istots` downloads `PaddleOCR-VL-1.5.gguf` and `PaddleOCR-VL-1.5-mmproj.gguf` for the retained primary OCR path. |
 | Derived OCR mmproj | Locally materialized from the official Paddle GGUF base mmproj | Inherits the applicable terms of the upstream source artifact | `istots` creates a local derived `min_pixels=32768` mmproj from the official base mmproj; this is not downloaded as a separate upstream artifact. |
 | Optional local Qwen corrector model and mmproj | <https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF> | Review the upstream repository license at download time | When `istots setup --with-qwen-corrector` is used, the default files are `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` and `mmproj-BF16.gguf`. |
-| Pinned `gguf-py` snapshot fallback | <https://github.com/ggml-org/llama.cpp/tree/94ca829b6001019622c0f67fcd48e9ec6bd7dce8/gguf-py> | MIT | The project depends directly on `gguf` from this exact `llama.cpp` commit and can also auto-download the same pinned source snapshot into a local support cache. |
+| Optional pinned `gguf-py` snapshot fallback | <https://github.com/ggml-org/llama.cpp/tree/94ca829b6001019622c0f67fcd48e9ec6bd7dce8/gguf-py> | MIT | The project primarily uses the installed `gguf` package and can also auto-download this pinned fallback snapshot into a local support cache when `--gguf-source-mode auto-download` is selected or no installed package is available in `auto` mode. |
 
 ## Direct Python Dependencies
 
@@ -61,7 +61,7 @@ These packages are declared directly in `pyproject.toml`.
 
 | Package | Version | License | Notes |
 | --- | --- | --- | --- |
-| `gguf` | `0.18.0` | MIT | Declared as an exact git-commit-pinned dependency from `llama.cpp` `gguf-py`. Used for GGUF mmproj inspection and materialization. |
+| `gguf` | `0.18.0` | MIT | Declared as the adopted PyPI release package. Used for GGUF mmproj inspection and materialization. |
 | `huggingface-hub` | `1.4.1` | Apache | Used by `istots setup` to download HF and GGUF model artifacts. |
 | `keyring` | `25.7.0` | MIT | Used for Gemini API key storage. |
 | `numpy` | `2.4.2` | `BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0` | Used by the SUP parser and image-processing pipeline. |

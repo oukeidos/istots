@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "oukeidos" }]
 dependencies = [
-    "gguf @ git+https://github.com/ggml-org/llama.cpp@94ca829b6001019622c0f67fcd48e9ec6bd7dce8#subdirectory=gguf-py",
+    "gguf==0.18.0",
     "huggingface-hub",
     "keyring>=25.6.0",
     "numpy>=1.26.0",

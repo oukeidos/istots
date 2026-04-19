@@ -85,18 +85,8 @@ def ensure_known_good_gguf_py(
     return snapshot_dir
 
 
-def get_compatible_installed_gguf():
-    module = _import_gguf_if_available()
-    if module is None:
-        return None
-
-    root = Path(getattr(module, "__file__", "")).resolve().parent
-    for relative_path, expected_sha256 in GGUF_PY_FILES.items():
-        if relative_path == "LICENSE":
-            continue
-        if not _is_file_hash_match(root / relative_path.removeprefix("gguf/"), expected_sha256):
-            return None
-    return module
+def get_installed_gguf():
+    return _import_gguf_if_available()
 
 
 def load_known_good_gguf(
@@ -109,13 +99,13 @@ def load_known_good_gguf(
         raise RuntimeError(f"unsupported gguf source mode: {source_mode}")
 
     if source_mode in {"installed", "auto"}:
-        module = get_compatible_installed_gguf()
+        module = get_installed_gguf()
         if module is not None:
             return module
         if source_mode == "installed":
             raise RuntimeError(
-                "no compatible installed gguf package is available. "
-                "Install the exact pinned gguf snapshot or use --gguf-source-mode auto-download."
+                "no installed gguf package is available. "
+                "Install gguf or use --gguf-source-mode auto-download."
             )
 
     snapshot_dir = ensure_known_good_gguf_py(

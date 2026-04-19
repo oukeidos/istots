@@ -40,14 +40,38 @@ def test_ensure_known_good_gguf_py_downloads_from_local_source(monkeypatch, tmp_
     assert (snapshot_dir / gguf_support.MANIFEST_NAME).exists()
 
 
-def test_load_known_good_gguf_prefers_compatible_installed(monkeypatch) -> None:
+def test_load_known_good_gguf_prefers_installed_package(monkeypatch) -> None:
     sentinel = object()
-    monkeypatch.setattr(gguf_support, "get_compatible_installed_gguf", lambda: sentinel)
+    monkeypatch.setattr(gguf_support, "get_installed_gguf", lambda: sentinel)
     module = gguf_support.load_known_good_gguf(source_mode="installed")
     assert module is sentinel
 
 
 def test_load_known_good_gguf_installed_mode_rejects_missing(monkeypatch) -> None:
-    monkeypatch.setattr(gguf_support, "get_compatible_installed_gguf", lambda: None)
-    with pytest.raises(RuntimeError, match="no compatible installed gguf package"):
+    monkeypatch.setattr(gguf_support, "get_installed_gguf", lambda: None)
+    with pytest.raises(RuntimeError, match="no installed gguf package is available"):
         gguf_support.load_known_good_gguf(source_mode="installed")
+
+
+def test_load_known_good_gguf_auto_mode_falls_back_to_snapshot(monkeypatch) -> None:
+    sentinel = object()
+    calls: list[tuple[Path | None, str | None]] = []
+
+    monkeypatch.setattr(gguf_support, "get_installed_gguf", lambda: None)
+    monkeypatch.setattr(
+        gguf_support,
+        "ensure_known_good_gguf_py",
+        lambda support_dir=None, base_url=None, force=False: (
+            calls.append((support_dir, base_url)) or Path("/tmp/snapshot")
+        ),
+    )
+    monkeypatch.setattr(gguf_support, "import_known_good_gguf", lambda snapshot_dir: sentinel)
+
+    module = gguf_support.load_known_good_gguf(
+        source_mode="auto",
+        support_dir=Path("/tmp/support"),
+        base_url="https://example.invalid/gguf-py",
+    )
+
+    assert module is sentinel
+    assert calls == [(Path("/tmp/support"), "https://example.invalid/gguf-py")]

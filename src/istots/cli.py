@@ -767,7 +767,7 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help=(
-            "Local support cache root for pinned gguf-py snapshot fallback "
+            "Local support cache root for the optional pinned gguf-py snapshot fallback "
             "(default: ~/.cache/istots/support or ISTOTS_SUPPORT_DIR)."
         ),
     )
@@ -775,7 +775,7 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         "--gguf-py-base-url",
         default=None,
         help=(
-            "Override source root for the pinned gguf-py snapshot fallback. "
+            "Override source root for the optional pinned gguf-py snapshot fallback. "
             "Accepts an exact raw URL root or a local directory for offline setup."
         ),
     )
@@ -784,8 +784,9 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("auto-download", "installed", "auto"),
         default="auto",
         help=(
-            "How setup should source the known-good gguf implementation while "
-            "materializing the derived mmproj: auto (default), installed, or auto-download."
+            "How setup should source the gguf implementation while "
+            "materializing the derived mmproj: auto (default: installed first, "
+            "then pinned snapshot fallback), installed, or auto-download."
         ),
     )
     parser.add_argument(
@@ -857,7 +858,7 @@ def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help=(
-            "Local support cache root for pinned gguf-py snapshot "
+            "Local support cache root for the optional pinned gguf-py snapshot "
             "(default: ~/.cache/istots/support or ISTOTS_SUPPORT_DIR)."
         ),
     )
@@ -865,7 +866,7 @@ def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
         "--gguf-py-base-url",
         default=None,
         help=(
-            "Override source root for the pinned gguf-py snapshot. "
+            "Override source root for the optional pinned gguf-py snapshot fallback. "
             "Accepts an exact raw URL root or a local directory for offline setup."
         ),
     )
@@ -874,8 +875,8 @@ def _add_materialize_mmproj_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("auto-download", "installed", "auto"),
         default="auto",
         help=(
-            "How to source the known-good gguf implementation: "
-            "auto (default: installed first, then exact pinned auto-download fallback), "
+            "How to source the gguf implementation: "
+            "auto (default: installed first, then pinned auto-download fallback), "
             "installed, or auto-download."
         ),
     )
