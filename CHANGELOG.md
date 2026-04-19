@@ -7,6 +7,7 @@
 - Removed auto-created `smoke` and `doctor workflow` temporary artifact directories after successful runs, while keeping failed runs and explicit smoke output directories available for inspection.
 - Aligned the root CLI `smoke` help text with the current explicit `--input-sup` requirement so the top-level help no longer advertises a bundled sample default.
 - Rejected invalid detector-related `smoke` flag combinations with smoke-specific errors so wrapper validation no longer leaks the hidden convert-only `--detector-output` flag.
+- Clarified the README onboarding flow so `uv sync` remains the dependency-install step and `istots setup` is described as runtime-asset provisioning only.
 
 ## [0.3.4] - 2026-04-18
 - Reduced memory pressure, improved safety for local OCR runs on constrained systems, and gave users clearer control over temporary OCR image handling.

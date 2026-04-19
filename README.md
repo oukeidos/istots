@@ -45,13 +45,13 @@ Then prepare the default local runtime assets:
 uv run istots setup
 ```
 
-This installs the core Python dependencies and prepares the default local
-runtime assets. The setup command downloads the retained PaddleOCR-VL GGUF
-model, the base mmproj, the derived `min_pixels=32768` mmproj used by the
-fast OCR branch, and the local files needed for the optional Hugging Face
-fallback. For the built-in default model bundles, `istots setup` pins explicit
-upstream revisions and verifies the downloaded artifacts against
-repository-maintained SHA-256 hashes.
+This prepares the default local runtime assets after `uv sync` has installed
+the core Python dependencies. The setup command downloads the retained
+PaddleOCR-VL GGUF model, the base mmproj, the derived `min_pixels=32768`
+mmproj used by the fast OCR branch, and the local files needed for the
+optional Hugging Face fallback. For the built-in default model bundles,
+`istots setup` pins explicit upstream revisions and verifies the downloaded
+artifacts against repository-maintained SHA-256 hashes.
 
 If you want to run actual OCR inference through `--engine hf`, install the HF
 runtime dependencies as well:
