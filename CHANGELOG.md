@@ -1,17 +1,17 @@
 # Changelog
 
 ## [0.3.5] - 2026-04-19
-- Made default local setup reproducible by pinning the built-in model bundles to explicit upstream revisions and verifying their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.
+- Pinned the built-in setup model bundles to explicit upstream revisions and verified their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.
 
 ## [0.3.4] - 2026-04-18
-- Reduced memory pressure and made local OCR runs easier to operate safely on constrained systems, while giving users clearer control over temporary OCR image handling.
+- Reduced memory pressure, improved safety for local OCR runs on constrained systems, and gave users clearer control over temporary OCR image handling.
 
 ## [0.3.3] - 2026-04-16
-- Made `convert` and `smoke` safer to run by blocking avoidable output mistakes and requiring more explicit smoke inputs.
-- Made local setup and runtime management safer so routine maintenance is less likely to touch files or processes outside the intended workspace.
-- Made Paddle runtime diagnosis easier to trust by ensuring doctor checks return structured results instead of crashing mid-report.
-- Made generated outputs and local cache state more resilient so interrupted writes are less likely to leave broken files behind.
-- Made Gemini correction runs more usable in practice by improving throughput and keeping conversions moving when the API is slow or unstable.
+- Blocked avoidable output mistakes in `convert` and `smoke`, and required more explicit smoke inputs.
+- Hardened local setup and runtime management so routine maintenance is less likely to touch files or processes outside the intended workspace.
+- Fixed Paddle runtime diagnosis so doctor checks return structured results instead of crashing mid-report.
+- Hardened generated outputs and local cache state so interrupted writes are less likely to leave broken files behind.
+- Improved Gemini correction throughput and kept conversions moving when the API is slow or unstable.
 
 ## [0.3.2] - 2026-04-14
 - Reduced repeated OCR work across identical subtitle images so conversions can finish with less wasted compute.
@@ -23,7 +23,7 @@
 
 ## [0.3.0] - 2026-04-13
 - Shifted the product toward a stronger local OCR workflow so higher-quality conversion is available by default, with fallback kept as an explicit backup path.
-- Made the required local OCR assets easier to prepare so users can reach a working retained runtime with less manual setup work.
+- Simplified local OCR asset preparation so users can reach a working retained runtime with less manual setup work.
 - Added faster review and correction paths so users can balance speed, disagreement checking, and conservative cleanup based on subtitle quality needs.
 - Added setup and validation tools so users can confirm the environment is ready before trusting full conversion runs.
 
