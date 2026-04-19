@@ -22,6 +22,28 @@ def test_report_to_check_accepts_string_profile() -> None:
     }
 
 
+def test_report_to_check_exposes_bind_and_connect_hosts(tmp_path: Path) -> None:
+    report = llama_runtime.LlamaServerDoctorReport(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        launch_spec=llama_runtime.LlamaServerLaunchSpec(
+            role=llama_runtime.LlamaServerRole.OCR,
+            profile=llama_runtime.LlamaServerProfile.AUTO,
+            binary_path=tmp_path / "llama-server",
+            model_path=tmp_path / "model.gguf",
+            mmproj_path=tmp_path / "mmproj.gguf",
+            host="0.0.0.0",
+            port=18080,
+        ),
+        issues=tuple(),
+    )
+
+    check = doctor._report_to_check("runtime:ocr", report)  # noqa: SLF001
+
+    assert dict(check.details)["bind_host"] == "0.0.0.0"
+    assert dict(check.details)["connect_host"] == "127.0.0.1"
+
+
 def test_run_llama_server_doctor_normalizes_string_profile_on_missing_binary(monkeypatch) -> None:
     monkeypatch.setattr(llama_runtime, "detect_llama_server_path", lambda explicit=None: None)
 

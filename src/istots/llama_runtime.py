@@ -90,6 +90,7 @@ class LlamaServerLaunchSpec:
     mmproj_path: Path
     host: str
     port: int
+    connect_host: str | None = None
     threads: int | None = None
     threads_batch: int | None = None
     ctx_size: int | None = None
@@ -99,6 +100,10 @@ class LlamaServerLaunchSpec:
     gpu_layers: int | None = None
     no_mmproj_offload: bool = False
     prompt_text: str = "OCR:"
+
+    def __post_init__(self) -> None:
+        if self.connect_host is None:
+            object.__setattr__(self, "connect_host", derive_llama_server_connect_host(self.host))
 
 
 @dataclass(frozen=True)
@@ -128,7 +133,8 @@ class LlamaServerManagerState:
     binary_path: str
     model_path: str
     mmproj_path: str
-    host: str
+    bind_host: str
+    connect_host: str
     port: int
     role: str
 
@@ -385,6 +391,7 @@ def _load_llama_server_manager_state() -> LlamaServerManagerState | None:
     payload = _load_manager_json(path)
     if payload is None:
         return None
+    bind_host = str(payload.get("bind_host", payload.get("host", DEFAULT_LLAMA_SERVER_HOST)))
     return LlamaServerManagerState(
         instance_id=str(payload.get("instance_id", "")),
         created_at=float(payload.get("created_at", 0.0)),
@@ -392,7 +399,8 @@ def _load_llama_server_manager_state() -> LlamaServerManagerState | None:
         binary_path=str(payload["binary_path"]),
         model_path=str(payload["model_path"]),
         mmproj_path=str(payload["mmproj_path"]),
-        host=str(payload["host"]),
+        bind_host=bind_host,
+        connect_host=str(payload.get("connect_host", derive_llama_server_connect_host(bind_host))),
         port=int(payload["port"]),
         role=str(payload["role"]),
     )
@@ -412,7 +420,8 @@ def _write_llama_server_manager_state(
         "binary_path": str(spec.binary_path),
         "model_path": str(spec.model_path),
         "mmproj_path": str(spec.mmproj_path),
-        "host": spec.host,
+        "bind_host": spec.host,
+        "connect_host": spec.connect_host,
         "port": spec.port,
         "role": spec.role.value,
     }
@@ -489,6 +498,15 @@ def resolve_llama_server_role_assets(
         "The corrector runtime assets are not provisioned by core setup yet. "
         "Run doctor for OCR-oriented roles until correction provisioning is implemented."
     )
+
+
+def derive_llama_server_connect_host(bind_host: str) -> str:
+    normalized = bind_host.strip()
+    if normalized in {"", "0.0.0.0"}:
+        return DEFAULT_LLAMA_SERVER_HOST
+    if normalized in {"::", "[::]"}:
+        return "::1"
+    return bind_host
 
 
 def build_llama_server_launch_spec(
@@ -657,7 +675,7 @@ def start_llama_server(
         )
         _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS[process.pid] = manager_lock
         wait_until_ready(
-            spec.host,
+            spec.connect_host,
             spec.port,
             timeout_sec=startup_timeout_sec,
             process=process,
@@ -714,7 +732,7 @@ def request_llama_server_ocr_response(
     max_new_tokens: int,
     prompt_text: str = "OCR:",
 ) -> LlamaServerOCRResponse:
-    url = f"http://{spec.host}:{spec.port}/v1/chat/completions"
+    url = f"http://{spec.connect_host}:{spec.port}/v1/chat/completions"
     body: dict[str, Any] = {
         "model": "gpt-3.5-turbo",
         "max_tokens": max_new_tokens,

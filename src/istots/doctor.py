@@ -64,7 +64,8 @@ def _report_to_check(name: str, report: LlamaServerDoctorReport) -> DoctorCheckR
                 ("binary", str(report.launch_spec.binary_path)),
                 ("model", str(report.launch_spec.model_path)),
                 ("mmproj", str(report.launch_spec.mmproj_path)),
-                ("host", report.launch_spec.host),
+                ("bind_host", report.launch_spec.host),
+                ("connect_host", report.launch_spec.connect_host),
                 ("port", str(report.launch_spec.port)),
             ]
         )

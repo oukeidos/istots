@@ -31,6 +31,30 @@ def test_build_llama_server_command_uses_auto_profile_defaults() -> None:
     ]
 
 
+def test_llama_server_launch_spec_derives_loopback_connect_host_for_wildcard_bind() -> None:
+    ipv4_spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="0.0.0.0",
+        port=18080,
+    )
+    ipv6_spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="::",
+        port=18080,
+    )
+
+    assert ipv4_spec.connect_host == "127.0.0.1"
+    assert ipv6_spec.connect_host == "::1"
+
+
 def test_build_llama_server_command_applies_cpu_profile_and_overrides() -> None:
     spec = llama_runtime.LlamaServerLaunchSpec(
         role=llama_runtime.LlamaServerRole.OCR,
@@ -309,7 +333,46 @@ def test_start_llama_server_reclaims_stale_dead_owner_lock_before_launch(
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         assert payload["pid"] == 9876
         assert payload["model_path"] == "/tmp/model.gguf"
+        assert payload["bind_host"] == "127.0.0.1"
+        assert payload["connect_host"] == "127.0.0.1"
         assert payload["instance_id"] != "stale-owner"
+    finally:
+        llama_runtime.stop_llama_server(process)
+
+
+def test_start_llama_server_waits_on_connect_host(monkeypatch, tmp_path: Path) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="0.0.0.0",
+        port=18080,
+    )
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
+    monkeypatch.setattr(llama_runtime, "build_llama_server_command", lambda spec: ["llama-server"])
+    monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
+    monkeypatch.setattr(
+        llama_runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakePopen(pid=1234),
+    )
+
+    waited_on: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        llama_runtime,
+        "wait_until_ready",
+        lambda host, port, timeout_sec, process=None: waited_on.append((host, port)),
+    )
+
+    process = llama_runtime.start_llama_server(spec, startup_timeout_sec=1.0)
+    try:
+        assert waited_on == [("127.0.0.1", 18080)]
     finally:
         llama_runtime.stop_llama_server(process)
 
@@ -355,6 +418,33 @@ def test_stop_llama_server_clears_manager_state(monkeypatch, tmp_path: Path) -> 
     assert state_path.exists() is False
     assert lock_path.exists() is False
     assert llama_runtime._ACTIVE_LLAMA_SERVER_MANAGER_LOCKS == {}
+
+
+def test_load_llama_server_manager_state_accepts_legacy_host(monkeypatch, tmp_path: Path) -> None:
+    state_path = tmp_path / "llama-state.json"
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    state_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "legacy",
+                "created_at": 10.0,
+                "pid": 4321,
+                "binary_path": "/tmp/llama-server",
+                "model_path": "/tmp/model.gguf",
+                "mmproj_path": "/tmp/mmproj.gguf",
+                "host": "0.0.0.0",
+                "port": 18080,
+                "role": "ocr",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    state = llama_runtime._load_llama_server_manager_state()
+
+    assert state is not None
+    assert state.bind_host == "0.0.0.0"
+    assert state.connect_host == "127.0.0.1"
 
 
 def test_start_llama_server_rejects_occupied_reserved_ports(monkeypatch, tmp_path: Path) -> None:
@@ -416,3 +506,49 @@ def test_manager_lock_and_state_use_private_permissions(monkeypatch, tmp_path: P
     finally:
         llama_runtime._clear_llama_server_manager_state(instance_id=lock.owner.instance_id)
         llama_runtime._release_llama_server_manager_lock(lock)
+
+
+def test_request_llama_server_ocr_response_uses_connect_host(monkeypatch) -> None:
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="0.0.0.0",
+        port=18080,
+    )
+
+    captured_urls: list[str] = []
+
+    class _FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "_FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1},
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout=60):
+        captured_urls.append(request.full_url)
+        return _FakeResponse()
+
+    monkeypatch.setattr(llama_runtime.urllib.request, "urlopen", fake_urlopen)
+
+    response = llama_runtime.request_llama_server_ocr_response(
+        spec,
+        llama_runtime.Image.new("RGB", (1, 1), "white"),
+        max_new_tokens=8,
+    )
+
+    assert captured_urls == ["http://127.0.0.1:18080/v1/chat/completions"]
+    assert response.text == "ok"
