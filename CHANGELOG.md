@@ -8,7 +8,7 @@
 - Aligned the root CLI `smoke` help text with the current explicit `--input-sup` requirement so the top-level help no longer advertises a bundled sample default.
 - Rejected invalid detector-related `smoke` flag combinations with smoke-specific errors so wrapper validation no longer leaks the hidden convert-only `--detector-output` flag.
 - Clarified the README onboarding flow so `uv sync` remains the dependency-install step and `istots setup` is described as runtime-asset provisioning only.
-- Restored the optional local image comparison GUI as a tracked repository surface so its import path, tests, and third-party notices now refer to checked-in files instead of ignored local-only artifacts.
+- Consolidated the repository's helper utilities under `scripts/`, including the image comparison GUI and batch export tools, so Git now tracks them consistently.
 
 ## [0.3.4] - 2026-04-18
 - Reduced memory pressure, improved safety for local OCR runs on constrained systems, and gave users clearer control over temporary OCR image handling.

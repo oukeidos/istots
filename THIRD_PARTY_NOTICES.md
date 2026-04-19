@@ -14,7 +14,7 @@ This notice file was prepared from:
   - `src/istots/gguf_support.py`
   - `src/istots/llama_runtime.py`
   - `src/istots/corrector.py`
-  - `tools/image_compare_gui/compare_images.py`
+  - `scripts/image_compare_gui/compare_images.py`
 
 Important scope notes:
 
@@ -27,7 +27,7 @@ Important scope notes:
   vendored in this repository.
 - Gemini correction uses the remote Google Generative Language API over HTTP.
   No Google Gemini Python SDK is bundled here.
-- The optional local image comparison GUI in `tools/image_compare_gui/` uses
+- The optional local image comparison GUI in `scripts/image_compare_gui/` uses
   Python's standard-library `tkinter` module and therefore depends on the host
   Python runtime's Tcl/Tk packaging.
 
@@ -40,7 +40,7 @@ Important scope notes:
 | Component | Source | License / Terms | Notes |
 | --- | --- | --- | --- |
 | `llama-server` runtime binary | User- or host-provided binary, typically from the `llama.cpp` project | Upstream `llama.cpp` terms and bundled notices apply to the binary actually installed on the host | `istots` probes `ISTOTS_LLAMA_SERVER_PATH`, `PATH`, and a fallback local path. The binary is required for the primary OCR path, detector path, and local Qwen corrector path. |
-| `tkinter` / Tcl-Tk runtime | Host Python distribution | Tcl/Tk license terms as bundled with the host Python distribution | Used only by the optional local image-comparison GUI in `tools/image_compare_gui/compare_images.py`. |
+| `tkinter` / Tcl-Tk runtime | Host Python distribution | Tcl/Tk license terms as bundled with the host Python distribution | Used only by the optional local image-comparison GUI in `scripts/image_compare_gui/compare_images.py`. |
 | Google Generative Language API (`Gemini`) | Remote Google service | Google API and model terms apply | Used only when `--corrector gemini` is selected. No model weights or SDK are redistributed by this repository. |
 
 ## External Model and Artifact Sources

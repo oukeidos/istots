@@ -5,7 +5,7 @@ Simple multi-panel GUI for visually comparing aligned images from separate direc
 ## Usage
 
 ```bash
-python tools/image_compare_gui/compare_images.py \
+python scripts/image_compare_gui/compare_images.py \
   --panel original=out/original \
   --panel masked=out/masked
 ```
@@ -13,7 +13,7 @@ python tools/image_compare_gui/compare_images.py \
 Three-way comparison also works:
 
 ```bash
-python tools/image_compare_gui/compare_images.py \
+python scripts/image_compare_gui/compare_images.py \
   --panel original=out/original \
   --panel overlay=out/overlay \
   --panel final=out/final
@@ -34,7 +34,7 @@ When the manifest includes `frame_index`, `window_id`, `bbox`, and time fields, 
 - keeps all segments from a masked frame when `Masking Only` is enabled
 
 ```bash
-python tools/image_compare_gui/compare_images.py \
+python scripts/image_compare_gui/compare_images.py \
   --panel original=out_debug/original \
   --panel lines=out_debug/lines \
   --panel masked=out_debug/masked \

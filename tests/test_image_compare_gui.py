@@ -10,7 +10,7 @@ def _load_module():
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
     try:
-        from tools.image_compare_gui import compare_images
+        from scripts.image_compare_gui import compare_images
     finally:
         sys.path.pop(0)
     return compare_images
