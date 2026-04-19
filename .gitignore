@@ -23,7 +23,11 @@ out_images/
 
 # Local utility folders
 scripts/
-tools/
+tools/*
+!tools/image_compare_gui/
+tools/image_compare_gui/*
+!tools/image_compare_gui/README.md
+!tools/image_compare_gui/compare_images.py
 run_tests.sh
 
 # Local planning notes
