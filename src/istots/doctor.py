@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -344,6 +345,15 @@ def run_workflow_doctor(
     return DoctorSuiteResult(category="workflow", target=normalized, checks=tuple(checks))
 
 
+def _remove_temp_artifact_dir(output_dir: Path, *, label: str) -> None:
+    try:
+        shutil.rmtree(output_dir)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"failed to remove {label} temporary artifacts at {output_dir}: {exc}") from exc
+
+
 def _run_workflow_smoke_check(
     *,
     input_sup: Path,
@@ -384,11 +394,16 @@ def _run_workflow_smoke_check(
         return DoctorCheckResult(
             name="workflow:smoke",
             ok=False,
-            issues=(LlamaServerDoctorIssue(code="workflow_smoke_failed", message=str(exc)),),
+            issues=(
+                LlamaServerDoctorIssue(
+                    code="workflow_smoke_failed",
+                    message=f"{exc}; retained temporary workflow artifacts at {output_dir}",
+                ),
+            ),
+            details=(("artifact_dir", str(output_dir)),),
         )
 
     details = [
-        ("output_srt", str(result.output_srt)),
         ("processed_count", str(result.processed_count)),
         ("written_count", str(result.written_count)),
         ("detector_record_count", str(result.detector_record_count)),
@@ -396,6 +411,16 @@ def _run_workflow_smoke_check(
     if corrector_config is not None:
         details.append(("correction_record_count", str(result.correction_record_count)))
         details.append(("correction_applied_count", str(result.correction_applied_count)))
+    try:
+        _remove_temp_artifact_dir(output_dir, label="workflow")
+    except RuntimeError as exc:
+        return DoctorCheckResult(
+            name="workflow:smoke",
+            ok=False,
+            issues=(LlamaServerDoctorIssue(code="workflow_cleanup_failed", message=str(exc)),),
+            details=tuple([("artifact_dir", str(output_dir)), *details]),
+        )
+    details.append(("temp_artifacts", "cleaned"))
     return DoctorCheckResult(
         name="workflow:smoke",
         ok=True,

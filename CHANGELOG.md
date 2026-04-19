@@ -4,6 +4,7 @@
 - Pinned the built-in setup model bundles to explicit upstream revisions and verified their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.
 - Kept managed `llama-server` traffic on a dedicated internal request host so wildcard bind settings no longer force health checks and OCR requests onto the exposed bind address.
 - Switched the project to the release `gguf==0.18.0` package, accepted installed `gguf` packages directly for mmproj work, and kept the pinned snapshot only as an explicit fallback source.
+- Removed auto-created `smoke` and `doctor workflow` temporary artifact directories after successful runs, while keeping failed runs and explicit smoke output directories available for inspection.
 
 ## [0.3.4] - 2026-04-18
 - Reduced memory pressure, improved safety for local OCR runs on constrained systems, and gave users clearer control over temporary OCR image handling.

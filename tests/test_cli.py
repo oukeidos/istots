@@ -765,6 +765,82 @@ def test_run_smoke_auto_writes_corrector_manifest(monkeypatch, tmp_path: Path) -
     assert config.output_path == (output_dir / "sample.corrected.jsonl").resolve()
 
 
+def test_run_smoke_removes_auto_temp_output_dir_on_success(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    auto_output_dir = tmp_path / "auto-smoke"
+
+    monkeypatch.setattr(cli.tempfile, "mkdtemp", lambda prefix: str(auto_output_dir))
+
+    def fake_convert(**kwargs):
+        kwargs["output_srt"].write_text("1\n", encoding="utf-8")
+        kwargs["detector_output"].write_text("[]\n", encoding="utf-8")
+        return SimpleNamespace(
+            written_count=1,
+            output_srt=kwargs["output_srt"],
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=0,
+            correction_applied_count=0,
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert)
+
+    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--quiet"])
+
+    assert rc == 0
+    assert auto_output_dir.exists() is False
+
+
+def test_run_smoke_keeps_explicit_output_dir_on_success(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke"
+
+    def fake_convert(**kwargs):
+        kwargs["output_srt"].write_text("1\n", encoding="utf-8")
+        kwargs["detector_output"].write_text("[]\n", encoding="utf-8")
+        return SimpleNamespace(
+            written_count=1,
+            output_srt=kwargs["output_srt"],
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=0,
+            correction_applied_count=0,
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert)
+
+    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--output-dir", str(output_dir), "--quiet"])
+
+    assert rc == 0
+    assert output_dir.is_dir()
+    assert (output_dir / "sample.smoke.srt").read_text(encoding="utf-8") == "1\n"
+    assert (output_dir / "sample.detector.jsonl").read_text(encoding="utf-8") == "[]\n"
+
+
+def test_run_smoke_keeps_auto_temp_output_dir_on_failure(monkeypatch, tmp_path: Path) -> None:
+    sample_sup = tmp_path / "sample.sup"
+    sample_sup.write_bytes(b"PG")
+    auto_output_dir = tmp_path / "auto-smoke"
+
+    monkeypatch.setattr(cli.tempfile, "mkdtemp", lambda prefix: str(auto_output_dir))
+
+    def fake_convert(**kwargs):
+        kwargs["output_srt"].write_text("partial\n", encoding="utf-8")
+        kwargs["detector_output"].write_text("[]\n", encoding="utf-8")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert)
+
+    rc = cli.run(["smoke", "--input-sup", str(sample_sup), "--quiet"])
+
+    assert rc == 1
+    assert auto_output_dir.is_dir()
+    assert (auto_output_dir / "sample.smoke.srt").read_text(encoding="utf-8") == "partial\n"
+    assert (auto_output_dir / "sample.detector.jsonl").read_text(encoding="utf-8") == "[]\n"
+
+
 def test_run_convert_passes_llama_runtime_overrides(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     input_sup.write_bytes(b"PG")

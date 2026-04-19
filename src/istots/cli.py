@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -447,7 +448,10 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory for smoke artifacts (default: a temporary directory)",
+        help=(
+            "Directory for smoke artifacts. Without this flag, smoke uses a temporary "
+            "directory and removes it after a successful run."
+        ),
     )
     parser.add_argument(
         "--models-dir",
@@ -942,7 +946,10 @@ def _add_doctor_arguments(parser: argparse.ArgumentParser) -> None:
         "--input-sup",
         type=Path,
         default=None,
-        help="Input .sup path for `doctor workflow ...`. Required for workflow doctor runs.",
+        help=(
+            "Input .sup path for `doctor workflow ...`. Required for workflow doctor runs. "
+            "Workflow temp artifacts are removed on success and retained on failure."
+        ),
     )
     parser.add_argument(
         "--api-key-env",
@@ -1506,9 +1513,22 @@ def _has_qwen_runtime_override_request(args: argparse.Namespace) -> bool:
     )
 
 
+def _remove_temp_artifact_dir(output_dir: Path, *, label: str) -> None:
+    try:
+        shutil.rmtree(output_dir)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(f"failed to remove {label} temporary artifacts at {output_dir}: {exc}") from exc
+
+
 def run_smoke(args: argparse.Namespace) -> int:
     parser = _build_smoke_parser()
 
+    if args.input_sup is None:
+        parser.error("--input-sup is required for smoke")
+
+    is_auto_output_dir = args.output_dir is None
     if args.output_dir is not None:
         output_dir = args.output_dir.expanduser().resolve()
         if output_dir.exists() and not output_dir.is_dir():
@@ -1517,8 +1537,6 @@ def run_smoke(args: argparse.Namespace) -> int:
         output_dir = Path(tempfile.mkdtemp(prefix="istots-smoke-")).resolve()
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.input_sup is None:
-        parser.error("--input-sup is required for smoke")
     input_sup = args.input_sup.expanduser().resolve()
     output_srt = output_dir / f"{input_sup.stem}.smoke.srt"
     detector_output = None
@@ -1579,7 +1597,21 @@ def run_smoke(args: argparse.Namespace) -> int:
         srt_policy=args.srt_policy,
         force=args.force,
     )
-    return _run_convert_impl(convert_args, parser)
+    rc = _run_convert_impl(convert_args, parser)
+    if rc != 0:
+        if is_auto_output_dir:
+            logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", output_dir)
+        return rc
+    if not is_auto_output_dir:
+        return rc
+    try:
+        _remove_temp_artifact_dir(output_dir, label="smoke")
+    except RuntimeError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 1
+    if not args.quiet:
+        logging.getLogger(__name__).info("removed temporary smoke artifacts after success: %s", output_dir)
+    return 0
 
 
 def run_convert(args: argparse.Namespace) -> int:

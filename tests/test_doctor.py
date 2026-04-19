@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from istots import doctor, llama_runtime
 
@@ -70,3 +71,85 @@ def test_build_llama_server_launch_spec_normalizes_string_profile(monkeypatch, t
 
     assert spec.profile is llama_runtime.LlamaServerProfile.CPU
     assert spec.ctx_size == 3072
+
+
+def test_run_workflow_smoke_check_cleans_temp_artifacts_on_success(monkeypatch, tmp_path: Path) -> None:
+    output_dir = tmp_path / "doctor-workflow"
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        output_dir.mkdir()
+        return str(output_dir)
+
+    def fake_convert_sup_to_srt(**kwargs):
+        kwargs["output_srt"].write_text("1\n", encoding="utf-8")
+        kwargs["detector_output"].write_text("[]\n", encoding="utf-8")
+        return SimpleNamespace(
+            output_srt=kwargs["output_srt"],
+            processed_count=2,
+            written_count=2,
+            detector_record_count=0,
+            correction_record_count=0,
+            correction_applied_count=0,
+        )
+
+    monkeypatch.setattr(doctor.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(doctor, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    check = doctor._run_workflow_smoke_check(  # noqa: SLF001
+        input_sup=tmp_path / "input.sup",
+        models_dir=None,
+        detector_mode="default",
+        explicit_binary_path=None,
+        host="127.0.0.1",
+        min_pixels=32768,
+        paddle_overrides=doctor.PaddleOCRVLRuntimeOverrides(),
+        corrector_config=None,
+        use_temp_ocr_image_files=True,
+    )
+
+    assert check.ok is True
+    assert dict(check.details) == {
+        "processed_count": "2",
+        "written_count": "2",
+        "detector_record_count": "0",
+        "temp_artifacts": "cleaned",
+    }
+    assert output_dir.exists() is False
+
+
+def test_run_workflow_smoke_check_keeps_temp_artifacts_on_failure(monkeypatch, tmp_path: Path) -> None:
+    output_dir = tmp_path / "doctor-workflow"
+
+    def fake_mkdtemp(*, prefix: str) -> str:
+        output_dir.mkdir()
+        return str(output_dir)
+
+    def fake_convert_sup_to_srt(**kwargs):
+        kwargs["output_srt"].write_text("partial\n", encoding="utf-8")
+        kwargs["detector_output"].write_text("[]\n", encoding="utf-8")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(doctor.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(doctor, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    check = doctor._run_workflow_smoke_check(  # noqa: SLF001
+        input_sup=tmp_path / "input.sup",
+        models_dir=None,
+        detector_mode="default",
+        explicit_binary_path=None,
+        host="127.0.0.1",
+        min_pixels=32768,
+        paddle_overrides=doctor.PaddleOCRVLRuntimeOverrides(),
+        corrector_config=None,
+        use_temp_ocr_image_files=True,
+    )
+
+    assert check.ok is False
+    assert check.issues[0].code == "workflow_smoke_failed"
+    assert "retained temporary workflow artifacts" in check.issues[0].message
+    assert dict(check.details) == {
+        "artifact_dir": str(output_dir),
+    }
+    assert output_dir.is_dir()
+    assert (output_dir / "doctor.srt").read_text(encoding="utf-8") == "partial\n"
+    assert (output_dir / "doctor.detector.jsonl").read_text(encoding="utf-8") == "[]\n"

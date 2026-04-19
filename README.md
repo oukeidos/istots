@@ -283,6 +283,11 @@ uv run istots smoke --input-sup /path/to/input.sup --ocr-mode fast
 uv run istots smoke --input-sup /path/to/input.sup --corrector qwen-local
 ```
 
+By default, both `smoke` and `doctor workflow ...` use an internal temporary
+artifact directory and remove it after a successful run. If a run fails, the
+temporary directory is retained for inspection. If you pass `smoke --output-dir`,
+that directory is treated as user-managed and is left in place.
+
 Gemini API keys are managed through `auth gemini`. The recommended default is
 keyring-backed storage, because the key is kept out of shell history and out
 of project files. The simplest setup is:
@@ -417,7 +422,8 @@ environment last.
   - Run a quick validation workflow over the retained product surface.
 - Flags:
   - `--input-sup`: Required. Choose the SUP file used for smoke validation.
-  - `--output-dir`: Choose the directory for smoke artifacts.
+  - `--output-dir`: Choose the directory for smoke artifacts. Without this flag,
+    smoke uses a temporary directory and removes it after a successful run.
   - `--models-dir`: Override the local model cache root.
   - `--max-new-tokens`: Set the OCR token budget per image.
   - `--ocr-mode`: Choose the retained `default` or `fast` OCR path.
@@ -494,6 +500,10 @@ environment last.
   - `--qwen-reasoning`: Override Qwen reasoning mode.
   - `--qwen-startup-timeout-sec`: Set the Qwen startup timeout.
   - `--quiet`: Suppress progress logs.
+
+For `doctor workflow ...`, the command keeps its auto-created temporary
+artifacts only when the workflow check fails. Successful workflow doctor runs
+remove the temporary artifact directory after reporting the check result.
 
 ### `auth`
 
