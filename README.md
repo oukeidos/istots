@@ -46,18 +46,23 @@ uv run istots setup
 ```
 
 This prepares the default local runtime assets after `uv sync` has installed
-the core Python dependencies. The setup command downloads the retained
-PaddleOCR-VL GGUF model, the base mmproj, the derived `min_pixels=32768`
-mmproj used by the fast OCR branch, and the local files needed for the
-optional Hugging Face fallback. For the built-in default model bundles,
-`istots setup` pins explicit upstream revisions and verifies the downloaded
-artifacts against repository-maintained SHA-256 hashes.
+the core Python dependencies. The default setup command downloads the retained
+PaddleOCR-VL GGUF model, the base mmproj, and the derived `min_pixels=32768`
+mmproj used by the fast OCR branch. For the built-in bundles that `setup`
+provisions, `istots setup` pins explicit upstream revisions and verifies the
+downloaded artifacts against repository-maintained SHA-256 hashes.
 
 If you want to run actual OCR inference through `--engine hf`, install the HF
 runtime dependencies as well:
 
 ```bash
 uv sync --extra hf
+```
+
+Then provision the retained local HF fallback bundle explicitly:
+
+```bash
+uv run istots setup --with-hf-fallback
 ```
 
 The HF route does not depend on `llama.cpp` or `llama-server` for OCR
@@ -78,9 +83,10 @@ The current default local Qwen corrector assets are
 `Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf` as the model file and
 `mmproj-BF16.gguf` as the default mmproj file.
 
-If you override the setup model IDs or the default Qwen filenames, `istots`
-still allows that custom setup path, but revision pinning and artifact hash
-verification become user-managed for that bundle.
+If you override the HF fallback model id with `--with-hf-fallback --model-id`,
+the GGUF model id, or the default Qwen filenames, `istots` still allows that
+custom setup path, but revision pinning and artifact hash verification become
+user-managed for that bundle.
 
 Gemini API key setup is handled separately through `istots auth gemini`. A
 typical first step for the cloud corrector is:
@@ -400,9 +406,10 @@ environment last.
 ### `setup`
 
 - Purpose:
-  - Download and materialize local OCR and optional corrector assets.
+  - Download and materialize the primary local OCR assets, plus optional HF fallback and corrector assets.
 - Flags:
-  - `--model-id`: Choose the HF fallback model id to download.
+  - `--with-hf-fallback`: Also provision the retained HF fallback model bundle.
+  - `--model-id`: Choose the HF fallback model id to download when `--with-hf-fallback` is enabled.
   - `--gguf-model-id`: Choose the PaddleOCR-VL GGUF repository to download.
   - `--with-qwen-corrector`: Also provision the retained local Qwen corrector assets.
   - `--qwen-corrector-model-id`: Choose the Qwen corrector repository id.

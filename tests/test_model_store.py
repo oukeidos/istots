@@ -378,8 +378,10 @@ def test_ensure_local_qwen_corrector_assets_raises_when_missing(tmp_path: Path) 
         model_store.ensure_local_qwen_corrector_assets(models_dir=tmp_path)
 
 
-def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tmp_path: Path) -> None:
-    hf_dir = tmp_path / "hf_model"
+def test_setup_default_runtime_assets_downloads_and_materializes_without_hf_by_default(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     gguf_dir = tmp_path / "gguf_model"
     gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
     gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
@@ -388,7 +390,9 @@ def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tm
     monkeypatch.setattr(
         model_store,
         "download_model",
-        lambda model_id, models_dir=None, force=False: hf_dir,
+        lambda model_id, models_dir=None, force=False: pytest.fail(
+            "download_model should not run without `with_hf_fallback=True`"
+        ),
     )
     monkeypatch.setattr(
         model_store,
@@ -429,7 +433,7 @@ def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tm
         gguf_source_mode="auto",
     )
 
-    assert artifacts.hf_model_dir == hf_dir
+    assert artifacts.hf_model_dir is None
     assert artifacts.gguf_model_dir == gguf_dir
     assert artifacts.gguf_model_path == gguf_model_path
     assert artifacts.gguf_mmproj_path == gguf_mmproj_path
@@ -442,8 +446,55 @@ def test_setup_default_runtime_assets_downloads_and_materializes(monkeypatch, tm
     }
 
 
-def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkeypatch, tmp_path: Path) -> None:
+def test_setup_default_runtime_assets_optionally_downloads_hf_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     hf_dir = tmp_path / "hf_model"
+    gguf_dir = tmp_path / "gguf_model"
+    gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
+    gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
+    derived_path = gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf"
+    calls: dict[str, object] = {}
+
+    def fake_download_model(model_id, models_dir=None, force=False):
+        calls["download_model"] = {
+            "model_id": model_id,
+            "models_dir": models_dir,
+            "force": force,
+        }
+        return hf_dir
+
+    monkeypatch.setattr(model_store, "download_model", fake_download_model)
+    monkeypatch.setattr(
+        model_store,
+        "download_gguf_runtime_assets",
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False: (
+            gguf_dir,
+            gguf_model_path,
+            gguf_mmproj_path,
+        ),
+    )
+    monkeypatch.setattr(
+        "istots.llama_mmproj.materialize_mmproj",
+        lambda **kwargs: derived_path,
+    )
+
+    artifacts = model_store.setup_default_runtime_assets(
+        models_dir=tmp_path,
+        force=True,
+        with_hf_fallback=True,
+    )
+
+    assert artifacts.hf_model_dir == hf_dir
+    assert calls["download_model"] == {
+        "model_id": model_store.DEFAULT_MODEL_ID,
+        "models_dir": tmp_path,
+        "force": True,
+    }
+
+
+def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkeypatch, tmp_path: Path) -> None:
     gguf_dir = tmp_path / "gguf_model"
     gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
     gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
@@ -455,7 +506,9 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
     monkeypatch.setattr(
         model_store,
         "download_model",
-        lambda model_id, models_dir=None, force=False: hf_dir,
+        lambda model_id, models_dir=None, force=False: pytest.fail(
+            "download_model should not run without `with_hf_fallback=True`"
+        ),
     )
     monkeypatch.setattr(
         model_store,
@@ -509,3 +562,8 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
         "models_dir": tmp_path,
         "force": True,
     }
+
+
+def test_setup_default_runtime_assets_rejects_custom_hf_model_without_opt_in() -> None:
+    with pytest.raises(RuntimeError, match="require `with_hf_fallback=True`"):
+        model_store.setup_default_runtime_assets(hf_model_id="org/model")

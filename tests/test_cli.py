@@ -59,6 +59,7 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
     assert "--output-dir OUTPUT_DIR" in captured.out
     assert "--no-detector" in captured.out
     assert "--no-temp-ocr-image-files" in captured.out
+    assert "--with-hf-fallback" in captured.out
     assert "--force" in captured.out
     assert "{runtime,auth,workflow}" in captured.out
     assert "--input-sup INPUT_SUP" in captured.out
@@ -117,9 +118,9 @@ def test_run_routes_auth(monkeypatch) -> None:
     assert cli.run(["auth", "gemini", "status"]) == 29
 
 
-def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> None:
+def test_run_setup_downloads_primary_runtime_assets_by_default(monkeypatch, tmp_path: Path) -> None:
     artifacts = SimpleNamespace(
-        hf_model_dir=tmp_path / "hf_model",
+        hf_model_dir=None,
         gguf_model_dir=tmp_path / "gguf_model",
         gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
         gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
@@ -143,8 +144,6 @@ def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> 
     rc = cli.run(
         [
             "setup",
-            "--model-id",
-            "hf/model",
             "--gguf-model-id",
             "gguf/model",
             "--models-dir",
@@ -158,7 +157,8 @@ def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> 
     )
 
     assert rc == 0
-    assert captured["hf_model_id"] == "hf/model"
+    assert captured["with_hf_fallback"] is False
+    assert captured["hf_model_id"] == model_store.DEFAULT_MODEL_ID
     assert captured["gguf_model_id"] == "gguf/model"
     assert captured["with_qwen_corrector"] is False
     assert captured["models_dir"] == tmp_path
@@ -166,9 +166,43 @@ def test_run_setup_downloads_hf_and_gguf_assets(monkeypatch, tmp_path: Path) -> 
     assert captured["min_pixels"] == 32768
 
 
-def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Path) -> None:
+def test_run_setup_can_enable_hf_fallback_download(monkeypatch, tmp_path: Path) -> None:
     artifacts = SimpleNamespace(
         hf_model_dir=tmp_path / "hf_model",
+        gguf_model_dir=tmp_path / "gguf_model",
+        gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
+        gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
+        gguf_mmproj_minpix32768_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf",
+        qwen_corrector_dir=None,
+        qwen_corrector_model_path=None,
+        qwen_corrector_mmproj_path=None,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        model_store,
+        "setup_default_runtime_assets",
+        lambda **kwargs: captured.update(kwargs) or artifacts,
+    )
+
+    rc = cli.run(
+        [
+            "setup",
+            "--with-hf-fallback",
+            "--model-id",
+            "hf/model",
+            "--quiet",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["with_hf_fallback"] is True
+    assert captured["hf_model_id"] == "hf/model"
+
+
+def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Path) -> None:
+    artifacts = SimpleNamespace(
+        hf_model_dir=None,
         gguf_model_dir=tmp_path / "gguf_model",
         gguf_model_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5.gguf",
         gguf_mmproj_path=tmp_path / "gguf_model" / "PaddleOCR-VL-1.5-mmproj.gguf",
@@ -200,6 +234,7 @@ def test_run_setup_can_enable_qwen_corrector_download(monkeypatch, tmp_path: Pat
     )
 
     assert rc == 0
+    assert captured["with_hf_fallback"] is False
     assert captured["with_qwen_corrector"] is True
     assert captured["qwen_corrector_model_id"] == "unsloth/Qwen3.5-35B-A3B-GGUF"
     assert captured["qwen_corrector_model_filename"] == "Qwen3.5-35B-A3B-UD-Q4_K_XL.gguf"
@@ -225,6 +260,7 @@ def test_run_setup_logs_custom_bundle_notice(monkeypatch, caplog, tmp_path: Path
     rc = cli.run(
         [
             "setup",
+            "--with-hf-fallback",
             "--model-id",
             "custom/hf",
             "--gguf-model-id",
@@ -246,11 +282,21 @@ def test_run_setup_logs_custom_bundle_notice(monkeypatch, caplog, tmp_path: Path
     assert any("Qwen corrector setup uses custom values" in message for message in messages)
 
 
+def test_run_setup_rejects_custom_hf_model_without_opt_in(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    caplog.set_level(logging.ERROR)
+
+    rc = cli.run(["setup", "--model-id", "custom/hf", "--quiet"])
+
+    assert rc == 1
+    assert any("--model-id requires --with-hf-fallback" in record.message for record in caplog.records)
+
+
 def test_run_setup_rejects_existing_local_model_id(tmp_path: Path) -> None:
     local_dir = tmp_path / "existing-model-dir"
     local_dir.mkdir()
 
-    rc = cli.run(["setup", "--model-id", str(local_dir), "--quiet"])
+    rc = cli.run(["setup", "--with-hf-fallback", "--model-id", str(local_dir), "--quiet"])
 
     assert rc == 1
 

@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.5] - 2026-04-19
+- Narrowed the default `setup` path to the primary GGUF runtime and made HF fallback provisioning an explicit `--with-hf-fallback` opt-in.
 - Pinned the built-in setup model bundles to explicit upstream revisions and verified their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.
 - Kept managed `llama-server` traffic on a dedicated internal request host so wildcard bind settings no longer force health checks and OCR requests onto the exposed bind address.
 - Switched the project to the release `gguf==0.18.0` package, accepted installed `gguf` packages directly for mmproj work, and kept the pinned snapshot only as an explicit fallback source.

@@ -711,9 +711,17 @@ def _add_smoke_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--with-hf-fallback",
+        action="store_true",
+        help="Also download the retained HF fallback model bundle.",
+    )
+    parser.add_argument(
         "--model-id",
         default=DEFAULT_MODEL_ID,
-        help=f"HF model ID to download for the retained fallback path (default: {DEFAULT_MODEL_ID})",
+        help=(
+            "HF model ID to download when `--with-hf-fallback` is enabled "
+            f"(default: {DEFAULT_MODEL_ID})"
+        ),
     )
     parser.add_argument(
         "--gguf-model-id",
@@ -1127,10 +1135,17 @@ def run_setup(args: argparse.Namespace) -> int:
         setup_default_runtime_assets,
     )
 
+    if not args.with_hf_fallback and not is_default_pinned_hf_model(args.model_id):
+        logging.getLogger(__name__).error(
+            "setup failed: --model-id requires --with-hf-fallback"
+        )
+        return 1
+
     try:
         artifacts = setup_default_runtime_assets(
             hf_model_id=args.model_id,
             gguf_model_id=args.gguf_model_id,
+            with_hf_fallback=args.with_hf_fallback,
             with_qwen_corrector=args.with_qwen_corrector,
             qwen_corrector_model_id=args.qwen_corrector_model_id,
             qwen_corrector_model_filename=args.qwen_corrector_model_filename,
@@ -1148,7 +1163,7 @@ def run_setup(args: argparse.Namespace) -> int:
 
     if not args.quiet:
         logger = logging.getLogger(__name__)
-        if not is_default_pinned_hf_model(args.model_id):
+        if args.with_hf_fallback and not is_default_pinned_hf_model(args.model_id):
             logger.info(
                 "HF fallback setup uses custom values; revision pinning and artifact hash "
                 "verification remain user-managed for this bundle."
@@ -1167,7 +1182,8 @@ def run_setup(args: argparse.Namespace) -> int:
                 "Qwen corrector setup uses custom values; revision pinning and artifact hash "
                 "verification remain user-managed for this bundle."
             )
-        logger.info("HF fallback model downloaded to: %s", artifacts.hf_model_dir)
+        if artifacts.hf_model_dir is not None:
+            logger.info("HF fallback model downloaded to: %s", artifacts.hf_model_dir)
         logger.info("GGUF runtime assets downloaded to: %s", artifacts.gguf_model_dir)
         logger.info("GGUF model path: %s", artifacts.gguf_model_path)
         logger.info("GGUF base mmproj path: %s", artifacts.gguf_mmproj_path)

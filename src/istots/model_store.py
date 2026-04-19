@@ -18,7 +18,7 @@ MANAGED_SETUP_TARGET_SENTINEL = ".istots-managed-model-target"
 
 @dataclass(frozen=True)
 class SetupArtifacts:
-    hf_model_dir: Path
+    hf_model_dir: Path | None
     gguf_model_dir: Path
     gguf_model_path: Path
     gguf_mmproj_path: Path
@@ -259,9 +259,12 @@ def resolve_local_model_path(model_id: str, models_dir: Path | None = None) -> P
 def ensure_local_model(model_id: str, models_dir: Path | None = None) -> Path:
     path = resolve_local_model_path(model_id=model_id, models_dir=models_dir)
     if not path.exists() or not (path / "config.json").exists():
+        setup_command = "istots setup --with-hf-fallback"
+        if not is_default_pinned_hf_model(model_id):
+            setup_command = f"{setup_command} --model-id {model_id}"
         raise RuntimeError(
             "Model is not available locally. "
-            f"Expected at: {path}. Run `istots setup --model-id {model_id}` first."
+            f"Expected at: {path}. Run `uv sync --extra hf` and `{setup_command}` first."
         )
     return path
 
@@ -404,6 +407,7 @@ def setup_default_runtime_assets(
     *,
     hf_model_id: str = DEFAULT_MODEL_ID,
     gguf_model_id: str = DEFAULT_GGUF_MODEL_ID,
+    with_hf_fallback: bool = False,
     with_qwen_corrector: bool = False,
     qwen_corrector_model_id: str = DEFAULT_QWEN_CORRECTOR_MODEL_ID,
     qwen_corrector_model_filename: str = DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
@@ -417,11 +421,16 @@ def setup_default_runtime_assets(
 ) -> SetupArtifacts:
     from istots.llama_mmproj import materialize_mmproj
 
-    hf_model_dir = download_model(
-        model_id=hf_model_id,
-        models_dir=models_dir,
-        force=force,
-    )
+    if not with_hf_fallback and not is_default_pinned_hf_model(hf_model_id):
+        raise RuntimeError("Custom HF fallback model ids require `with_hf_fallback=True`.")
+
+    hf_model_dir: Path | None = None
+    if with_hf_fallback:
+        hf_model_dir = download_model(
+            model_id=hf_model_id,
+            models_dir=models_dir,
+            force=force,
+        )
     gguf_model_dir, gguf_model_path, gguf_mmproj_path = download_gguf_runtime_assets(
         model_id=gguf_model_id,
         models_dir=models_dir,
