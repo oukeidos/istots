@@ -39,6 +39,8 @@ def test_run_help_includes_subcommand_arguments(capsys) -> None:
 
     assert excinfo.value.code == 0
     captured = capsys.readouterr()
+    assert "smoke               Run quick validation on an explicit input SUP" in captured.out
+    assert "retained sample SUP" not in captured.out
     assert "Subcommand Details:" in captured.out
     assert "--engine {llama-server,hf}" in captured.out
     assert "--ocr-mode {default,fast}" in captured.out

@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     smoke = subparsers.add_parser(
         "smoke",
-        help="Run quick validation against the retained sample SUP",
+        help="Run quick validation on an explicit input SUP",
     )
     parser.register_subcommand_parser(smoke)
     _add_smoke_arguments(smoke)

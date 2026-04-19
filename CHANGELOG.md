@@ -5,6 +5,7 @@
 - Kept managed `llama-server` traffic on a dedicated internal request host so wildcard bind settings no longer force health checks and OCR requests onto the exposed bind address.
 - Switched the project to the release `gguf==0.18.0` package, accepted installed `gguf` packages directly for mmproj work, and kept the pinned snapshot only as an explicit fallback source.
 - Removed auto-created `smoke` and `doctor workflow` temporary artifact directories after successful runs, while keeping failed runs and explicit smoke output directories available for inspection.
+- Aligned the root CLI `smoke` help text with the current explicit `--input-sup` requirement so the top-level help no longer advertises a bundled sample default.
 
 ## [0.3.4] - 2026-04-18
 - Reduced memory pressure, improved safety for local OCR runs on constrained systems, and gave users clearer control over temporary OCR image handling.
