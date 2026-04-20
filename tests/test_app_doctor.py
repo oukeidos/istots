@@ -7,6 +7,7 @@ import pytest
 
 from istots.app.doctor import (
     DoctorArgumentError,
+    DoctorResult,
     DoctorRequest,
     execute_doctor_plan,
     plan_doctor_request,
@@ -97,6 +98,7 @@ def test_execute_doctor_plan_dispatches_runtime_paddle(monkeypatch, tmp_path: Pa
     )
     result = execute_doctor_plan(plan)
 
+    assert isinstance(result, DoctorResult)
     assert result.category == "runtime"
     assert captured["models_dir"] == tmp_path
     assert captured["overrides"].profile == "cpu"

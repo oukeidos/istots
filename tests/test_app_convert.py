@@ -8,6 +8,7 @@ import pytest
 from istots.app.convert import (
     ConvertArgumentError,
     ConvertRequest,
+    ConvertResult,
     execute_convert_plan,
     plan_convert_request,
 )
@@ -164,6 +165,7 @@ def test_execute_convert_plan_calls_pipeline(monkeypatch, tmp_path: Path) -> Non
     )
     result = execute_convert_plan(plan, verbose=False)
 
+    assert isinstance(result, ConvertResult)
     assert result.output_srt == output_srt
     assert captured["input_sup"] == input_sup.resolve()
     assert captured["output_srt"] == output_srt.resolve()

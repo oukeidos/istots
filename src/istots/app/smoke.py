@@ -10,6 +10,7 @@ from istots.app.convert import (
     ConvertArgumentError,
     ConvertExecutionPlan,
     ConvertPreparationError,
+    ConvertResult,
     ConvertRequest,
     execute_convert_plan,
     plan_convert_request,
@@ -87,7 +88,7 @@ class SmokeExecutionResult:
     output_dir: Path
     is_auto_output_dir: bool
     removed_output_dir: bool
-    convert_result: object
+    convert_result: ConvertResult
 
 
 def plan_smoke_request(

@@ -12,6 +12,31 @@ class DoctorArgumentError(ValueError):
 
 
 @dataclass(frozen=True)
+class DoctorIssue:
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class DoctorCheck:
+    name: str
+    ok: bool
+    issues: tuple[DoctorIssue, ...]
+    details: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class DoctorResult:
+    category: str
+    target: str
+    checks: tuple[DoctorCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        return all(check.ok for check in self.checks)
+
+
+@dataclass(frozen=True)
 class DoctorRequest:
     category: str | None = None
     target: str | None = None
@@ -124,9 +149,10 @@ def plan_doctor_request(request: DoctorRequest) -> DoctorExecutionPlan:
     )
 
 
-def execute_doctor_plan(plan: DoctorExecutionPlan):
+def execute_doctor_plan(plan: DoctorExecutionPlan) -> DoctorResult:
+    raw_result = None
     if plan.category == "runtime" and plan.target == "paddle":
-        return doctor_module.run_paddle_runtime_doctor(
+        raw_result = doctor_module.run_paddle_runtime_doctor(
             models_dir=plan.models_dir,
             min_pixels=plan.min_pixels,
             explicit_binary_path=plan.explicit_binary_path,
@@ -134,8 +160,8 @@ def execute_doctor_plan(plan: DoctorExecutionPlan):
             overrides=plan.paddle_overrides,
             startup_timeout_sec=plan.paddle_startup_timeout_sec,
         )
-    if plan.category == "runtime" and plan.target == "qwen":
-        return doctor_module.run_qwen_runtime_doctor(
+    elif plan.category == "runtime" and plan.target == "qwen":
+        raw_result = doctor_module.run_qwen_runtime_doctor(
             models_dir=plan.models_dir,
             explicit_binary_path=plan.explicit_binary_path,
             host=plan.host,
@@ -144,10 +170,10 @@ def execute_doctor_plan(plan: DoctorExecutionPlan):
             explicit_mmproj_path=plan.corrector_mmproj_path,
             startup_timeout_sec=plan.qwen_startup_timeout_sec,
         )
-    if plan.category == "auth" and plan.target == "gemini":
-        return doctor_module.run_gemini_auth_doctor(api_key_env=plan.api_key_env)
-    if plan.category == "workflow":
-        return doctor_module.run_workflow_doctor(
+    elif plan.category == "auth" and plan.target == "gemini":
+        raw_result = doctor_module.run_gemini_auth_doctor(api_key_env=plan.api_key_env)
+    elif plan.category == "workflow":
+        raw_result = doctor_module.run_workflow_doctor(
             workflow=plan.target,
             input_sup=plan.input_sup,
             models_dir=plan.models_dir,
@@ -162,4 +188,21 @@ def execute_doctor_plan(plan: DoctorExecutionPlan):
             startup_timeout_sec=max(plan.paddle_startup_timeout_sec, plan.qwen_startup_timeout_sec),
             use_temp_ocr_image_files=plan.use_temp_ocr_image_files,
         )
-    raise DoctorArgumentError("unsupported doctor mode")
+    else:
+        raise DoctorArgumentError("unsupported doctor mode")
+    return DoctorResult(
+        category=raw_result.category,
+        target=raw_result.target,
+        checks=tuple(
+            DoctorCheck(
+                name=check.name,
+                ok=check.ok,
+                issues=tuple(
+                    DoctorIssue(code=issue.code, message=issue.message)
+                    for issue in check.issues
+                ),
+                details=tuple(check.details),
+            )
+            for check in raw_result.checks
+        ),
+    )

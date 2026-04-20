@@ -19,6 +19,18 @@ class ConvertPreparationError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ConvertResult:
+    output_srt: Path
+    processed_count: int
+    written_count: int
+    device_used: str
+    detector_record_count: int = 0
+    correction_record_count: int = 0
+    correction_applied_count: int = 0
+    correction_fallback_count: int = 0
+
+
+@dataclass(frozen=True)
 class ConvertRequest:
     input_sup: Path
     output_srt: Path
@@ -200,8 +212,8 @@ def execute_convert_plan(
     plan: ConvertExecutionPlan,
     *,
     verbose: bool = True,
-):
-    return pipeline.convert_sup_to_srt(
+) -> ConvertResult:
+    result = pipeline.convert_sup_to_srt(
         input_sup=plan.input_sup,
         output_srt=plan.output_srt,
         hf_device=plan.hf_device,
@@ -223,6 +235,16 @@ def execute_convert_plan(
         paddle_runtime_overrides=plan.paddle_runtime_overrides,
         use_temp_ocr_image_files=plan.use_temp_ocr_image_files,
         verbose=verbose,
+    )
+    return ConvertResult(
+        output_srt=result.output_srt,
+        processed_count=getattr(result, "processed_count", getattr(result, "written_count", 0)),
+        written_count=getattr(result, "written_count", 0),
+        device_used=result.device_used,
+        detector_record_count=getattr(result, "detector_record_count", 0),
+        correction_record_count=getattr(result, "correction_record_count", 0),
+        correction_applied_count=getattr(result, "correction_applied_count", 0),
+        correction_fallback_count=getattr(result, "correction_fallback_count", 0),
     )
 
 
