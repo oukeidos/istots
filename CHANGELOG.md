@@ -2,7 +2,7 @@
 
 ## [0.3.6] - 2026-04-20
 - Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.
-- Hardened prepared-input subprocess supervision so wedged preprocessing workers now fail within a bounded time with actionable diagnostics instead of hanging conversion startup forever.
+- Made conversion startup more reliable by stopping stuck preprocessing workers with a clear error instead of leaving runs hanging indefinitely.
 
 ## [0.3.5] - 2026-04-19
 - Narrowed the default `setup` path to the primary GGUF runtime and made HF fallback provisioning an explicit `--with-hf-fallback` opt-in.
