@@ -16,11 +16,28 @@ from istots.app.convert import (
     execute_convert_plan,
     plan_convert_request,
 )
+from istots.app.auth import (
+    AuthArgumentError,
+    AuthExecutionError,
+    AuthRequest,
+    execute_auth_request,
+)
 from istots.app.doctor import (
     DoctorArgumentError,
     DoctorRequest,
     execute_doctor_plan,
     plan_doctor_request,
+)
+from istots.app.materialize_mmproj import (
+    MaterializeMmprojExecutionError,
+    MaterializeMmprojRequest,
+    execute_materialize_mmproj_request,
+)
+from istots.app.setup import (
+    SetupArgumentError,
+    SetupExecutionError,
+    SetupRequest,
+    execute_setup_request,
 )
 from istots.app.smoke import (
     SmokeArgumentError,
@@ -1148,57 +1165,45 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 def run_setup(args: argparse.Namespace) -> int:
     configure_logging(verbose=not args.quiet)
-
-    from istots.model_store import (
-        is_default_pinned_gguf_model,
-        is_default_pinned_hf_model,
-        is_default_pinned_qwen_bundle,
-        setup_default_runtime_assets,
-    )
-
-    if not args.with_hf_fallback and not is_default_pinned_hf_model(args.model_id):
-        logging.getLogger(__name__).error(
-            "setup failed: --model-id requires --with-hf-fallback"
-        )
-        return 1
-
     try:
-        artifacts = setup_default_runtime_assets(
-            hf_model_id=args.model_id,
-            gguf_model_id=args.gguf_model_id,
-            with_hf_fallback=args.with_hf_fallback,
-            with_qwen_corrector=args.with_qwen_corrector,
-            qwen_corrector_model_id=args.qwen_corrector_model_id,
-            qwen_corrector_model_filename=args.qwen_corrector_model_filename,
-            qwen_corrector_mmproj_filename=args.qwen_corrector_mmproj_filename,
-            models_dir=args.models_dir,
-            force=args.force,
-            support_dir=args.support_dir,
-            gguf_py_base_url=args.gguf_py_base_url,
-            gguf_source_mode=args.gguf_source_mode,
-            min_pixels=args.min_pixels,
+        result = execute_setup_request(
+            SetupRequest(
+                with_hf_fallback=args.with_hf_fallback,
+                model_id=args.model_id,
+                gguf_model_id=args.gguf_model_id,
+                with_qwen_corrector=args.with_qwen_corrector,
+                qwen_corrector_model_id=args.qwen_corrector_model_id,
+                qwen_corrector_model_filename=args.qwen_corrector_model_filename,
+                qwen_corrector_mmproj_filename=args.qwen_corrector_mmproj_filename,
+                models_dir=args.models_dir,
+                force=args.force,
+                support_dir=args.support_dir,
+                gguf_py_base_url=args.gguf_py_base_url,
+                gguf_source_mode=args.gguf_source_mode,
+                min_pixels=args.min_pixels,
+            )
         )
-    except Exception as exc:
+    except SetupArgumentError as exc:
+        logging.getLogger(__name__).error("setup failed: %s", exc)
+        return 1
+    except SetupExecutionError as exc:
         logging.getLogger(__name__).error("setup failed: %s", exc)
         return 1
 
     if not args.quiet:
         logger = logging.getLogger(__name__)
-        if args.with_hf_fallback and not is_default_pinned_hf_model(args.model_id):
+        artifacts = result.artifacts
+        if result.custom_hf_bundle:
             logger.info(
                 "HF fallback setup uses custom values; revision pinning and artifact hash "
                 "verification remain user-managed for this bundle."
             )
-        if not is_default_pinned_gguf_model(args.gguf_model_id):
+        if result.custom_gguf_bundle:
             logger.info(
                 "GGUF runtime setup uses custom values; revision pinning and artifact hash "
                 "verification remain user-managed for this bundle."
             )
-        if args.with_qwen_corrector and not is_default_pinned_qwen_bundle(
-            model_id=args.qwen_corrector_model_id,
-            model_filename=args.qwen_corrector_model_filename,
-            mmproj_filename=args.qwen_corrector_mmproj_filename,
-        ):
+        if result.custom_qwen_bundle:
             logger.info(
                 "Qwen corrector setup uses custom values; revision pinning and artifact hash "
                 "verification remain user-managed for this bundle."
@@ -1231,65 +1236,60 @@ def run_setup(args: argparse.Namespace) -> int:
 def run_auth(args: argparse.Namespace) -> int:
     configure_logging(verbose=False)
 
-    if args.auth_provider != "gemini":
-        logging.getLogger(__name__).error("unsupported auth provider: %s", args.auth_provider)
-        return 1
-
-    from istots.gemini_auth import (
-        clear_configured_gemini_env_file,
-        delete_gemini_api_key,
-        get_gemini_auth_status,
-        set_configured_gemini_env_file,
-        set_gemini_api_key,
-    )
-
     try:
-        if args.auth_action == "set":
-            api_key = getpass.getpass("Gemini API key: ")
-            backend_name = set_gemini_api_key(api_key)
-            print(f"Gemini API key stored in keyring backend: {backend_name}")
-            return 0
-        if args.auth_action == "delete":
-            backend_name = delete_gemini_api_key()
-            if backend_name is not None:
-                print(f"Gemini API key deleted from keyring backend: {backend_name}")
-            else:
-                print("Gemini API key deleted.")
-            return 0
-        if args.auth_action == "status":
-            status = get_gemini_auth_status()
-            print(
-                "keyring: "
-                + ("configured" if status.keyring_configured else "missing")
-                + (
-                    f" ({status.keyring_backend})"
-                    if status.keyring_backend is not None
-                    else " (unavailable)"
-                )
+        result = execute_auth_request(
+            AuthRequest(
+                provider=args.auth_provider,
+                action=args.auth_action,
+                env_file_action=getattr(args, "auth_env_file_action", None),
+                path=getattr(args, "path", None),
+                api_key=getpass.getpass("Gemini API key: ") if args.auth_action == "set" else None,
             )
-            if status.env_file_configured:
-                print(f".env path: configured ({status.env_file_path})")
-                print(".env key presence: " + ("configured" if status.env_file_contains_key else "missing"))
-            else:
-                print(".env path: missing")
-            if status.process_env_configured:
-                print(f"shell env: configured ({status.process_env_name})")
-            else:
-                print("shell env: missing")
-            print(f"effective source: {status.effective_source or 'missing'}")
-            return 0
-        if args.auth_action == "env-file":
-            if args.auth_env_file_action == "set":
-                resolved = set_configured_gemini_env_file(args.path)
-                print(f"Configured Gemini .env file: {resolved}")
-                return 0
-            if args.auth_env_file_action == "clear":
-                clear_configured_gemini_env_file()
-                print("Cleared the configured Gemini .env file path.")
-                return 0
-    except Exception as exc:
+        )
+    except AuthArgumentError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 1
+    except AuthExecutionError as exc:
         logging.getLogger(__name__).error("auth command failed: %s", exc)
         return 1
+
+    if result.action == "set":
+        print(f"Gemini API key stored in keyring backend: {result.backend_name}")
+        return 0
+    if result.action == "delete":
+        if result.backend_name is not None:
+            print(f"Gemini API key deleted from keyring backend: {result.backend_name}")
+        else:
+            print("Gemini API key deleted.")
+        return 0
+    if result.action == "status" and result.status is not None:
+        status = result.status
+        print(
+            "keyring: "
+            + ("configured" if status.keyring_configured else "missing")
+            + (
+                f" ({status.keyring_backend})"
+                if status.keyring_backend is not None
+                else " (unavailable)"
+            )
+        )
+        if status.env_file_configured:
+            print(f".env path: configured ({status.env_file_path})")
+            print(".env key presence: " + ("configured" if status.env_file_contains_key else "missing"))
+        else:
+            print(".env path: missing")
+        if status.process_env_configured:
+            print(f"shell env: configured ({status.process_env_name})")
+        else:
+            print("shell env: missing")
+        print(f"effective source: {status.effective_source or 'missing'}")
+        return 0
+    if result.action == "env-file" and result.env_file_action == "set":
+        print(f"Configured Gemini .env file: {result.resolved_path}")
+        return 0
+    if result.action == "env-file" and result.env_file_action == "clear":
+        print("Cleared the configured Gemini .env file path.")
+        return 0
 
     logging.getLogger(__name__).error("unsupported auth action")
     return 1
@@ -1298,33 +1298,27 @@ def run_auth(args: argparse.Namespace) -> int:
 def run_materialize_mmproj(args: argparse.Namespace) -> int:
     configure_logging(verbose=not args.quiet)
 
-    from istots.llama_mmproj import materialize_mmproj, read_mmproj_min_pixels
-
     try:
-        output = materialize_mmproj(
-            base_mmproj=args.base_mmproj,
-            output_path=args.output,
-            min_pixels=args.min_pixels,
-            support_dir=args.support_dir,
-            gguf_py_base_url=args.gguf_py_base_url,
-            gguf_source_mode=args.gguf_source_mode,
-            force=args.force,
+        result = execute_materialize_mmproj_request(
+            MaterializeMmprojRequest(
+                base_mmproj=args.base_mmproj,
+                output=args.output,
+                min_pixels=args.min_pixels,
+                support_dir=args.support_dir,
+                gguf_py_base_url=args.gguf_py_base_url,
+                gguf_source_mode=args.gguf_source_mode,
+                force=args.force,
+            )
         )
-        applied_value = read_mmproj_min_pixels(
-            output,
-            support_dir=args.support_dir,
-            gguf_py_base_url=args.gguf_py_base_url,
-            gguf_source_mode=args.gguf_source_mode,
-        )
-    except Exception as exc:
+    except MaterializeMmprojExecutionError as exc:
         logging.getLogger(__name__).error("mmproj materialization failed: %s", exc)
         return 1
 
     if not args.quiet:
         logging.getLogger(__name__).info(
             "materialized mmproj: %s (clip.vision.image_min_pixels=%s)",
-            output,
-            applied_value,
+            result.output,
+            result.applied_value,
         )
     return 0
 

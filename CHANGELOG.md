@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.6] - 2026-04-20
+- Moved `setup`, `materialize-mmproj`, and `auth` execution into shared application services so the remaining command workflows no longer depend on CLI-only orchestration.
 - Moved `doctor` request validation and runtime override planning into shared application services while keeping structured doctor output formatting in the CLI adapter.
 - Moved the `smoke` workflow into shared application services so temporary output planning and cleanup no longer depend on a hidden CLI-only convert wrapper.
 - Started moving conversion orchestration out of the terminal wrapper so the `convert` workflow can be reused by a future GUI and other shared entrypoints.
