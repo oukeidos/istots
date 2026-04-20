@@ -1,7 +1,7 @@
 # Changelog
 
 ## [0.4.0] - 2026-04-20
-- Ported the retained EXP-010 minimal cross-platform GUI MVP with optional `PySide6` packaging, a fast-only GUI workflow, and shared conversion progress and ETA reporting that stays aligned with the experiment-validated behavior.
+- Added an optional desktop GUI so users can set up the local runtime, check that OCR is ready, and run quick single-file SUP-to-SRT conversions with visible progress instead of relying only on the command line.
 
 ## [0.3.6] - 2026-04-20
 - Refactored the CLI around shared application services so the upcoming GUI can reuse the same workflows directly with less duplicated logic and easier maintenance.
