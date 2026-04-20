@@ -78,6 +78,24 @@ class ConversionResult:
     correction_fallback_count: int = 0
 
 
+@dataclass(frozen=True)
+class ConversionProgressEvent:
+    phase: str
+    elapsed_sec: float
+    branch_label: str | None = None
+    role: str | None = None
+    total_rows: int | None = None
+    wide_total_rows: int | None = None
+    tall_total_rows: int | None = None
+    wide_total_unique: int | None = None
+    tall_total_unique: int | None = None
+    branch_total_rows: int | None = None
+    branch_processed_rows: int | None = None
+    branch_total_unique: int | None = None
+    branch_processed_unique: int | None = None
+    output_rows: int | None = None
+
+
 @dataclass
 class _WindowTextSegment:
     start: timedelta
@@ -106,6 +124,22 @@ class _PreparedOCRInput:
     image_mode: str
     image: Image.Image | None
     image_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedOCRRecognitionPlan:
+    prepared_inputs: list[_PreparedOCRInput]
+    unique_inputs: list[_PreparedOCRInput]
+    item_to_unique_index: list[int]
+    unique_group_sizes: list[int]
+
+    @property
+    def total_rows(self) -> int:
+        return sum(self.unique_group_sizes)
+
+    @property
+    def total_unique(self) -> int:
+        return len(self.unique_inputs)
 
 
 @dataclass(frozen=True)
@@ -237,6 +271,33 @@ def _prepared_is_tall(prepared: _PreparedOCRInput) -> bool:
     return _prepared_aspect_ratio(prepared) >= TALL_SUBTITLE_RATIO_THRESHOLD
 
 
+def _build_prepared_recognition_plan(
+    prepared_inputs: list[_PreparedOCRInput],
+) -> _PreparedOCRRecognitionPlan:
+    key_to_unique_index: dict[Any, int] = {}
+    unique_inputs: list[_PreparedOCRInput] = []
+    item_to_unique_index: list[int] = []
+    unique_group_sizes: list[int] = []
+
+    for item in prepared_inputs:
+        key = _prepared_identity_key(item)
+        unique_index = key_to_unique_index.get(key)
+        if unique_index is None:
+            unique_index = len(unique_inputs)
+            key_to_unique_index[key] = unique_index
+            unique_inputs.append(item)
+            unique_group_sizes.append(0)
+        unique_group_sizes[unique_index] += 1
+        item_to_unique_index.append(unique_index)
+
+    return _PreparedOCRRecognitionPlan(
+        prepared_inputs=prepared_inputs,
+        unique_inputs=unique_inputs,
+        item_to_unique_index=item_to_unique_index,
+        unique_group_sizes=unique_group_sizes,
+    )
+
+
 def _prepare_inputs_in_subprocess_enabled(explicit: bool | None = None) -> bool:
     if explicit is not None:
         return explicit
@@ -244,6 +305,46 @@ def _prepare_inputs_in_subprocess_enabled(explicit: bool | None = None) -> bool:
     if raw is None:
         return True
     return raw.strip().lower() not in {"", "0", "false", "no"}
+
+
+def _emit_conversion_progress(
+    progress_callback: Callable[[ConversionProgressEvent], None] | None,
+    *,
+    started_at: float,
+    phase: str,
+    branch_label: str | None = None,
+    role: str | None = None,
+    total_rows: int | None = None,
+    wide_total_rows: int | None = None,
+    tall_total_rows: int | None = None,
+    wide_total_unique: int | None = None,
+    tall_total_unique: int | None = None,
+    branch_total_rows: int | None = None,
+    branch_processed_rows: int | None = None,
+    branch_total_unique: int | None = None,
+    branch_processed_unique: int | None = None,
+    output_rows: int | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        ConversionProgressEvent(
+            phase=phase,
+            elapsed_sec=max(0.0, time.monotonic() - started_at),
+            branch_label=branch_label,
+            role=role,
+            total_rows=total_rows,
+            wide_total_rows=wide_total_rows,
+            tall_total_rows=tall_total_rows,
+            wide_total_unique=wide_total_unique,
+            tall_total_unique=tall_total_unique,
+            branch_total_rows=branch_total_rows,
+            branch_processed_rows=branch_processed_rows,
+            branch_total_unique=branch_total_unique,
+            branch_processed_unique=branch_processed_unique,
+            output_rows=output_rows,
+        )
+    )
 
 
 def _prepared_input_subprocess_timeout_sec(explicit: float | None = None) -> float:
@@ -666,11 +767,18 @@ def convert_sup_to_srt(
     paddle_runtime_overrides: PaddleOCRVLRuntimeOverrides | None = None,
     use_temp_ocr_image_files: bool | None = None,
     verbose: bool = True,
+    progress_callback: Callable[[ConversionProgressEvent], None] | None = None,
 ) -> ConversionResult:
     if not input_sup.exists():
         raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
 
+    started_at = time.monotonic()
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
+    _emit_conversion_progress(
+        progress_callback,
+        started_at=started_at,
+        phase="prepare_started",
+    )
     normalized_engine = normalize_ocr_engine(engine)
     normalized_ocr_mode = _normalize_ocr_mode(ocr_mode)
     normalized_detector_mode = _normalize_detector_mode(detector_mode)
@@ -727,6 +835,8 @@ def convert_sup_to_srt(
             use_temp_ocr_image_files=use_temp_ocr_image_files,
             srt_policy=srt_policy,
             verbose=verbose,
+            progress_callback=progress_callback,
+            progress_started_at=started_at,
         )
     if detector_output is not None or corrector_config is not None:
         return _convert_sup_to_srt_default_with_detector(
@@ -753,6 +863,21 @@ def convert_sup_to_srt(
         use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
     ) as prepared_inputs:
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=started_at,
+            phase="prepare_completed",
+            total_rows=len(prepared_inputs),
+        )
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=started_at,
+            phase="backend_loading",
+            branch_label="default",
+            role="ocr",
+            total_rows=len(prepared_inputs),
+            branch_total_rows=len(prepared_inputs),
+        )
         with _managed_ocr_backend(
             _build_paddle_backend_config(
                 base_config=backend_config,
@@ -764,11 +889,22 @@ def convert_sup_to_srt(
         ) as (active_backend, runtime_used):
             if verbose:
                 _log_runtime_selection(engine=normalized_engine, runtime_used=runtime_used)
+            _emit_conversion_progress(
+                progress_callback,
+                started_at=started_at,
+                phase="backend_ready",
+                branch_label="default",
+                role="ocr",
+                total_rows=len(prepared_inputs),
+                branch_total_rows=len(prepared_inputs),
+            )
             texts = _recognize_prepared_inputs(
                 prepared_inputs,
                 backend=active_backend,
                 verbose=verbose,
                 branch_label="default",
+                progress_callback=progress_callback,
+                progress_started_at=started_at,
             )
             segments = [
                 segment
@@ -776,7 +912,21 @@ def convert_sup_to_srt(
                 if (segment := _build_window_text_segment(item, text)) is not None
             ]
             entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+            _emit_conversion_progress(
+                progress_callback,
+                started_at=started_at,
+                phase="write_started",
+                total_rows=len(prepared_inputs),
+                output_rows=len(entries),
+            )
             write_srt(entries, output_srt)
+            _emit_conversion_progress(
+                progress_callback,
+                started_at=started_at,
+                phase="finished",
+                total_rows=len(prepared_inputs),
+                output_rows=len(entries),
+            )
             if verbose:
                 logger.info(
                     "conversion finished: processed=%d written=%d output=%s",
@@ -805,6 +955,8 @@ def _convert_sup_to_srt_fast(
     use_temp_ocr_image_files: bool | None,
     srt_policy: str,
     verbose: bool,
+    progress_callback: Callable[[ConversionProgressEvent], None] | None,
+    progress_started_at: float,
 ) -> ConversionResult:
     with _managed_prepared_ocr_inputs(
         input_sup,
@@ -813,8 +965,26 @@ def _convert_sup_to_srt_fast(
         use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
     ) as prepared_inputs:
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=progress_started_at,
+            phase="prepare_completed",
+            total_rows=len(prepared_inputs),
+        )
         wide_inputs = [item for item in prepared_inputs if not _prepared_is_tall(item)]
         tall_inputs = [item for item in prepared_inputs if _prepared_is_tall(item)]
+        wide_plan = _build_prepared_recognition_plan(wide_inputs)
+        tall_plan = _build_prepared_recognition_plan(tall_inputs)
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=progress_started_at,
+            phase="partition_completed",
+            total_rows=len(prepared_inputs),
+            wide_total_rows=len(wide_inputs),
+            tall_total_rows=len(tall_inputs),
+            wide_total_unique=wide_plan.total_unique,
+            tall_total_unique=tall_plan.total_unique,
+        )
 
         if verbose:
             logger.info(
@@ -855,6 +1025,7 @@ def _convert_sup_to_srt_fast(
 
         for role, config in backend_specs:
             branch_inputs = wide_inputs if role == "ocr-fast" else tall_inputs
+            branch_plan = wide_plan if role == "ocr-fast" else tall_plan
             branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
             if not branch_inputs:
                 continue
@@ -862,6 +1033,20 @@ def _convert_sup_to_srt_fast(
                 replace(config, device=active_hf_device)
                 if backend_config.engine is OCREngine.HF
                 else config
+            )
+            _emit_conversion_progress(
+                progress_callback,
+                started_at=progress_started_at,
+                phase="backend_loading",
+                branch_label=branch_label,
+                role=role,
+                total_rows=len(prepared_inputs),
+                wide_total_rows=len(wide_inputs),
+                tall_total_rows=len(tall_inputs),
+                branch_total_rows=len(branch_inputs),
+                wide_total_unique=wide_plan.total_unique,
+                tall_total_unique=tall_plan.total_unique,
+                branch_total_unique=branch_plan.total_unique,
             )
             with _managed_ocr_backend(
                 active_config,
@@ -874,6 +1059,20 @@ def _convert_sup_to_srt_fast(
                 if verbose and not device_logged:
                     _log_runtime_selection(engine=backend_config.engine, runtime_used=runtime_used)
                 device_logged = True
+                _emit_conversion_progress(
+                    progress_callback,
+                    started_at=progress_started_at,
+                    phase="backend_ready",
+                    branch_label=branch_label,
+                    role=role,
+                    total_rows=len(prepared_inputs),
+                    wide_total_rows=len(wide_inputs),
+                    tall_total_rows=len(tall_inputs),
+                    branch_total_rows=len(branch_inputs),
+                    wide_total_unique=wide_plan.total_unique,
+                    tall_total_unique=tall_plan.total_unique,
+                    branch_total_unique=branch_plan.total_unique,
+                )
                 if role == "ocr-fast":
                     if verbose:
                         logger.info("running fast OCR branch: non_tall=%d role=ocr-fast", len(branch_inputs))
@@ -884,6 +1083,9 @@ def _convert_sup_to_srt_fast(
                     backend=backend,
                     verbose=verbose,
                     branch_label=branch_label,
+                    recognition_plan=branch_plan,
+                    progress_callback=progress_callback,
+                    progress_started_at=progress_started_at,
                 )
                 for item, text in zip(branch_inputs, branch_texts, strict=True):
                     recognized_by_index[item.index] = text
@@ -894,7 +1096,29 @@ def _convert_sup_to_srt_fast(
             if (segment := _build_window_text_segment(item, recognized_by_index.get(item.index, ""))) is not None
         ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=progress_started_at,
+            phase="write_started",
+            total_rows=len(prepared_inputs),
+            wide_total_rows=len(wide_inputs),
+            tall_total_rows=len(tall_inputs),
+            wide_total_unique=wide_plan.total_unique,
+            tall_total_unique=tall_plan.total_unique,
+            output_rows=len(entries),
+        )
         write_srt(entries, output_srt)
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=progress_started_at,
+            phase="finished",
+            total_rows=len(prepared_inputs),
+            wide_total_rows=len(wide_inputs),
+            tall_total_rows=len(tall_inputs),
+            wide_total_unique=wide_plan.total_unique,
+            tall_total_unique=tall_plan.total_unique,
+            output_rows=len(entries),
+        )
         if verbose:
             logger.info(
                 "conversion finished: processed=%d written=%d output=%s",
@@ -1209,40 +1433,52 @@ def _recognize_prepared_inputs(
     backend: Any,
     verbose: bool,
     branch_label: str,
+    recognition_plan: _PreparedOCRRecognitionPlan | None = None,
+    progress_callback: Callable[[ConversionProgressEvent], None] | None = None,
+    progress_started_at: float | None = None,
 ) -> list[str]:
     if not prepared_inputs:
         return []
 
-    key_to_unique_index: dict[Any, int] = {}
-    unique_inputs: list[_PreparedOCRInput] = []
-    item_to_unique_index: list[int] = []
-    unique_group_sizes: list[int] = []
-
-    for item in prepared_inputs:
-        key = _prepared_identity_key(item)
-        unique_index = key_to_unique_index.get(key)
-        if unique_index is None:
-            unique_index = len(unique_inputs)
-            key_to_unique_index[key] = unique_index
-            unique_inputs.append(item)
-            unique_group_sizes.append(0)
-        unique_group_sizes[unique_index] += 1
-        item_to_unique_index.append(unique_index)
+    plan = recognition_plan or _build_prepared_recognition_plan(prepared_inputs)
 
     recognized_unique: list[str] = []
-    total = len(unique_inputs)
-    for processed, item in enumerate(unique_inputs, start=1):
+    total = plan.total_unique
+    total_rows = plan.total_rows
+    processed_rows = 0
+    if progress_started_at is not None:
+        _emit_conversion_progress(
+            progress_callback,
+            started_at=progress_started_at,
+            phase="ocr_started",
+            branch_label=branch_label,
+            branch_total_rows=total_rows,
+            branch_total_unique=total,
+        )
+    for processed, item in enumerate(plan.unique_inputs, start=1):
         unique_index = processed - 1
         if verbose:
             logger.info(
                 "OCR started: branch=%s %s rows=%d",
                 branch_label,
                 _progress_label(processed, total),
-                unique_group_sizes[unique_index],
+                plan.unique_group_sizes[unique_index],
             )
         ocr_started = time.monotonic()
         text = _recognize_single_image(backend, _prepared_image(item))
         recognized_unique.append(text)
+        processed_rows += plan.unique_group_sizes[unique_index]
+        if progress_started_at is not None:
+            _emit_conversion_progress(
+                progress_callback,
+                started_at=progress_started_at,
+                phase="ocr_progress",
+                branch_label=branch_label,
+                branch_total_rows=total_rows,
+                branch_processed_rows=processed_rows,
+                branch_total_unique=total,
+                branch_processed_unique=processed,
+            )
         if verbose:
             state = "accepted" if text else "skipped (empty)"
             logger.info(
@@ -1250,11 +1486,11 @@ def _recognize_prepared_inputs(
                 branch_label,
                 _progress_label(processed, total),
                 state,
-                unique_group_sizes[unique_index],
+                plan.unique_group_sizes[unique_index],
                 time.monotonic() - ocr_started,
             )
 
-    return [recognized_unique[unique_index] for unique_index in item_to_unique_index]
+    return [recognized_unique[unique_index] for unique_index in plan.item_to_unique_index]
 
 
 def _recognize_single_image(backend: Any, image: Image.Image) -> str:

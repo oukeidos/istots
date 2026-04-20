@@ -2,12 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
+from typing import Callable
 
 from istots import model_store, pipeline
 from istots.corrector import CorrectorConfig, CorrectorMode
 from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
 _DEFAULT_RUNTIME_STARTUP_TIMEOUT_SEC = 120.0
+_ESTIMATED_BYTES_PER_ROW = 22_000.0
+_DEFAULT_FAST_ROW_SEC = 1.20
+_DEFAULT_TALL_ROW_SEC = 1.45
+_DEFAULT_DEFAULT_ROW_SEC = 1.35
+_DEFAULT_BACKEND_LOAD_SEC = 7.0
+_CPU_FAST_TO_TALL_RATE_MULTIPLIER = 1.60
+_CPU_FAST_TO_TALL_BLEND_UNIQUES = 8
 
 
 class ConvertArgumentError(ValueError):
@@ -16,6 +25,328 @@ class ConvertArgumentError(ValueError):
 
 class ConvertPreparationError(RuntimeError):
     pass
+
+
+ConvertProgressEvent = pipeline.ConversionProgressEvent
+
+
+@dataclass(frozen=True)
+class ConvertProgressSnapshot:
+    phase: str
+    headline: str
+    detail: str
+    fraction: float
+    elapsed_sec: float
+    eta_sec: float | None
+
+
+@dataclass
+class _BranchProgressState:
+    total_rows: int = 0
+    processed_rows: int = 0
+    total_unique: int | None = None
+    processed_unique: int = 0
+    backend_load_started_elapsed: float | None = None
+    backend_load_elapsed: float | None = None
+    ocr_started_elapsed: float | None = None
+    last_ocr_elapsed: float | None = None
+
+
+class ConvertProgressEstimator:
+    def __init__(
+        self,
+        *,
+        input_sup: Path,
+        enable_furigana_mask: bool,
+        ocr_mode: str,
+    ) -> None:
+        self._input_sup = input_sup
+        self._input_size_bytes = input_sup.stat().st_size if input_sup.exists() else 0
+        self._enable_furigana_mask = enable_furigana_mask
+        self._ocr_mode = ocr_mode.strip().lower()
+        self._clock_base: float | None = None
+        self._last_elapsed_sec = 0.0
+        self._phase = "idle"
+        self._total_rows: int | None = None
+        self._wide_total_rows: int | None = None
+        self._tall_total_rows: int | None = None
+        self._wide_total_unique: int | None = None
+        self._tall_total_unique: int | None = None
+        self._output_rows: int | None = None
+        self._prepare_completed_elapsed: float | None = None
+        self._write_started_elapsed: float | None = None
+        self._finished = False
+        self._active_branch_label: str | None = None
+        self._branches: dict[str, _BranchProgressState] = {}
+
+    def record(self, event: ConvertProgressEvent) -> None:
+        now = time.monotonic()
+        if self._clock_base is None:
+            self._clock_base = now - event.elapsed_sec
+        self._last_elapsed_sec = max(self._last_elapsed_sec, event.elapsed_sec)
+        self._phase = event.phase
+        if event.total_rows is not None:
+            self._total_rows = event.total_rows
+        if event.wide_total_rows is not None:
+            self._wide_total_rows = event.wide_total_rows
+        if event.tall_total_rows is not None:
+            self._tall_total_rows = event.tall_total_rows
+        if event.wide_total_unique is not None:
+            self._wide_total_unique = event.wide_total_unique
+        if event.tall_total_unique is not None:
+            self._tall_total_unique = event.tall_total_unique
+        if event.output_rows is not None:
+            self._output_rows = event.output_rows
+        if event.phase == "prepare_completed":
+            self._prepare_completed_elapsed = event.elapsed_sec
+        if event.phase == "write_started":
+            self._write_started_elapsed = event.elapsed_sec
+        if event.phase == "finished":
+            self._finished = True
+        if self._ocr_mode == "fast":
+            if self._wide_total_rows is not None or self._wide_total_unique is not None:
+                wide_branch = self._branches.setdefault("non-tall-fast", _BranchProgressState())
+                if self._wide_total_rows is not None:
+                    wide_branch.total_rows = self._wide_total_rows
+                if self._wide_total_unique is not None:
+                    wide_branch.total_unique = self._wide_total_unique
+            if self._tall_total_rows is not None or self._tall_total_unique is not None:
+                tall_branch = self._branches.setdefault("tall-default", _BranchProgressState())
+                if self._tall_total_rows is not None:
+                    tall_branch.total_rows = self._tall_total_rows
+                if self._tall_total_unique is not None:
+                    tall_branch.total_unique = self._tall_total_unique
+        if event.branch_label is None:
+            return
+
+        branch = self._branches.setdefault(event.branch_label, _BranchProgressState())
+        self._active_branch_label = event.branch_label
+        if event.branch_total_rows is not None:
+            branch.total_rows = event.branch_total_rows
+        if event.branch_total_unique is not None:
+            branch.total_unique = event.branch_total_unique
+        if event.phase == "backend_loading":
+            branch.backend_load_started_elapsed = event.elapsed_sec
+        elif event.phase == "backend_ready":
+            if branch.backend_load_started_elapsed is not None:
+                branch.backend_load_elapsed = max(
+                    0.0,
+                    event.elapsed_sec - branch.backend_load_started_elapsed,
+                )
+        elif event.phase == "ocr_started":
+            branch.ocr_started_elapsed = event.elapsed_sec
+            branch.last_ocr_elapsed = event.elapsed_sec
+        elif event.phase == "ocr_progress":
+            if event.branch_processed_rows is not None:
+                branch.processed_rows = event.branch_processed_rows
+            if event.branch_processed_unique is not None:
+                branch.processed_unique = event.branch_processed_unique
+            branch.last_ocr_elapsed = event.elapsed_sec
+
+    def snapshot(self, *, now_monotonic: float | None = None) -> ConvertProgressSnapshot:
+        elapsed_sec = self._current_elapsed_sec(now_monotonic=now_monotonic)
+        remaining_sec = self._estimate_remaining_sec(elapsed_sec)
+        if self._finished:
+            fraction = 1.0
+            remaining_sec = 0.0
+        elif elapsed_sec <= 0:
+            fraction = 0.0
+        else:
+            fraction = min(0.99, max(0.01, elapsed_sec / max(elapsed_sec + remaining_sec, 0.001)))
+        return ConvertProgressSnapshot(
+            phase=self._phase,
+            headline=self._headline(),
+            detail=self._detail(),
+            fraction=fraction,
+            elapsed_sec=elapsed_sec,
+            eta_sec=remaining_sec,
+        )
+
+    def _current_elapsed_sec(self, *, now_monotonic: float | None = None) -> float:
+        if self._clock_base is None:
+            return self._last_elapsed_sec
+        if self._finished:
+            return self._last_elapsed_sec
+        current = (now_monotonic if now_monotonic is not None else time.monotonic()) - self._clock_base
+        return max(self._last_elapsed_sec, current)
+
+    def _headline(self) -> str:
+        if self._finished:
+            return "Done"
+        if self._phase.startswith("prepare") or self._phase == "partition_completed":
+            return "Prep"
+        if self._phase.startswith("backend"):
+            return "Load"
+        if self._phase.startswith("ocr"):
+            return "OCR"
+        if self._phase.startswith("write"):
+            return "Write"
+        return "Run"
+
+    def _detail(self) -> str:
+        if self._phase.startswith("ocr") or self._phase.startswith("backend") or self._phase.startswith("write"):
+            processed_rows = sum(branch.processed_rows for branch in self._branches.values())
+            total_rows = self._known_total_rows()
+            if total_rows > 0:
+                return f"{processed_rows}/{total_rows}"
+        if self._phase == "prepare_completed" and self._total_rows is not None:
+            return f"{self._total_rows}"
+        if self._finished and self._output_rows is not None:
+            return f"{self._output_rows}"
+        return ""
+
+    def _known_total_rows(self) -> int:
+        if self._total_rows is not None:
+            return self._total_rows
+        wide_rows, tall_rows = self._estimated_branch_rows()
+        return wide_rows + tall_rows
+
+    def _estimated_total_rows(self) -> int:
+        if self._total_rows is not None:
+            return self._total_rows
+        if self._input_size_bytes <= 0:
+            return 120
+        return max(24, min(6000, int(round(self._input_size_bytes / _ESTIMATED_BYTES_PER_ROW))))
+
+    def _estimated_branch_rows(self) -> tuple[int, int]:
+        if self._wide_total_rows is not None or self._tall_total_rows is not None:
+            return self._wide_total_rows or 0, self._tall_total_rows or 0
+        total_rows = self._estimated_total_rows()
+        if self._ocr_mode != "fast":
+            return total_rows, 0
+        tall_rows = max(0, round(total_rows * 0.12))
+        return max(0, total_rows - tall_rows), tall_rows
+
+    def _prepare_prior_sec(self) -> float:
+        total_rows = self._estimated_total_rows()
+        per_row = 0.0068 if self._enable_furigana_mask else 0.0058
+        return max(1.0, 1.0 + total_rows * per_row)
+
+    def _backend_load_prior_sec(self) -> float:
+        observed = [
+            branch.backend_load_elapsed
+            for branch in self._branches.values()
+            if branch.backend_load_elapsed is not None
+        ]
+        if observed:
+            return max(2.0, sum(observed) / len(observed))
+        return _DEFAULT_BACKEND_LOAD_SEC
+
+    def _write_prior_sec(self) -> float:
+        return max(0.2, 0.35 + self._known_total_rows() * 0.0012)
+
+    def _observed_branch_rate_sec(self, branch_label: str) -> float | None:
+        branch = self._branches.get(branch_label)
+        if branch is None:
+            return None
+        if branch.processed_unique <= 0:
+            return None
+        if branch.ocr_started_elapsed is None or branch.last_ocr_elapsed is None:
+            return None
+        observed_sec = max(0.001, branch.last_ocr_elapsed - branch.ocr_started_elapsed)
+        return observed_sec / branch.processed_unique
+
+    def _predicted_tall_rate_from_fast_sec(self) -> float | None:
+        if self._ocr_mode != "fast":
+            return None
+        wide_branch = self._branches.get("non-tall-fast")
+        if wide_branch is None:
+            return None
+        observed_wide_rate = self._observed_branch_rate_sec("non-tall-fast")
+        if observed_wide_rate is None:
+            return None
+        blend = min(wide_branch.processed_unique, _CPU_FAST_TO_TALL_BLEND_UNIQUES) / _CPU_FAST_TO_TALL_BLEND_UNIQUES
+        scaled_tall_rate = observed_wide_rate * _CPU_FAST_TO_TALL_RATE_MULTIPLIER
+        return (_DEFAULT_TALL_ROW_SEC * (1.0 - blend)) + (scaled_tall_rate * blend)
+
+    def _branch_rate_prior_sec(self, branch_label: str) -> float:
+        if branch_label == "non-tall-fast":
+            return _DEFAULT_FAST_ROW_SEC
+        if branch_label == "tall-default":
+            predicted_tall_rate = self._predicted_tall_rate_from_fast_sec()
+            if predicted_tall_rate is not None:
+                return predicted_tall_rate
+            return _DEFAULT_TALL_ROW_SEC
+        return _DEFAULT_DEFAULT_ROW_SEC
+
+    def _branch_names(self) -> list[str]:
+        if self._ocr_mode != "fast":
+            return ["default"]
+        names: list[str] = []
+        wide_rows, tall_rows = self._estimated_branch_rows()
+        if wide_rows > 0:
+            names.append("non-tall-fast")
+        if tall_rows > 0:
+            names.append("tall-default")
+        return names
+
+    def _branch_state(self, branch_label: str) -> _BranchProgressState:
+        branch = self._branches.get(branch_label)
+        if branch is not None:
+            return branch
+        wide_rows, tall_rows = self._estimated_branch_rows()
+        default_rows = self._estimated_total_rows()
+        estimated_unique = {
+            "non-tall-fast": self._wide_total_unique,
+            "tall-default": self._tall_total_unique,
+            "default": None,
+        }.get(branch_label)
+        estimated_rows = {
+            "non-tall-fast": wide_rows,
+            "tall-default": tall_rows,
+            "default": default_rows,
+        }.get(branch_label, 0)
+        return _BranchProgressState(total_rows=estimated_rows, total_unique=estimated_unique)
+
+    def _estimate_branch_remaining_sec(self, branch_label: str) -> float:
+        branch = self._branch_state(branch_label)
+        total_unique = branch.total_unique if branch.total_unique is not None else branch.total_rows
+        processed_unique = branch.processed_unique
+        remaining_unique = max(total_unique - processed_unique, 0)
+        prior_rate = self._branch_rate_prior_sec(branch_label)
+        observed_rate = self._observed_branch_rate_sec(branch_label)
+        if observed_rate is not None:
+            blend = min(branch.processed_unique, 6) / 6.0
+            rate = (prior_rate * (1.0 - blend)) + (observed_rate * blend)
+        else:
+            rate = prior_rate
+        return remaining_unique * rate
+
+    def _estimate_remaining_sec(self, elapsed_sec: float) -> float:
+        if self._finished:
+            return 0.0
+
+        prepare_done = self._prepare_completed_elapsed is not None
+        if not prepare_done:
+            backend_count = len(self._branch_names())
+            wide_rows, tall_rows = self._estimated_branch_rows()
+            ocr_future = 0.0
+            if self._ocr_mode == "fast":
+                ocr_future += wide_rows * self._branch_rate_prior_sec("non-tall-fast")
+                ocr_future += tall_rows * self._branch_rate_prior_sec("tall-default")
+            else:
+                ocr_future += (wide_rows + tall_rows) * self._branch_rate_prior_sec("default")
+            prepare_remaining = max(self._prepare_prior_sec() - elapsed_sec, 0.4)
+            return prepare_remaining + (backend_count * self._backend_load_prior_sec()) + ocr_future + self._write_prior_sec()
+
+        remaining_sec = 0.0
+        backend_prior = self._backend_load_prior_sec()
+        for branch_label in self._branch_names():
+            branch = self._branch_state(branch_label)
+            if branch.backend_load_elapsed is None:
+                if branch.backend_load_started_elapsed is not None:
+                    load_elapsed = max(0.0, elapsed_sec - branch.backend_load_started_elapsed)
+                    remaining_sec += max(backend_prior - load_elapsed, 0.25)
+                else:
+                    remaining_sec += backend_prior
+            remaining_sec += self._estimate_branch_remaining_sec(branch_label)
+
+        if self._write_started_elapsed is None:
+            remaining_sec += self._write_prior_sec()
+        else:
+            write_elapsed = max(0.0, elapsed_sec - self._write_started_elapsed)
+            remaining_sec += max(self._write_prior_sec() - write_elapsed, 0.05)
+        return remaining_sec
 
 
 @dataclass(frozen=True)
@@ -212,6 +543,7 @@ def execute_convert_plan(
     plan: ConvertExecutionPlan,
     *,
     verbose: bool = True,
+    progress_callback: Callable[[ConvertProgressEvent], None] | None = None,
 ) -> ConvertResult:
     result = pipeline.convert_sup_to_srt(
         input_sup=plan.input_sup,
@@ -235,6 +567,7 @@ def execute_convert_plan(
         paddle_runtime_overrides=plan.paddle_runtime_overrides,
         use_temp_ocr_image_files=plan.use_temp_ocr_image_files,
         verbose=verbose,
+        progress_callback=progress_callback,
     )
     return ConvertResult(
         output_srt=result.output_srt,

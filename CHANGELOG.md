@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.0] - 2026-04-20
+- Ported the retained EXP-010 minimal cross-platform GUI MVP with optional `PySide6` packaging, a fast-only GUI workflow, and shared conversion progress and ETA reporting that stays aligned with the experiment-validated behavior.
+
 ## [0.3.6] - 2026-04-20
 - Refactored the CLI around shared application services so the upcoming GUI can reuse the same workflows directly with less duplicated logic and easier maintenance.
 - Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.

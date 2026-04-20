@@ -17,6 +17,17 @@ def test_pyproject_keeps_hf_runtime_optional() -> None:
     assert "transformers>=5.0.0" in optional_hf
 
 
+def test_pyproject_keeps_gui_runtime_optional() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+    dependencies = set(data["project"]["dependencies"])
+    optional_gui = set(data["project"]["optional-dependencies"]["gui"])
+
+    assert not any(dep.startswith("PySide6") for dep in dependencies)
+    assert "PySide6>=6.8.0" in optional_gui
+
+
 def test_pyproject_uses_release_gguf_package() -> None:
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))

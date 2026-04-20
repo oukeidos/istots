@@ -7,6 +7,8 @@ import pytest
 
 from istots.app.convert import (
     ConvertArgumentError,
+    ConvertProgressEstimator,
+    ConvertProgressEvent,
     ConvertRequest,
     ConvertResult,
     execute_convert_plan,
@@ -171,6 +173,7 @@ def test_execute_convert_plan_calls_pipeline(monkeypatch, tmp_path: Path) -> Non
     assert captured["output_srt"] == output_srt.resolve()
     assert captured["engine"] == "llama-server"
     assert captured["verbose"] is False
+    assert captured["progress_callback"] is None
     assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(
         profile="cpu",
         port=19005,
@@ -181,3 +184,246 @@ def test_execute_convert_plan_calls_pipeline(monkeypatch, tmp_path: Path) -> Non
         startup_timeout_sec=120.0,
         ctx_size=None,
     )
+
+
+def test_convert_progress_estimator_aggregates_fast_and_tall_rows(tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"x" * 220_000)
+
+    estimator = ConvertProgressEstimator(
+        input_sup=input_sup,
+        enable_furigana_mask=False,
+        ocr_mode="fast",
+    )
+
+    estimator.record(ConvertProgressEvent(phase="prepare_started", elapsed_sec=0.0))
+    estimator.record(ConvertProgressEvent(phase="prepare_completed", elapsed_sec=2.0, total_rows=60))
+    estimator.record(
+        ConvertProgressEvent(
+            phase="partition_completed",
+            elapsed_sec=2.0,
+            total_rows=60,
+            wide_total_rows=48,
+            tall_total_rows=12,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="backend_loading",
+            elapsed_sec=2.1,
+            branch_label="non-tall-fast",
+            role="ocr-fast",
+            branch_total_rows=48,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="backend_ready",
+            elapsed_sec=6.1,
+            branch_label="non-tall-fast",
+            role="ocr-fast",
+            branch_total_rows=48,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_started",
+            elapsed_sec=6.1,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_total_unique=40,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_progress",
+            elapsed_sec=16.1,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_processed_rows=24,
+            branch_total_unique=40,
+            branch_processed_unique=20,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="backend_loading",
+            elapsed_sec=16.2,
+            branch_label="tall-default",
+            role="ocr",
+            branch_total_rows=12,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="backend_ready",
+            elapsed_sec=20.2,
+            branch_label="tall-default",
+            role="ocr",
+            branch_total_rows=12,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_started",
+            elapsed_sec=20.2,
+            branch_label="tall-default",
+            branch_total_rows=12,
+            branch_total_unique=10,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_progress",
+            elapsed_sec=24.2,
+            branch_label="tall-default",
+            branch_total_rows=12,
+            branch_processed_rows=6,
+            branch_total_unique=10,
+            branch_processed_unique=5,
+        )
+    )
+
+    snapshot = estimator.snapshot(now_monotonic=estimator._clock_base + 24.2)
+
+    assert snapshot.headline == "OCR"
+    assert snapshot.detail == "30/60"
+    assert 0.5 < snapshot.fraction < 0.95
+    assert snapshot.eta_sec is not None
+    assert snapshot.eta_sec > 0.0
+
+
+def test_convert_progress_estimator_uses_partition_unique_counts_for_future_tall_eta(
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"x" * 220_000)
+
+    with_unique = ConvertProgressEstimator(
+        input_sup=input_sup,
+        enable_furigana_mask=False,
+        ocr_mode="fast",
+    )
+    without_unique = ConvertProgressEstimator(
+        input_sup=input_sup,
+        enable_furigana_mask=False,
+        ocr_mode="fast",
+    )
+
+    common_events = [
+        ConvertProgressEvent(phase="prepare_started", elapsed_sec=0.0),
+        ConvertProgressEvent(phase="prepare_completed", elapsed_sec=2.0, total_rows=60),
+        ConvertProgressEvent(
+            phase="backend_loading",
+            elapsed_sec=2.1,
+            branch_label="non-tall-fast",
+            role="ocr-fast",
+            branch_total_rows=48,
+            branch_total_unique=40,
+        ),
+        ConvertProgressEvent(
+            phase="backend_ready",
+            elapsed_sec=6.1,
+            branch_label="non-tall-fast",
+            role="ocr-fast",
+            branch_total_rows=48,
+            branch_total_unique=40,
+        ),
+        ConvertProgressEvent(
+            phase="ocr_started",
+            elapsed_sec=6.1,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_total_unique=40,
+        ),
+        ConvertProgressEvent(
+            phase="ocr_progress",
+            elapsed_sec=16.1,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_processed_rows=24,
+            branch_total_unique=40,
+            branch_processed_unique=20,
+        ),
+    ]
+
+    with_unique.record(
+        ConvertProgressEvent(
+            phase="partition_completed",
+            elapsed_sec=2.0,
+            total_rows=60,
+            wide_total_rows=48,
+            tall_total_rows=12,
+            wide_total_unique=40,
+            tall_total_unique=4,
+        )
+    )
+    without_unique.record(
+        ConvertProgressEvent(
+            phase="partition_completed",
+            elapsed_sec=2.0,
+            total_rows=60,
+            wide_total_rows=48,
+            tall_total_rows=12,
+        )
+    )
+
+    for event in common_events:
+        with_unique.record(event)
+        without_unique.record(event)
+
+    with_snapshot = with_unique.snapshot(now_monotonic=with_unique._clock_base + 16.1)
+    without_snapshot = without_unique.snapshot(now_monotonic=without_unique._clock_base + 16.1)
+
+    assert with_snapshot.eta_sec is not None
+    assert without_snapshot.eta_sec is not None
+    assert with_snapshot.eta_sec < without_snapshot.eta_sec
+
+
+def test_convert_progress_estimator_predicts_future_tall_rate_from_wide_speed(
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"x" * 220_000)
+
+    estimator = ConvertProgressEstimator(
+        input_sup=input_sup,
+        enable_furigana_mask=False,
+        ocr_mode="fast",
+    )
+
+    estimator.record(ConvertProgressEvent(phase="prepare_started", elapsed_sec=0.0))
+    estimator.record(ConvertProgressEvent(phase="prepare_completed", elapsed_sec=2.0, total_rows=60))
+    estimator.record(
+        ConvertProgressEvent(
+            phase="partition_completed",
+            elapsed_sec=2.0,
+            total_rows=60,
+            wide_total_rows=48,
+            tall_total_rows=12,
+            wide_total_unique=40,
+            tall_total_unique=10,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_started",
+            elapsed_sec=6.0,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_total_unique=40,
+        )
+    )
+    estimator.record(
+        ConvertProgressEvent(
+            phase="ocr_progress",
+            elapsed_sec=10.0,
+            branch_label="non-tall-fast",
+            branch_total_rows=48,
+            branch_processed_rows=10,
+            branch_total_unique=40,
+            branch_processed_unique=8,
+        )
+    )
+
+    assert estimator._branch_rate_prior_sec("tall-default") == pytest.approx(0.8)
