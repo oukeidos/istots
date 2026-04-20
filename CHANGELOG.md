@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.6] - 2026-04-20
+- Started moving conversion orchestration out of the terminal wrapper so the `convert` workflow can be reused by a future GUI and other shared entrypoints.
 - Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.
 - Made conversion startup more reliable by stopping stuck preprocessing workers with a clear error instead of leaving runs hanging indefinitely.
 - Stopped shared `llama-server` startup from hanging forever behind a stuck previous run by failing within the startup timeout and reporting the blocking manager lock details.

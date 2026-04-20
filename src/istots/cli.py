@@ -10,10 +10,18 @@ from pathlib import Path
 from typing import Sequence
 
 from istots import __version__
+from istots.app.convert import (
+    ConvertArgumentError,
+    ConvertPreparationError,
+    ConvertRequest,
+    execute_convert_plan,
+    plan_convert_request,
+)
 from istots.corrector import (
     DEFAULT_GEMINI_MAX_ATTEMPTS,
     DEFAULT_GEMINI_MAX_WORKERS,
     DEFAULT_GEMINI_REQUEST_TIMEOUT_SEC,
+    CorrectorMode,
 )
 from istots.model_store import (
     DEFAULT_GGUF_MODEL_ID,
@@ -1449,86 +1457,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 2
 
 
-def _validate_convert_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.max_items is not None and args.max_items <= 0:
-        parser.error("--max-items must be a positive integer")
-    if args.max_new_tokens <= 0:
-        parser.error("--max-new-tokens must be a positive integer")
-    if args.engine != "hf":
-        if args.hf_device != "auto":
-            parser.error("--hf-device is only valid with --engine hf")
-        if args.hf_dtype != "auto":
-            parser.error("--hf-dtype is only valid with --engine hf")
-    if args.engine != "llama-server" and _has_paddle_runtime_override_request(args):
-        parser.error("Paddle llama-server overrides are only valid with --engine llama-server")
-    if args.detector_output is not None and args.engine != "llama-server":
-        parser.error("--detector-output requires --engine llama-server")
-    if args.detector_output is not None and args.ocr_mode != "default":
-        parser.error("--detector-output requires --ocr-mode default")
-    if args.detector_mode != "default" and args.engine != "llama-server":
-        parser.error("--detector-mode requires --engine llama-server")
-    if args.detector_mode != "default" and args.ocr_mode != "default":
-        parser.error("--detector-mode requires --ocr-mode default")
-    if args.detector_mode != "default" and args.detector_output is None and args.corrector == "off":
-        parser.error("--detector-mode requires --detector-output or --corrector")
-    if args.detector_family_addon and args.engine != "llama-server":
-        parser.error("--detector-family-addon requires --engine llama-server")
-    if args.detector_family_addon and args.ocr_mode != "default":
-        parser.error("--detector-family-addon requires --ocr-mode default")
-    if args.detector_family_addon and args.detector_output is None and args.corrector == "off":
-        parser.error("--detector-family-addon requires --detector-output or --corrector")
-    if args.corrector != "off" and args.engine != "llama-server":
-        parser.error("--corrector requires --engine llama-server")
-    if args.corrector != "off" and args.ocr_mode != "default":
-        parser.error("--corrector requires --ocr-mode default")
-    if args.corrector == "off" and args.corrector_output is not None:
-        parser.error("--corrector-output requires --corrector")
-    if args.corrector != "qwen-local" and _has_qwen_runtime_override_request(args):
-        parser.error("Qwen llama-server overrides are only valid with --corrector qwen-local")
-    if args.corrector == "qwen-local":
-        has_model_path = args.corrector_model_path is not None
-        has_mmproj_path = args.corrector_mmproj_path is not None
-        if has_model_path != has_mmproj_path:
-            parser.error(
-                "--corrector qwen-local requires both --corrector-model-path and "
-                "--corrector-mmproj-path when either is provided"
-            )
-    if args.corrector == "gemini":
-        if args.corrector_model_path is not None or args.corrector_mmproj_path is not None:
-            parser.error("--corrector-model-path and --corrector-mmproj-path are only valid with --corrector qwen-local")
-
-
-def _has_paddle_runtime_override_request(args: argparse.Namespace) -> bool:
-    return any(
-        (
-            args.paddle_profile != "auto",
-            args.paddle_port is not None,
-            args.paddle_threads is not None,
-            args.paddle_threads_batch is not None,
-            args.paddle_gpu_layers is not None,
-            args.paddle_no_mmproj_offload,
-            args.paddle_startup_timeout_sec != 120.0,
-        )
-    )
-
-
-def _has_qwen_runtime_override_request(args: argparse.Namespace) -> bool:
-    return any(
-        (
-            args.qwen_profile != "auto",
-            args.qwen_port is not None,
-            args.qwen_threads is not None,
-            args.qwen_threads_batch is not None,
-            args.qwen_gpu_layers is not None,
-            args.qwen_no_mmproj_offload,
-            args.qwen_ctx_size is not None,
-            args.qwen_n_predict is not None,
-            args.qwen_reasoning is not None,
-            args.qwen_startup_timeout_sec != 120.0,
-        )
-    )
-
-
 def _remove_temp_artifact_dir(output_dir: Path, *, label: str) -> None:
     try:
         shutil.rmtree(output_dir)
@@ -1649,55 +1577,64 @@ def run_convert(args: argparse.Namespace) -> int:
     return _run_convert_impl(args, parser)
 
 
-def _validate_distinct_convert_paths(
-    parser: argparse.ArgumentParser,
-    *,
-    input_sup: Path,
-    output_srt: Path,
-    detector_output: Path | None,
-    corrector_output: Path | None,
-) -> None:
-    seen_paths: dict[Path, str] = {}
-    for label, path in (
-        ("input_sup", input_sup),
-        ("output_srt", output_srt),
-        ("detector_output", detector_output),
-        ("corrector_output", corrector_output),
-    ):
-        if path is None:
-            continue
-        previous_label = seen_paths.get(path)
-        if previous_label is not None:
-            parser.error(f"{previous_label} and {label} must be different paths")
-        seen_paths[path] = label
-
-
-def _convert_output_artifacts(
-    *,
-    output_srt: Path,
-    detector_output: Path | None,
-    corrector_output: Path | None,
-) -> tuple[Path, ...]:
-    artifacts = [output_srt]
-    if detector_output is not None:
-        artifacts.append(detector_output)
-    if corrector_output is not None:
-        artifacts.append(corrector_output)
-    return tuple(artifacts)
+def _build_convert_request(args: argparse.Namespace) -> ConvertRequest:
+    return ConvertRequest(
+        input_sup=args.input_sup,
+        output_srt=args.output_srt,
+        engine=args.engine,
+        hf_device=args.hf_device,
+        hf_dtype=args.hf_dtype,
+        model_id=args.model_id,
+        models_dir=args.models_dir,
+        max_items=args.max_items,
+        max_new_tokens=args.max_new_tokens,
+        ocr_mode=args.ocr_mode,
+        paddle_profile=args.paddle_profile,
+        runtime_binary_path=args.llama_server_path,
+        paddle_port=args.paddle_port,
+        paddle_threads=args.paddle_threads,
+        paddle_threads_batch=args.paddle_threads_batch,
+        paddle_gpu_layers=args.paddle_gpu_layers,
+        paddle_no_mmproj_offload=args.paddle_no_mmproj_offload,
+        paddle_startup_timeout_sec=args.paddle_startup_timeout_sec,
+        paddle_ctx_size=args.paddle_ctx_size,
+        enable_furigana_mask=args.furigana_mask,
+        use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
+        detector_output=args.detector_output,
+        detector_mode=args.detector_mode,
+        detector_family_addon=args.detector_family_addon,
+        corrector=args.corrector,
+        corrector_output=args.corrector_output,
+        corrector_model_path=args.corrector_model_path,
+        corrector_mmproj_path=args.corrector_mmproj_path,
+        qwen_profile=args.qwen_profile,
+        qwen_port=args.qwen_port,
+        qwen_threads=args.qwen_threads,
+        qwen_threads_batch=args.qwen_threads_batch,
+        qwen_gpu_layers=args.qwen_gpu_layers,
+        qwen_no_mmproj_offload=args.qwen_no_mmproj_offload,
+        qwen_ctx_size=args.qwen_ctx_size,
+        qwen_n_predict=args.qwen_n_predict,
+        qwen_reasoning=args.qwen_reasoning,
+        qwen_startup_timeout_sec=args.qwen_startup_timeout_sec,
+        corrector_gemini_model=args.corrector_gemini_model,
+        corrector_api_key_env=args.corrector_api_key_env,
+        corrector_thinking_level=args.corrector_thinking_level,
+        corrector_media_resolution=args.corrector_media_resolution,
+        corrector_cache_dir=args.corrector_cache_dir,
+        corrector_gemini_max_attempts=args.corrector_gemini_max_attempts,
+        corrector_gemini_request_timeout_sec=args.corrector_gemini_request_timeout_sec,
+        corrector_gemini_max_workers=args.corrector_gemini_max_workers,
+        srt_policy=args.srt_policy,
+        force=args.force,
+    )
 
 
 def _check_existing_convert_outputs(
     *,
-    output_srt: Path,
-    detector_output: Path | None,
-    corrector_output: Path | None,
+    existing_paths: tuple[Path, ...],
     force: bool,
 ) -> int:
-    existing_paths = [path for path in _convert_output_artifacts(
-        output_srt=output_srt,
-        detector_output=detector_output,
-        corrector_output=corrector_output,
-    ) if path.exists()]
     if not existing_paths or force:
         return 0
 
@@ -1723,169 +1660,49 @@ def _check_existing_convert_outputs(
 
 
 def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    _validate_convert_args(parser, args)
-
     configure_logging(verbose=not args.quiet)
 
-    input_sup = args.input_sup.expanduser().resolve()
-    output_srt = args.output_srt.expanduser().resolve()
-    detector_output = args.detector_output.expanduser().resolve() if args.detector_output is not None else None
-    corrector_output = (
-        args.corrector_output.expanduser().resolve() if args.corrector_output is not None else None
-    )
+    try:
+        plan = plan_convert_request(_build_convert_request(args))
+    except ConvertArgumentError as exc:
+        parser.error(str(exc))
+    except ConvertPreparationError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 1
 
-    if output_srt.exists() and output_srt.is_dir():
-        parser.error("output_srt must be a file path, not an existing directory")
-    if detector_output is not None and detector_output.exists() and detector_output.is_dir():
-        parser.error("detector_output must be a file path, not an existing directory")
-    if corrector_output is not None and corrector_output.exists() and corrector_output.is_dir():
-        parser.error("corrector_output must be a file path, not an existing directory")
-    _validate_distinct_convert_paths(
-        parser,
-        input_sup=input_sup,
-        output_srt=output_srt,
-        detector_output=detector_output,
-        corrector_output=corrector_output,
-    )
     overwrite_check = _check_existing_convert_outputs(
-        output_srt=output_srt,
-        detector_output=detector_output,
-        corrector_output=corrector_output,
+        existing_paths=plan.existing_output_artifacts,
         force=args.force,
     )
     if overwrite_check != 0:
         return overwrite_check
-    if args.corrector_gemini_max_attempts < 1:
-        parser.error("--corrector-gemini-max-attempts must be >= 1")
-    if args.corrector_gemini_request_timeout_sec <= 0:
-        parser.error("--corrector-gemini-request-timeout-sec must be > 0")
-    if args.corrector_gemini_max_workers < 1:
-        parser.error("--corrector-gemini-max-workers must be >= 1")
 
-    from istots.model_store import ensure_local_model, ensure_local_qwen_corrector_assets
-    from istots.pipeline import convert_sup_to_srt
-    from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
-
-    corrector_config = None
-    if args.corrector != "off":
-        from istots.corrector import CorrectorConfig, CorrectorMode
-
-        resolved_corrector_model_path = None
-        resolved_corrector_mmproj_path = None
-        if args.corrector == "qwen-local":
-            if args.corrector_model_path is not None and args.corrector_mmproj_path is not None:
-                resolved_corrector_model_path = args.corrector_model_path.expanduser().resolve()
-                resolved_corrector_mmproj_path = args.corrector_mmproj_path.expanduser().resolve()
-            else:
-                try:
-                    (
-                        resolved_corrector_model_path,
-                        resolved_corrector_mmproj_path,
-                    ) = ensure_local_qwen_corrector_assets(models_dir=args.models_dir)
-                except Exception as exc:
-                    logging.getLogger(__name__).error("corrector asset check failed: %s", exc)
-                    return 1
-        corrector_config = CorrectorConfig(
-            mode=CorrectorMode(args.corrector),
-            output_path=corrector_output,
-            local_model_path=resolved_corrector_model_path,
-            local_mmproj_path=resolved_corrector_mmproj_path,
-            local_runtime_overrides=Qwen35RuntimeOverrides(
-                profile=args.qwen_profile,
-                port=args.qwen_port,
-                threads=args.qwen_threads,
-                threads_batch=args.qwen_threads_batch,
-                gpu_layers=args.qwen_gpu_layers,
-                no_mmproj_offload=True if args.qwen_no_mmproj_offload else None,
-                startup_timeout_sec=args.qwen_startup_timeout_sec,
-                ctx_size=args.qwen_ctx_size,
-                n_predict=args.qwen_n_predict,
-                reasoning=args.qwen_reasoning,
-            ),
-            api_key_env=args.corrector_api_key_env,
-            gemini_model=args.corrector_gemini_model,
-            thinking_level=args.corrector_thinking_level,
-            media_resolution=args.corrector_media_resolution,
-            cache_dir=(
-                args.corrector_cache_dir.expanduser().resolve()
-                if args.corrector_cache_dir is not None
-                else None
-            ),
-            max_attempts=args.corrector_gemini_max_attempts,
-            request_timeout=args.corrector_gemini_request_timeout_sec,
-            gemini_max_workers=args.corrector_gemini_max_workers,
-        )
-
-    model_id = args.model_id
-    if args.engine == "hf":
-        try:
-            model_path = ensure_local_model(
-                model_id=args.model_id,
-                models_dir=args.models_dir,
-            )
-        except Exception as exc:
-            logging.getLogger(__name__).error("model check failed: %s", exc)
-            return 1
-        model_id = str(model_path)
-        if not args.quiet:
-            logging.getLogger(__name__).info("using HF fallback model: %s", model_path)
+    if not args.quiet and plan.engine == "hf" and plan.resolved_hf_model_path is not None:
+        logging.getLogger(__name__).info("using HF fallback model: %s", plan.resolved_hf_model_path)
     elif not args.quiet:
         logging.getLogger(__name__).info(
             "using primary OCR engine: %s (mode=%s profile=%s)",
-            args.engine,
-            args.ocr_mode,
-            args.paddle_profile,
+            plan.engine,
+            plan.ocr_mode,
+            plan.paddle_runtime_overrides.profile,
         )
-        if corrector_config is not None:
-            logging.getLogger(__name__).info("using conservative corrector: %s", corrector_config.mode)
-            if corrector_config.mode is CorrectorMode.QWEN_LOCAL:
+        if plan.corrector_config is not None:
+            logging.getLogger(__name__).info("using conservative corrector: %s", plan.corrector_config.mode)
+            if plan.corrector_mode is CorrectorMode.QWEN_LOCAL:
                 logging.getLogger(__name__).info(
                     "using local Qwen corrector assets: model=%s mmproj=%s",
-                    corrector_config.local_model_path,
-                    corrector_config.local_mmproj_path,
+                    plan.corrector_config.local_model_path,
+                    plan.corrector_config.local_mmproj_path,
                 )
 
-    paddle_runtime_overrides = PaddleOCRVLRuntimeOverrides(
-        profile=args.paddle_profile,
-        port=args.paddle_port,
-        threads=args.paddle_threads,
-        threads_batch=args.paddle_threads_batch,
-        gpu_layers=args.paddle_gpu_layers,
-        no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
-        startup_timeout_sec=args.paddle_startup_timeout_sec,
-        ctx_size=args.paddle_ctx_size,
-    )
-
     try:
-        result = convert_sup_to_srt(
-            input_sup=input_sup,
-            output_srt=output_srt,
-            hf_device=args.hf_device,
-            hf_dtype=args.hf_dtype,
-            engine=args.engine,
-            ocr_mode=args.ocr_mode,
-            detector_output=detector_output,
-            detector_mode=args.detector_mode,
-            detector_family_addon=args.detector_family_addon,
-            corrector_config=corrector_config,
-            model_id=model_id,
-            models_dir=args.models_dir,
-            max_items=args.max_items,
-            max_new_tokens=args.max_new_tokens,
-            local_files_only=args.engine == "hf",
-            enable_furigana_mask=args.furigana_mask,
-            srt_policy=args.srt_policy,
-            runtime_binary_path=args.llama_server_path,
-            paddle_runtime_overrides=paddle_runtime_overrides,
-            use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
-            verbose=not args.quiet,
-        )
+        result = execute_convert_plan(plan, verbose=not args.quiet)
     except Exception as exc:
         logging.getLogger(__name__).error("conversion failed: %s", exc)
         return 1
 
     if not args.quiet:
-        if args.engine == "hf":
+        if plan.engine == "hf":
             logging.getLogger(__name__).info(
                 "done: wrote %d subtitles to %s (hf-device=%s)",
                 result.written_count,
@@ -1899,13 +1716,13 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 result.output_srt,
                 result.device_used,
             )
-        if detector_output is not None:
+        if plan.detector_output is not None:
             logging.getLogger(__name__).info(
                 "detector manifest: %s disagreements=%d",
-                detector_output,
+                plan.detector_output,
                 result.detector_record_count,
             )
-        if corrector_config is not None:
+        if plan.corrector_config is not None:
             fallback_count = getattr(result, "correction_fallback_count", 0)
             logging.getLogger(__name__).info(
                 "conservative correction: rows=%d applied=%d fallback=%d",
@@ -1913,8 +1730,8 @@ def _run_convert_impl(args: argparse.Namespace, parser: argparse.ArgumentParser)
                 result.correction_applied_count,
                 fallback_count,
             )
-            if corrector_output is not None:
-                logging.getLogger(__name__).info("corrector manifest: %s", corrector_output)
+            if plan.corrector_config.output_path is not None:
+                logging.getLogger(__name__).info("corrector manifest: %s", plan.corrector_config.output_path)
     return 0
 
 
