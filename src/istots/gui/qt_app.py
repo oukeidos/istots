@@ -26,6 +26,7 @@ from istots.gui.core import (
     run_gui_doctor_check,
     suggest_output_srt_path,
 )
+from istots.resources import iter_gui_icon_png_payloads
 
 try:
     from PySide6 import QtCore, QtGui, QtWidgets
@@ -289,6 +290,31 @@ def _status_shape_name(state: str) -> str:
         "ok": "circle-check",
         "fail": "square-x",
     }.get(state, "ring")
+
+
+def _build_gui_icon():
+    if QtGui is None:
+        return None
+
+    icon = QtGui.QIcon()
+    try:
+        payloads = iter_gui_icon_png_payloads()
+    except OSError:
+        return icon
+
+    for payload in payloads:
+        pixmap = QtGui.QPixmap()
+        if pixmap.loadFromData(payload, "PNG"):
+            icon.addPixmap(pixmap)
+    return icon
+
+
+def _apply_application_metadata(app) -> None:
+    app.setApplicationName("istots")
+    app.setOrganizationName("istots")
+    icon = _build_gui_icon()
+    if icon is not None and not icon.isNull():
+        app.setWindowIcon(icon)
 
 
 if QtCore is not None:  # pragma: no branch
@@ -571,6 +597,7 @@ if QtWidgets is not None:  # pragma: no branch
 
             self.setObjectName("AppWindow")
             self.setWindowTitle("istots")
+            self._apply_window_icon()
             self.resize(920, 610)
             self.setMinimumSize(760, 610)
             self._configure_palette()
@@ -580,6 +607,15 @@ if QtWidgets is not None:  # pragma: no branch
                 self._load_preview_fixture()
             self._refresh_ui()
             self._apply_window_fit()
+
+        def _apply_window_icon(self) -> None:
+            icon = _build_gui_icon()
+            if icon is None or icon.isNull():
+                return
+            app = QtWidgets.QApplication.instance()
+            if app is not None and app.windowIcon().isNull():
+                app.setWindowIcon(icon)
+            self.setWindowIcon(icon)
 
         def _configure_palette(self) -> None:
             theme = self._theme
@@ -1375,8 +1411,9 @@ def render_theme_previews(output_dir: Path) -> tuple[Path, ...]:
     owns_app = app is None
     if app is None:
         app = QtWidgets.QApplication([])
-        app.setApplicationName("istots")
-        app.setOrganizationName("istots")
+        _apply_application_metadata(app)
+    else:
+        _apply_application_metadata(app)
 
     rendered_paths: list[Path] = []
     try:
@@ -1403,8 +1440,7 @@ def launch_gui(*, theme_id: str | None = None) -> int:
     _ensure_qt()
     assert QtWidgets is not None
     app = QtWidgets.QApplication([])
-    app.setApplicationName("istots")
-    app.setOrganizationName("istots")
+    _apply_application_metadata(app)
     window = TastingWindow(theme_id=theme_id)
     window.show()
     return app.exec()

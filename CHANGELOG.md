@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.1] - 2026-04-20
+- Added a bundled desktop app icon so the GUI is easier to recognize in packaged builds.
+
 ## [0.4.0] - 2026-04-20
 - Added an optional desktop GUI so users can set up the local runtime, check that OCR is ready, and run quick single-file SUP-to-SRT conversions with visible progress instead of relying only on the command line.
 

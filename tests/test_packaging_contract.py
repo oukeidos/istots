@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import tomllib
 
+from istots.resources import icon_bundle_root
+
 
 def test_pyproject_keeps_hf_runtime_optional() -> None:
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
@@ -36,3 +38,14 @@ def test_pyproject_uses_release_gguf_package() -> None:
 
     assert "gguf==0.18.0" in dependencies
     assert not any("git+https://github.com/ggml-org/llama.cpp" in dep for dep in dependencies)
+
+
+def test_packaged_gui_icon_bundle_keeps_cross_platform_outputs() -> None:
+    bundle = icon_bundle_root()
+
+    assert bundle.joinpath("README.md").is_file()
+    assert bundle.joinpath("png", "generic", "istots_256.png").is_file()
+    assert bundle.joinpath("windows", "istots.ico").is_file()
+    assert bundle.joinpath("windows", "istots_setup.ico").is_file()
+    assert bundle.joinpath("macos", "istots.icns").is_file()
+    assert bundle.joinpath("linux", "hicolor", "scalable", "apps", "istots.svg").is_file()

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">scan segments leftpull soft</title>
+  <desc id="desc">A square scan lane with a restrained left-side sweep cue.</desc>
+  <rect width="256" height="256" rx="56" fill="#eb5f2b"/>
+  <rect x="66" y="84" width="124" height="18" rx="9" fill="#fff7eb"/>
+  <rect x="66" y="118" width="96" height="18" rx="9" fill="#fff7eb"/>
+  <rect x="66" y="152" width="136" height="18" rx="9" fill="#fff7eb"/>
+  <rect x="112" y="70" width="6" height="112" fill="#ffe6c4" opacity="0.34"/>
+  <rect x="118" y="76" width="4" height="100" fill="#ffe6c4" opacity="0.20"/>
+  <rect x="120" y="62" width="16" height="128" fill="#ffd7a3"/>
+</svg>

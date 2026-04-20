@@ -105,3 +105,19 @@ def test_progress_time_marks_remaining_as_estimated() -> None:
         assert formatted == "00:24 / est. 00:15 left"
     finally:
         window.close()
+
+
+def test_tasting_window_uses_packaged_gui_icon() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        assert not app.windowIcon().isNull()
+        assert not window.windowIcon().isNull()
+    finally:
+        window.close()
