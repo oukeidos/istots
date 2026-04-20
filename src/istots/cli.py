@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -16,6 +15,14 @@ from istots.app.convert import (
     ConvertRequest,
     execute_convert_plan,
     plan_convert_request,
+)
+from istots.app.smoke import (
+    SmokeArgumentError,
+    SmokeCleanupError,
+    SmokePreparationError,
+    SmokeRequest,
+    execute_smoke_plan,
+    plan_smoke_request,
 )
 from istots.corrector import (
     DEFAULT_GEMINI_MAX_ATTEMPTS,
@@ -1457,66 +1464,15 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 2
 
 
-def _remove_temp_artifact_dir(output_dir: Path, *, label: str) -> None:
-    try:
-        shutil.rmtree(output_dir)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise RuntimeError(f"failed to remove {label} temporary artifacts at {output_dir}: {exc}") from exc
-
-
-def _validate_smoke_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.detector_mode != "default" and args.no_detector and args.corrector == "off":
-        parser.error(
-            f"--detector-mode {args.detector_mode} requires detector-enabled smoke validation; "
-            "remove --no-detector, keep --ocr-mode default, or enable --corrector"
-        )
-    if args.detector_family_addon and args.no_detector and args.corrector == "off":
-        parser.error(
-            "--detector-family-addon requires detector-enabled smoke validation; "
-            "remove --no-detector, keep --ocr-mode default, or enable --corrector"
-        )
-
-
-def run_smoke(args: argparse.Namespace) -> int:
-    parser = _build_smoke_parser()
-
-    if args.input_sup is None:
-        parser.error("--input-sup is required for smoke")
-    _validate_smoke_args(parser, args)
-
-    is_auto_output_dir = args.output_dir is None
-    if args.output_dir is not None:
-        output_dir = args.output_dir.expanduser().resolve()
-        if output_dir.exists() and not output_dir.is_dir():
-            parser.error("--output-dir must be a directory path")
-    else:
-        output_dir = Path(tempfile.mkdtemp(prefix="istots-smoke-")).resolve()
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    input_sup = args.input_sup.expanduser().resolve()
-    output_srt = output_dir / f"{input_sup.stem}.smoke.srt"
-    detector_output = None
-    if args.ocr_mode == "default" and not args.no_detector:
-        detector_output = output_dir / f"{input_sup.stem}.detector.jsonl"
-    corrector_output = None
-    if args.corrector != "off":
-        corrector_output = output_dir / f"{input_sup.stem}.corrected.jsonl"
-
-    convert_args = argparse.Namespace(
-        input_sup=input_sup,
-        output_srt=output_srt,
-        engine="llama-server",
-        hf_device="auto",
-        hf_dtype="auto",
-        model_id=DEFAULT_MODEL_ID,
+def _build_smoke_request(args: argparse.Namespace) -> SmokeRequest:
+    return SmokeRequest(
+        input_sup=args.input_sup,
+        output_dir=args.output_dir,
         models_dir=args.models_dir,
-        max_items=None,
         max_new_tokens=args.max_new_tokens,
         ocr_mode=args.ocr_mode,
         paddle_profile=args.paddle_profile,
-        llama_server_path=args.llama_server_path,
+        runtime_binary_path=args.llama_server_path,
         paddle_port=args.paddle_port,
         paddle_threads=args.paddle_threads,
         paddle_threads_batch=args.paddle_threads_batch,
@@ -1524,14 +1480,12 @@ def run_smoke(args: argparse.Namespace) -> int:
         paddle_no_mmproj_offload=args.paddle_no_mmproj_offload,
         paddle_startup_timeout_sec=args.paddle_startup_timeout_sec,
         paddle_ctx_size=args.paddle_ctx_size,
-        quiet=args.quiet,
-        furigana_mask=args.furigana_mask,
-        no_temp_ocr_image_files=args.no_temp_ocr_image_files,
-        detector_output=detector_output,
+        enable_furigana_mask=args.furigana_mask,
+        use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
+        no_detector=args.no_detector,
         detector_mode=args.detector_mode,
         detector_family_addon=args.detector_family_addon,
         corrector=args.corrector,
-        corrector_output=corrector_output,
         corrector_model_path=args.corrector_model_path,
         corrector_mmproj_path=args.corrector_mmproj_path,
         qwen_profile=args.qwen_profile,
@@ -1555,20 +1509,92 @@ def run_smoke(args: argparse.Namespace) -> int:
         srt_policy=args.srt_policy,
         force=args.force,
     )
-    rc = _run_convert_impl(convert_args, parser)
-    if rc != 0:
-        if is_auto_output_dir:
-            logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", output_dir)
-        return rc
-    if not is_auto_output_dir:
-        return rc
+
+
+def run_smoke(args: argparse.Namespace) -> int:
+    parser = _build_smoke_parser()
+
+    if args.input_sup is None:
+        parser.error("--input-sup is required for smoke")
+
+    configure_logging(verbose=not args.quiet)
+
     try:
-        _remove_temp_artifact_dir(output_dir, label="smoke")
-    except RuntimeError as exc:
+        plan = plan_smoke_request(
+            _build_smoke_request(args),
+            make_tempdir=tempfile.mkdtemp,
+        )
+    except SmokeArgumentError as exc:
+        parser.error(str(exc))
+    except SmokePreparationError as exc:
         logging.getLogger(__name__).error("%s", exc)
         return 1
+
+    overwrite_check = _check_existing_convert_outputs(
+        existing_paths=plan.convert_plan.existing_output_artifacts,
+        force=args.force,
+    )
+    if overwrite_check != 0:
+        if plan.is_auto_output_dir:
+            logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", plan.output_dir)
+        return overwrite_check
+
     if not args.quiet:
-        logging.getLogger(__name__).info("removed temporary smoke artifacts after success: %s", output_dir)
+        logging.getLogger(__name__).info("using primary OCR engine: llama-server (mode=%s profile=%s)", plan.convert_plan.ocr_mode, plan.convert_plan.paddle_runtime_overrides.profile)
+        if plan.convert_plan.corrector_config is not None:
+            logging.getLogger(__name__).info(
+                "using conservative corrector: %s",
+                plan.convert_plan.corrector_config.mode,
+            )
+            if plan.convert_plan.corrector_mode is CorrectorMode.QWEN_LOCAL:
+                logging.getLogger(__name__).info(
+                    "using local Qwen corrector assets: model=%s mmproj=%s",
+                    plan.convert_plan.corrector_config.local_model_path,
+                    plan.convert_plan.corrector_config.local_mmproj_path,
+                )
+
+    try:
+        result = execute_smoke_plan(plan, verbose=not args.quiet)
+    except SmokeCleanupError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        return 1
+    except Exception as exc:
+        logging.getLogger(__name__).error("conversion failed: %s", exc)
+        if plan.is_auto_output_dir:
+            logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", plan.output_dir)
+        return 1
+
+    if not args.quiet:
+        logging.getLogger(__name__).info(
+            "done: wrote %d subtitles to %s (llama-profile=%s)",
+            result.convert_result.written_count,
+            result.convert_result.output_srt,
+            result.convert_result.device_used,
+        )
+        if plan.convert_plan.detector_output is not None:
+            logging.getLogger(__name__).info(
+                "detector manifest: %s disagreements=%d",
+                plan.convert_plan.detector_output,
+                result.convert_result.detector_record_count,
+            )
+        if plan.convert_plan.corrector_config is not None:
+            fallback_count = getattr(result.convert_result, "correction_fallback_count", 0)
+            logging.getLogger(__name__).info(
+                "conservative correction: rows=%d applied=%d fallback=%d",
+                result.convert_result.correction_record_count,
+                result.convert_result.correction_applied_count,
+                fallback_count,
+            )
+            if plan.convert_plan.corrector_config.output_path is not None:
+                logging.getLogger(__name__).info(
+                    "corrector manifest: %s",
+                    plan.convert_plan.corrector_config.output_path,
+                )
+        if result.removed_output_dir:
+            logging.getLogger(__name__).info(
+                "removed temporary smoke artifacts after success: %s",
+                result.output_dir,
+            )
     return 0
 
 
