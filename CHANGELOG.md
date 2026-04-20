@@ -1,9 +1,7 @@
 # Changelog
 
 ## [0.3.6] - 2026-04-20
-- Retained final PGS candidates that would otherwise collapse to zero duration at EOF by assigning a deterministic `2.0s` fallback instead of dropping the subtitle outright.
-- Removed the `10s` long-gap drop guard during PGS candidate finalization so zero-duration cues are still repaired toward the next start with the existing `1ms` floor.
-- Expanded focused PGS assembly regression coverage to lock in EOF no-drop repair, long-gap no-drop repair, and the preserved short-gap repair behavior.
+- Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.
 
 ## [0.3.5] - 2026-04-19
 - Narrowed the default `setup` path to the primary GGUF runtime and made HF fallback provisioning an explicit `--with-hf-fallback` opt-in.
