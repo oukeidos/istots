@@ -16,6 +16,12 @@ from istots.app.convert import (
     execute_convert_plan,
     plan_convert_request,
 )
+from istots.app.doctor import (
+    DoctorArgumentError,
+    DoctorRequest,
+    execute_doctor_plan,
+    plan_doctor_request,
+)
 from istots.app.smoke import (
     SmokeArgumentError,
     SmokeCleanupError,
@@ -37,7 +43,7 @@ from istots.model_store import (
     DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
     DEFAULT_QWEN_CORRECTOR_MODEL_ID,
 )
-from istots.ocr import LOCAL_PADDLE_CTX_SIZE, PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
+from istots.ocr import LOCAL_PADDLE_CTX_SIZE
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
@@ -1323,56 +1329,37 @@ def run_materialize_mmproj(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validate_doctor_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> tuple[str, str]:
-    category = args.doctor_category
-    target = args.doctor_target
-    if category is None:
-        parser.error("doctor requires a category: runtime, auth, or workflow")
-
-    if target is None:
-        parser.error("doctor category requires a target")
-
-    normalized_target = str(target).strip().lower()
-    allowed_targets = {
-        "runtime": {"paddle", "qwen"},
-        "auth": {"gemini"},
-        "workflow": {"default", "wider", "corrector-qwen", "corrector-gemini"},
-    }
-    if normalized_target not in allowed_targets[category]:
-        joined = ", ".join(sorted(allowed_targets[category]))
-        parser.error(f"unsupported doctor target for {category}: {target!r}. Expected one of: {joined}")
-
-    if category == "workflow" and args.input_sup is None:
-        parser.error("doctor workflow requires --input-sup")
-
-    return category, normalized_target
-
-
-def _build_doctor_paddle_runtime_overrides(args: argparse.Namespace) -> PaddleOCRVLRuntimeOverrides:
-    return PaddleOCRVLRuntimeOverrides(
-        profile=args.paddle_profile,
-        port=args.paddle_port,
-        threads=args.paddle_threads,
-        threads_batch=args.paddle_threads_batch,
-        gpu_layers=args.paddle_gpu_layers,
-        no_mmproj_offload=True if args.paddle_no_mmproj_offload else None,
-        startup_timeout_sec=args.paddle_startup_timeout_sec,
-        ctx_size=args.paddle_ctx_size,
-    )
-
-
-def _build_doctor_qwen_runtime_overrides(args: argparse.Namespace) -> Qwen35RuntimeOverrides:
-    return Qwen35RuntimeOverrides(
-        profile=args.qwen_profile,
-        port=args.qwen_port,
-        threads=args.qwen_threads,
-        threads_batch=args.qwen_threads_batch,
-        gpu_layers=args.qwen_gpu_layers,
-        no_mmproj_offload=True if args.qwen_no_mmproj_offload else None,
-        startup_timeout_sec=args.qwen_startup_timeout_sec,
-        ctx_size=args.qwen_ctx_size,
-        n_predict=args.qwen_n_predict,
-        reasoning=args.qwen_reasoning,
+def _build_doctor_request(args: argparse.Namespace) -> DoctorRequest:
+    return DoctorRequest(
+        category=args.doctor_category,
+        target=args.doctor_target,
+        models_dir=args.models_dir,
+        min_pixels=args.min_pixels,
+        explicit_binary_path=args.llama_server_path,
+        host=args.host,
+        input_sup=args.input_sup,
+        api_key_env=args.api_key_env,
+        paddle_profile=args.paddle_profile,
+        paddle_port=args.paddle_port,
+        paddle_threads=args.paddle_threads,
+        paddle_threads_batch=args.paddle_threads_batch,
+        paddle_gpu_layers=args.paddle_gpu_layers,
+        paddle_no_mmproj_offload=args.paddle_no_mmproj_offload,
+        paddle_startup_timeout_sec=args.paddle_startup_timeout_sec,
+        paddle_ctx_size=args.paddle_ctx_size,
+        corrector_model_path=args.corrector_model_path,
+        corrector_mmproj_path=args.corrector_mmproj_path,
+        qwen_profile=args.qwen_profile,
+        qwen_port=args.qwen_port,
+        qwen_threads=args.qwen_threads,
+        qwen_threads_batch=args.qwen_threads_batch,
+        qwen_gpu_layers=args.qwen_gpu_layers,
+        qwen_no_mmproj_offload=args.qwen_no_mmproj_offload,
+        qwen_ctx_size=args.qwen_ctx_size,
+        qwen_n_predict=args.qwen_n_predict,
+        qwen_reasoning=args.qwen_reasoning,
+        qwen_startup_timeout_sec=args.qwen_startup_timeout_sec,
+        use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
     )
 
 
@@ -1407,61 +1394,15 @@ def _log_doctor_suite_result(
 
 def run_doctor(args: argparse.Namespace) -> int:
     parser = _build_doctor_parser()
-    category, target = _validate_doctor_mode(parser, args)
     configure_logging(verbose=not args.quiet)
 
-    from istots.doctor import run_gemini_auth_doctor, run_paddle_runtime_doctor, run_qwen_runtime_doctor, run_workflow_doctor
+    try:
+        plan = plan_doctor_request(_build_doctor_request(args))
+    except DoctorArgumentError as exc:
+        parser.error(str(exc))
 
-    paddle_overrides = _build_doctor_paddle_runtime_overrides(args)
-    qwen_overrides = _build_doctor_qwen_runtime_overrides(args)
-
-    if category == "runtime" and target == "paddle":
-        result = run_paddle_runtime_doctor(
-            models_dir=args.models_dir,
-            min_pixels=args.min_pixels,
-            explicit_binary_path=args.llama_server_path,
-            host=args.host,
-            overrides=paddle_overrides,
-            startup_timeout_sec=args.paddle_startup_timeout_sec,
-        )
-        return _log_doctor_suite_result(result, quiet=args.quiet)
-
-    if category == "runtime" and target == "qwen":
-        result = run_qwen_runtime_doctor(
-            models_dir=args.models_dir,
-            explicit_binary_path=args.llama_server_path,
-            host=args.host,
-            overrides=qwen_overrides,
-            explicit_model_path=args.corrector_model_path,
-            explicit_mmproj_path=args.corrector_mmproj_path,
-            startup_timeout_sec=args.qwen_startup_timeout_sec,
-        )
-        return _log_doctor_suite_result(result, quiet=args.quiet)
-
-    if category == "auth" and target == "gemini":
-        result = run_gemini_auth_doctor(api_key_env=args.api_key_env)
-        return _log_doctor_suite_result(result, quiet=args.quiet)
-
-    if category == "workflow" and target is not None:
-        result = run_workflow_doctor(
-            workflow=target,
-            input_sup=args.input_sup.expanduser().resolve(),
-            models_dir=args.models_dir,
-            min_pixels=args.min_pixels,
-            explicit_binary_path=args.llama_server_path,
-            host=args.host,
-            paddle_overrides=paddle_overrides,
-            qwen_overrides=qwen_overrides,
-            explicit_qwen_model_path=args.corrector_model_path,
-            explicit_qwen_mmproj_path=args.corrector_mmproj_path,
-            api_key_env=args.api_key_env,
-            startup_timeout_sec=max(args.paddle_startup_timeout_sec, args.qwen_startup_timeout_sec),
-            use_temp_ocr_image_files=not args.no_temp_ocr_image_files,
-        )
-        return _log_doctor_suite_result(result, quiet=args.quiet)
-
-    parser.error("unsupported doctor mode")
-    return 2
+    result = execute_doctor_plan(plan)
+    return _log_doctor_suite_result(result, quiet=args.quiet)
 
 
 def _build_smoke_request(args: argparse.Namespace) -> SmokeRequest:
