@@ -39,6 +39,10 @@ With the repository checked out, install the Python dependencies:
 uv sync
 ```
 
+An optional desktop GUI is included as a foundation for a future
+Windows-focused packaged distribution. If you want to try it from source, use
+`uv sync --extra gui` and then launch it with `uv run istots-gui`.
+
 Then prepare the default local runtime assets:
 
 ```bash
