@@ -162,6 +162,91 @@ class LlamaServerManagerLock:
 
 
 @dataclass(frozen=True)
+class LlamaServerManagerLockContention:
+    lock_path: Path
+    state_path: Path
+    owner_pid: int | None = None
+    owner_instance_id: str | None = None
+    owner_age_sec: float | None = None
+    owner_is_alive: bool | None = None
+    lock_age_sec: float | None = None
+    state_pid: int | None = None
+    state_instance_id: str | None = None
+    state_role: str | None = None
+    state_port: int | None = None
+    state_age_sec: float | None = None
+    state_matches_owner: bool | None = None
+
+
+@dataclass(frozen=True)
+class _TimeoutBudget:
+    timeout_sec: float
+    started_at: float
+    deadline: float
+
+    @classmethod
+    def start(cls, timeout_sec: float) -> "_TimeoutBudget":
+        started_at = time.monotonic()
+        normalized_timeout_sec = float(timeout_sec)
+        return cls(
+            timeout_sec=normalized_timeout_sec,
+            started_at=started_at,
+            deadline=started_at + normalized_timeout_sec,
+        )
+
+    def remaining_sec(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    def elapsed_sec(self) -> float:
+        return max(0.0, time.monotonic() - self.started_at)
+
+
+class LlamaServerManagerLockTimeoutError(TimeoutError):
+    def __init__(
+        self,
+        *,
+        contention: LlamaServerManagerLockContention,
+        elapsed_sec: float,
+        timeout_sec: float,
+    ) -> None:
+        self.contention = contention
+        self.elapsed_sec = elapsed_sec
+        self.timeout_sec = timeout_sec
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        details = [
+            f"lock={self.contention.lock_path}",
+            f"state={self.contention.state_path}",
+            f"elapsed={self.elapsed_sec:.2f}s",
+            f"timeout={self.timeout_sec:.2f}s",
+        ]
+        if self.contention.owner_pid is not None:
+            details.append(f"owner_pid={self.contention.owner_pid}")
+        if self.contention.owner_instance_id is not None:
+            details.append(f"owner_instance_id={self.contention.owner_instance_id}")
+        if self.contention.owner_age_sec is not None:
+            details.append(f"owner_age={self.contention.owner_age_sec:.1f}s")
+        if self.contention.owner_is_alive is not None:
+            details.append(f"owner_alive={self.contention.owner_is_alive}")
+        if self.contention.lock_age_sec is not None:
+            details.append(f"lock_age={self.contention.lock_age_sec:.1f}s")
+        if self.contention.state_pid is not None:
+            details.append(f"state_pid={self.contention.state_pid}")
+        if self.contention.state_instance_id is not None:
+            details.append(f"state_instance_id={self.contention.state_instance_id}")
+        if self.contention.state_role is not None:
+            details.append(f"state_role={self.contention.state_role}")
+        if self.contention.state_port is not None:
+            details.append(f"state_port={self.contention.state_port}")
+        if self.contention.state_age_sec is not None:
+            details.append(f"state_age={self.contention.state_age_sec:.1f}s")
+        if self.contention.state_matches_owner is not None:
+            details.append(f"state_matches_owner={self.contention.state_matches_owner}")
+        return "timed out waiting for llama-server manager lock: " + " ".join(details)
+
+
+@dataclass(frozen=True)
 class LlamaServerOCRResponse:
     text: str
     finish_reason: str | None = None
@@ -350,7 +435,58 @@ def _cleanup_stale_llama_server_manager_lock(paths: LlamaServerManagerPaths) -> 
     return True
 
 
-def _acquire_llama_server_manager_lock() -> LlamaServerManagerLock:
+def _snapshot_llama_server_manager_lock_contention(
+    paths: LlamaServerManagerPaths,
+) -> LlamaServerManagerLockContention:
+    owner = _load_llama_server_manager_lock_owner(paths)
+    state = _load_llama_server_manager_state()
+    now = time.time()
+
+    try:
+        lock_age_sec = max(0.0, now - paths.lock_dir.stat().st_mtime)
+    except OSError:
+        lock_age_sec = None
+
+    owner_age_sec = max(0.0, now - owner.created_at) if owner is not None else None
+    owner_is_alive = _is_pid_alive(owner.pid) if owner is not None else None
+    state_age_sec = max(0.0, now - state.created_at) if state is not None else None
+    state_matches_owner = (
+        state.instance_id == owner.instance_id
+        if owner is not None and state is not None
+        else None
+    )
+
+    return LlamaServerManagerLockContention(
+        lock_path=paths.lock_dir,
+        state_path=paths.state_path,
+        owner_pid=owner.pid if owner is not None else None,
+        owner_instance_id=owner.instance_id if owner is not None else None,
+        owner_age_sec=owner_age_sec,
+        owner_is_alive=owner_is_alive,
+        lock_age_sec=lock_age_sec,
+        state_pid=state.pid if state is not None else None,
+        state_instance_id=state.instance_id if state is not None else None,
+        state_role=state.role if state is not None else None,
+        state_port=state.port if state is not None else None,
+        state_age_sec=state_age_sec,
+        state_matches_owner=state_matches_owner,
+    )
+
+
+def _raise_llama_server_manager_lock_timeout(
+    paths: LlamaServerManagerPaths,
+    timeout_budget: _TimeoutBudget,
+) -> None:
+    raise LlamaServerManagerLockTimeoutError(
+        contention=_snapshot_llama_server_manager_lock_contention(paths),
+        elapsed_sec=timeout_budget.elapsed_sec(),
+        timeout_sec=timeout_budget.timeout_sec,
+    )
+
+
+def _acquire_llama_server_manager_lock(
+    timeout_budget: _TimeoutBudget | None = None,
+) -> LlamaServerManagerLock:
     paths = llama_server_manager_paths()
     _ensure_private_directory(paths.runtime_root)
     _ensure_private_directory(paths.manager_dir)
@@ -365,6 +501,12 @@ def _acquire_llama_server_manager_lock() -> LlamaServerManagerLock:
             paths.lock_dir.mkdir(mode=0o700)
         except FileExistsError:
             if _cleanup_stale_llama_server_manager_lock(paths):
+                continue
+            if timeout_budget is not None:
+                remaining_sec = timeout_budget.remaining_sec()
+                if remaining_sec <= 0:
+                    _raise_llama_server_manager_lock_timeout(paths, timeout_budget)
+                time.sleep(min(DEFAULT_LLAMA_SERVER_MANAGER_LOCK_POLL_SEC, remaining_sec))
                 continue
             time.sleep(DEFAULT_LLAMA_SERVER_MANAGER_LOCK_POLL_SEC)
             continue
@@ -640,9 +782,9 @@ def _terminate_started_llama_server_process(process: subprocess.Popen[str]) -> N
         process.wait(timeout=5)
 
 
-def start_llama_server(
+def _start_llama_server_with_timeout_budget(
     spec: LlamaServerLaunchSpec,
-    startup_timeout_sec: float,
+    timeout_budget: _TimeoutBudget,
 ) -> subprocess.Popen[str]:
     if _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS:
         raise RuntimeError(
@@ -650,7 +792,7 @@ def start_llama_server(
             "close the current runtime before starting another one."
         )
 
-    manager_lock = _acquire_llama_server_manager_lock()
+    manager_lock = _acquire_llama_server_manager_lock(timeout_budget=timeout_budget)
     command = build_llama_server_command(spec)
     try:
         _cleanup_stale_llama_server_manager_state()
@@ -674,10 +816,15 @@ def start_llama_server(
             instance_id=manager_lock.owner.instance_id,
         )
         _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS[process.pid] = manager_lock
+        ready_timeout_sec = timeout_budget.remaining_sec()
+        if ready_timeout_sec <= 0:
+            raise TimeoutError(
+                "llama-server startup budget was exhausted before readiness checks could begin"
+            )
         wait_until_ready(
             spec.connect_host,
             spec.port,
-            timeout_sec=startup_timeout_sec,
+            timeout_sec=ready_timeout_sec,
             process=process,
         )
         return process
@@ -688,6 +835,16 @@ def start_llama_server(
             _clear_llama_server_manager_state()
             _release_llama_server_manager_lock(manager_lock)
         raise
+
+
+def start_llama_server(
+    spec: LlamaServerLaunchSpec,
+    startup_timeout_sec: float,
+) -> subprocess.Popen[str]:
+    return _start_llama_server_with_timeout_budget(
+        spec,
+        _TimeoutBudget.start(startup_timeout_sec),
+    )
 
 
 def stop_llama_server(process: subprocess.Popen[str]) -> None:
@@ -772,6 +929,7 @@ def run_llama_server_launch_spec_doctor(
     startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
 ) -> LlamaServerDoctorReport:
     issues: list[LlamaServerDoctorIssue] = []
+    timeout_budget = _TimeoutBudget.start(startup_timeout_sec)
 
     for code, path in (
         ("missing_binary", spec.binary_path),
@@ -786,7 +944,21 @@ def run_llama_server_launch_spec_doctor(
                 )
             )
 
-    manager_lock = _acquire_llama_server_manager_lock()
+    try:
+        manager_lock = _acquire_llama_server_manager_lock(timeout_budget=timeout_budget)
+    except LlamaServerManagerLockTimeoutError as exc:
+        issues.append(
+            LlamaServerDoctorIssue(
+                code="manager_lock_timeout",
+                message=str(exc),
+            )
+        )
+        return LlamaServerDoctorReport(
+            role=spec.role,
+            profile=spec.profile,
+            launch_spec=spec,
+            issues=tuple(issues),
+        )
     try:
         _cleanup_stale_llama_server_manager_state()
         try:
@@ -818,7 +990,21 @@ def run_llama_server_launch_spec_doctor(
             issues=tuple(issues),
         )
 
-    process = start_llama_server(spec, startup_timeout_sec=startup_timeout_sec)
+    try:
+        process = start_llama_server(spec, startup_timeout_sec=startup_timeout_sec)
+    except LlamaServerManagerLockTimeoutError as exc:
+        issues.append(
+            LlamaServerDoctorIssue(
+                code="manager_lock_timeout",
+                message=str(exc),
+            )
+        )
+        return LlamaServerDoctorReport(
+            role=spec.role,
+            profile=spec.profile,
+            launch_spec=spec,
+            issues=tuple(issues),
+        )
     try:
         smoke_response = request_llama_server_smoke(spec)
     except Exception as exc:

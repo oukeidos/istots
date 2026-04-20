@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -272,6 +273,54 @@ class _FakePopen:
         return 0
 
 
+class _FakeMonotonicClock:
+    def __init__(self, *, start: float = 100.0, step: float = 0.05) -> None:
+        self.current = start
+        self.step = step
+
+    def monotonic(self) -> float:
+        value = self.current
+        self.current += self.step
+        return value
+
+
+def _write_live_manager_lock(
+    *,
+    lock_path: Path,
+    state_path: Path,
+    owner_pid: int,
+    instance_id: str = "live-owner",
+) -> None:
+    lock_path.mkdir()
+    (lock_path / "owner.json").write_text(
+        json.dumps(
+            {
+                "pid": owner_pid,
+                "instance_id": instance_id,
+                "created_at": 10.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(
+            {
+                "instance_id": instance_id,
+                "created_at": 10.0,
+                "pid": owner_pid,
+                "binary_path": "/tmp/llama-server",
+                "model_path": "/tmp/model.gguf",
+                "mmproj_path": "/tmp/mmproj.gguf",
+                "bind_host": "127.0.0.1",
+                "connect_host": "127.0.0.1",
+                "port": 18080,
+                "role": "ocr",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_start_llama_server_reclaims_stale_dead_owner_lock_before_launch(
     monkeypatch,
     tmp_path: Path,
@@ -338,6 +387,52 @@ def test_start_llama_server_reclaims_stale_dead_owner_lock_before_launch(
         assert payload["instance_id"] != "stale-owner"
     finally:
         llama_runtime.stop_llama_server(process)
+
+
+def test_start_llama_server_times_out_waiting_for_live_owner_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    owner_pid = os.getpid()
+    _write_live_manager_lock(
+        lock_path=lock_path,
+        state_path=state_path,
+        owner_pid=owner_pid,
+    )
+
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="127.0.0.1",
+        port=18080,
+    )
+    clock = _FakeMonotonicClock(start=5.0, step=0.05)
+
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
+    monkeypatch.setattr(llama_runtime.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(llama_runtime.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(llama_runtime, "_is_pid_alive", lambda pid: pid == owner_pid)
+
+    try:
+        llama_runtime.start_llama_server(spec, startup_timeout_sec=0.15)
+    except llama_runtime.LlamaServerManagerLockTimeoutError as exc:
+        message = str(exc)
+        assert "timed out waiting for llama-server manager lock" in message
+        assert f"lock={lock_path}" in message
+        assert f"state={state_path}" in message
+        assert f"owner_pid={owner_pid}" in message
+        assert "state_role=ocr" in message
+        assert "state_port=18080" in message
+        assert "state_matches_owner=True" in message
+    else:
+        raise AssertionError("expected live-owner manager lock timeout")
 
 
 def test_start_llama_server_waits_on_connect_host(monkeypatch, tmp_path: Path) -> None:
@@ -506,6 +601,56 @@ def test_manager_lock_and_state_use_private_permissions(monkeypatch, tmp_path: P
     finally:
         llama_runtime._clear_llama_server_manager_state(instance_id=lock.owner.instance_id)
         llama_runtime._release_llama_server_manager_lock(lock)
+
+
+def test_run_llama_server_launch_spec_doctor_reports_manager_lock_timeout_issue(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    owner_pid = os.getpid()
+    _write_live_manager_lock(
+        lock_path=lock_path,
+        state_path=state_path,
+        owner_pid=owner_pid,
+    )
+
+    binary = tmp_path / "llama-server"
+    model = tmp_path / "model.gguf"
+    mmproj = tmp_path / "mmproj.gguf"
+    binary.write_text("", encoding="utf-8")
+    model.write_text("", encoding="utf-8")
+    mmproj.write_text("", encoding="utf-8")
+
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=binary,
+        model_path=model,
+        mmproj_path=mmproj,
+        host="127.0.0.1",
+        port=18080,
+    )
+    clock = _FakeMonotonicClock(start=15.0, step=0.05)
+
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
+    monkeypatch.setattr(llama_runtime.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(llama_runtime.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(llama_runtime, "_is_pid_alive", lambda pid: pid == owner_pid)
+
+    report = llama_runtime.run_llama_server_launch_spec_doctor(
+        spec,
+        startup_timeout_sec=0.15,
+    )
+
+    assert report.ok is False
+    assert report.issues[0].code == "manager_lock_timeout"
+    assert f"owner_pid={owner_pid}" in report.issues[0].message
+    assert "state_role=ocr" in report.issues[0].message
+    assert "state_port=18080" in report.issues[0].message
 
 
 def test_request_llama_server_ocr_response_uses_connect_host(monkeypatch) -> None:

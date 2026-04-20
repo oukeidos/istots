@@ -3,6 +3,7 @@
 ## [0.3.6] - 2026-04-20
 - Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.
 - Made conversion startup more reliable by stopping stuck preprocessing workers with a clear error instead of leaving runs hanging indefinitely.
+- Stopped shared `llama-server` startup from hanging forever behind a stuck previous run by failing within the startup timeout and reporting the blocking manager lock details.
 
 ## [0.3.5] - 2026-04-19
 - Narrowed the default `setup` path to the primary GGUF runtime and made HF fallback provisioning an explicit `--with-hf-fallback` opt-in.
