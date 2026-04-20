@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from collections import Counter
 import difflib
+import faulthandler
+import logging
 import multiprocessing
 import os
 from tempfile import TemporaryDirectory
-import logging
+import traceback
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
@@ -56,6 +58,11 @@ KANJI_FAMILY_MIN_COUNT = 2
 MAX_FAMILY_AGREEMENT_ROWS_PER_SUPPORT_ROW = 10
 _PREPARED_INPUT_SUBPROCESS_ENV = "ISTOTS_PREPARE_OCR_INPUTS_IN_SUBPROCESS"
 _PREPARED_INPUT_SPILL_FORMAT_ENV = "ISTOTS_PREPARED_INPUT_SPILL_FORMAT"
+_PREPARED_INPUT_SUBPROCESS_TIMEOUT_ENV = "ISTOTS_PREPARED_INPUT_SUBPROCESS_TIMEOUT_SEC"
+DEFAULT_PREPARED_INPUT_SUBPROCESS_TIMEOUT_SEC = 300.0
+_PREPARED_INPUT_SUBPROCESS_POLL_SEC = 0.25
+_PREPARED_INPUT_SUBPROCESS_REAP_TIMEOUT_SEC = 1.0
+_PREPARED_INPUT_SUBPROCESS_FAULT_DUMP_FILENAME = "prepared-input-worker-timeout.traceback.txt"
 _T = TypeVar("_T")
 
 
@@ -99,6 +106,84 @@ class _PreparedOCRInput:
     image_mode: str
     image: Image.Image | None
     image_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedInputWorkerRequest:
+    input_sup: str
+    max_items: int | None
+    enable_furigana_mask: bool
+    spill_dir: str
+    fault_dump_path: str
+    fault_dump_delay_sec: float
+
+
+@dataclass(frozen=True)
+class _PreparedInputWorkerEnvelope:
+    kind: str
+    stage: str
+    pid: int
+    payload: list[_PreparedOCRInput] | None = None
+    error_type: str = ""
+    message: str = ""
+    traceback_text: str = ""
+
+
+class PreparedInputSubprocessError(RuntimeError):
+    def __init__(
+        self,
+        summary: str,
+        *,
+        input_sup: Path,
+        stage: str = "",
+        pid: int | None = None,
+        exitcode: int | None = None,
+        elapsed_sec: float | None = None,
+        timeout_sec: float | None = None,
+        error_type: str = "",
+        child_message: str = "",
+        traceback_text: str = "",
+        fault_dump_text: str = "",
+    ) -> None:
+        self.summary = summary
+        self.input_sup = input_sup
+        self.stage = stage
+        self.pid = pid
+        self.exitcode = exitcode
+        self.elapsed_sec = elapsed_sec
+        self.timeout_sec = timeout_sec
+        self.error_type = error_type
+        self.child_message = child_message
+        self.traceback_text = traceback_text
+        self.fault_dump_text = fault_dump_text
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        lines = [self.summary]
+        context = [f"input={self.input_sup}"]
+        if self.stage:
+            context.append(f"stage={self.stage}")
+        if self.pid is not None and self.pid > 0:
+            context.append(f"pid={self.pid}")
+        if self.exitcode is not None:
+            context.append(f"exit={self.exitcode}")
+        if self.elapsed_sec is not None:
+            context.append(f"elapsed={self.elapsed_sec:.2f}s")
+        if self.timeout_sec is not None:
+            context.append(f"timeout={self.timeout_sec:.2f}s")
+        lines.append("context: " + " ".join(context))
+        if self.error_type or self.child_message:
+            child_summary = ": ".join(
+                part for part in (self.error_type, self.child_message) if part
+            )
+            lines.append(f"child error: {child_summary}")
+        if self.traceback_text:
+            lines.append("child traceback:")
+            lines.append(self.traceback_text.rstrip())
+        if self.fault_dump_text:
+            lines.append("child fault dump:")
+            lines.append(self.fault_dump_text.rstrip())
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -161,6 +246,24 @@ def _prepare_inputs_in_subprocess_enabled(explicit: bool | None = None) -> bool:
     return raw.strip().lower() not in {"", "0", "false", "no"}
 
 
+def _prepared_input_subprocess_timeout_sec(explicit: float | None = None) -> float:
+    if explicit is not None:
+        value = explicit
+    else:
+        raw = os.getenv(_PREPARED_INPUT_SUBPROCESS_TIMEOUT_ENV)
+        value = DEFAULT_PREPARED_INPUT_SUBPROCESS_TIMEOUT_SEC if raw is None else float(raw)
+    if value <= 0:
+        raise ValueError(
+            f"prepared-input subprocess timeout must be > 0 seconds, got {value!r}"
+        )
+    return value
+
+
+def _prepared_input_fault_dump_delay_sec(timeout_sec: float) -> float:
+    margin = min(1.0, max(0.01, timeout_sec / 10.0))
+    return max(0.01, timeout_sec - margin)
+
+
 def _prepared_input_spill_encoding() -> tuple[str, str, dict[str, Any]]:
     raw = os.getenv(_PREPARED_INPUT_SPILL_FORMAT_ENV, "png").strip().lower()
     if raw in {"", "png", "png-default"}:
@@ -199,32 +302,191 @@ def _spill_prepared_inputs_to_directory(
 
 
 def _prepare_ocr_inputs_worker_entry(
-    input_sup: str,
-    max_items: int | None,
-    enable_furigana_mask: bool,
-    spill_dir: str,
+    request: _PreparedInputWorkerRequest,
     connection: Any,
 ) -> None:
+    stage = "collect"
+    pid = os.getpid()
+    fault_dump_handle = None
     try:
+        fault_dump_path = Path(request.fault_dump_path)
+        fault_dump_path.parent.mkdir(parents=True, exist_ok=True)
+        fault_dump_handle = fault_dump_path.open("w", encoding="utf-8")
+        faulthandler.dump_traceback_later(
+            request.fault_dump_delay_sec,
+            repeat=False,
+            file=fault_dump_handle,
+        )
         prepared_inputs = _collect_prepared_ocr_inputs_inprocess(
-            Path(input_sup),
-            max_items=max_items,
-            enable_furigana_mask=enable_furigana_mask,
+            Path(request.input_sup),
+            max_items=request.max_items,
+            enable_furigana_mask=request.enable_furigana_mask,
             verbose=False,
         )
+        stage = "spill"
         connection.send(
-            (
-                "ok",
-                _spill_prepared_inputs_to_directory(
+            _PreparedInputWorkerEnvelope(
+                kind="ok",
+                stage=stage,
+                pid=pid,
+                payload=_spill_prepared_inputs_to_directory(
                     prepared_inputs,
-                    output_dir=Path(spill_dir),
+                    output_dir=Path(request.spill_dir),
                 ),
             )
         )
     except Exception as exc:  # pragma: no cover - exercised through parent wrapper
-        connection.send(("error", f"{type(exc).__name__}: {exc}"))
+        try:
+            connection.send(
+                _PreparedInputWorkerEnvelope(
+                    kind="error",
+                    stage=stage,
+                    pid=pid,
+                    error_type=type(exc).__name__,
+                    message=str(exc),
+                    traceback_text=traceback.format_exc(),
+                )
+            )
+        except Exception:
+            pass
     finally:  # pragma: no branch
+        try:
+            faulthandler.cancel_dump_traceback_later()
+        except RuntimeError:
+            pass
+        if fault_dump_handle is not None:
+            fault_dump_handle.close()
         connection.close()
+
+
+def _load_prepared_input_fault_dump(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").rstrip()
+    except OSError:
+        return ""
+
+
+def _stop_prepared_input_subprocess(process: Any) -> int | None:
+    process.join(timeout=0)
+    if process.exitcode is not None:
+        return process.exitcode
+    process.terminate()
+    process.join(timeout=_PREPARED_INPUT_SUBPROCESS_REAP_TIMEOUT_SEC)
+    if process.exitcode is not None:
+        return process.exitcode
+    kill = getattr(process, "kill", None)
+    if callable(kill):
+        kill()
+    else:
+        process.terminate()
+    process.join(timeout=_PREPARED_INPUT_SUBPROCESS_REAP_TIMEOUT_SEC)
+    return process.exitcode
+
+
+def _reap_prepared_input_subprocess(process: Any) -> int | None:
+    process.join(timeout=_PREPARED_INPUT_SUBPROCESS_REAP_TIMEOUT_SEC)
+    if process.exitcode is not None:
+        return process.exitcode
+    return _stop_prepared_input_subprocess(process)
+
+
+def _wait_for_prepared_input_worker_envelope(
+    parent_conn: Any,
+    process: Any,
+    *,
+    request: _PreparedInputWorkerRequest,
+    timeout_sec: float,
+) -> _PreparedInputWorkerEnvelope:
+    started_at = time.monotonic()
+    fault_dump_path = Path(request.fault_dump_path)
+
+    while True:
+        remaining_sec = (started_at + timeout_sec) - time.monotonic()
+        if remaining_sec <= 0:
+            exitcode = _stop_prepared_input_subprocess(process)
+            raise PreparedInputSubprocessError(
+                "prepared-input subprocess timed out before sending a terminal result",
+                input_sup=Path(request.input_sup),
+                pid=process.pid,
+                exitcode=exitcode,
+                elapsed_sec=time.monotonic() - started_at,
+                timeout_sec=timeout_sec,
+                fault_dump_text=_load_prepared_input_fault_dump(fault_dump_path),
+            )
+
+        if parent_conn.poll(min(_PREPARED_INPUT_SUBPROCESS_POLL_SEC, remaining_sec)):
+            try:
+                envelope = parent_conn.recv()
+            except EOFError as exc:
+                exitcode = _reap_prepared_input_subprocess(process)
+                raise PreparedInputSubprocessError(
+                    "prepared-input subprocess closed its result pipe before sending a terminal message",
+                    input_sup=Path(request.input_sup),
+                    pid=process.pid,
+                    exitcode=exitcode,
+                    elapsed_sec=time.monotonic() - started_at,
+                    timeout_sec=timeout_sec,
+                    fault_dump_text=_load_prepared_input_fault_dump(fault_dump_path),
+                ) from exc
+            if not isinstance(envelope, _PreparedInputWorkerEnvelope):
+                exitcode = _reap_prepared_input_subprocess(process)
+                raise PreparedInputSubprocessError(
+                    "prepared-input subprocess sent an invalid terminal envelope",
+                    input_sup=Path(request.input_sup),
+                    pid=process.pid,
+                    exitcode=exitcode,
+                    elapsed_sec=time.monotonic() - started_at,
+                    timeout_sec=timeout_sec,
+                )
+            exitcode = _reap_prepared_input_subprocess(process)
+            if envelope.kind == "ok":
+                if exitcode not in (None, 0):
+                    raise PreparedInputSubprocessError(
+                        "prepared-input subprocess exited unexpectedly after reporting success",
+                        input_sup=Path(request.input_sup),
+                        stage=envelope.stage,
+                        pid=envelope.pid or process.pid,
+                        exitcode=exitcode,
+                        elapsed_sec=time.monotonic() - started_at,
+                        timeout_sec=timeout_sec,
+                    )
+                return envelope
+            if envelope.kind == "error":
+                raise PreparedInputSubprocessError(
+                    "prepared-input subprocess failed",
+                    input_sup=Path(request.input_sup),
+                    stage=envelope.stage,
+                    pid=envelope.pid or process.pid,
+                    exitcode=exitcode,
+                    elapsed_sec=time.monotonic() - started_at,
+                    timeout_sec=timeout_sec,
+                    error_type=envelope.error_type,
+                    child_message=envelope.message,
+                    traceback_text=envelope.traceback_text,
+                )
+            raise PreparedInputSubprocessError(
+                "prepared-input subprocess sent an unsupported terminal envelope kind",
+                input_sup=Path(request.input_sup),
+                stage=envelope.stage,
+                pid=envelope.pid or process.pid,
+                exitcode=exitcode,
+                elapsed_sec=time.monotonic() - started_at,
+                timeout_sec=timeout_sec,
+            )
+
+        process.join(timeout=0)
+        if process.exitcode is not None:
+            raise PreparedInputSubprocessError(
+                "prepared-input subprocess exited before sending a terminal result",
+                input_sup=Path(request.input_sup),
+                pid=process.pid,
+                exitcode=process.exitcode,
+                elapsed_sec=time.monotonic() - started_at,
+                timeout_sec=timeout_sec,
+                fault_dump_text=_load_prepared_input_fault_dump(fault_dump_path),
+            )
 
 
 def _collect_prepared_ocr_inputs_via_subprocess(
@@ -234,34 +496,50 @@ def _collect_prepared_ocr_inputs_via_subprocess(
     enable_furigana_mask: bool,
     verbose: bool,
     spill_dir: Path,
+    timeout_sec: float | None = None,
 ) -> list[_PreparedOCRInput]:
     context = multiprocessing.get_context("spawn")
+    resolved_timeout_sec = _prepared_input_subprocess_timeout_sec(timeout_sec)
+    request = _PreparedInputWorkerRequest(
+        input_sup=str(input_sup),
+        max_items=max_items,
+        enable_furigana_mask=enable_furigana_mask,
+        spill_dir=str(spill_dir),
+        fault_dump_path=str(spill_dir / _PREPARED_INPUT_SUBPROCESS_FAULT_DUMP_FILENAME),
+        fault_dump_delay_sec=_prepared_input_fault_dump_delay_sec(resolved_timeout_sec),
+    )
     parent_conn, child_conn = context.Pipe(duplex=False)
     process = context.Process(
         target=_prepare_ocr_inputs_worker_entry,
-        args=(
-            str(input_sup),
-            max_items,
-            enable_furigana_mask,
-            str(spill_dir),
-            child_conn,
-        ),
+        args=(request, child_conn),
         daemon=False,
     )
     process.start()
     child_conn.close()
     try:
-        status, payload = parent_conn.recv()
+        envelope = _wait_for_prepared_input_worker_envelope(
+            parent_conn,
+            process,
+            request=request,
+            timeout_sec=resolved_timeout_sec,
+        )
     finally:
         parent_conn.close()
-        process.join()
-    if process.exitcode != 0:
-        raise RuntimeError(f"prepared-input subprocess failed with exit code {process.exitcode}")
-    if status != "ok":
-        raise RuntimeError(f"prepared-input subprocess failed: {payload}")
+    if envelope.payload is None:
+        raise PreparedInputSubprocessError(
+            "prepared-input subprocess reported success without a payload",
+            input_sup=input_sup,
+            stage=envelope.stage,
+            pid=envelope.pid,
+            timeout_sec=resolved_timeout_sec,
+        )
     if verbose:
-        logger.info("prepared-input subprocess finished: rows=%d spill_dir=%s", len(payload), spill_dir)
-    return payload
+        logger.info(
+            "prepared-input subprocess finished: rows=%d spill_dir=%s",
+            len(envelope.payload),
+            spill_dir,
+        )
+    return envelope.payload
 
 
 def _dedupe_by_exact_image_identity(

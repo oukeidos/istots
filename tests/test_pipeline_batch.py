@@ -74,6 +74,66 @@ def _prepared_input(
     )
 
 
+class _FakeMonotonicClock:
+    def __init__(self, *, start: float = 100.0, step: float = 0.05) -> None:
+        self.current = start
+        self.step = step
+
+    def monotonic(self) -> float:
+        value = self.current
+        self.current += self.step
+        return value
+
+
+class _FakeParentConnection:
+    def __init__(self, *, poll_results: list[bool], recv_value=None, recv_exc: Exception | None = None) -> None:
+        self._poll_results = list(poll_results)
+        self.recv_value = recv_value
+        self.recv_exc = recv_exc
+
+    def poll(self, timeout: float | None = None) -> bool:
+        del timeout
+        if self._poll_results:
+            return self._poll_results.pop(0)
+        return False
+
+    def recv(self):
+        if self.recv_exc is not None:
+            raise self.recv_exc
+        return self.recv_value
+
+
+class _FakeProcess:
+    def __init__(
+        self,
+        *,
+        pid: int = 4321,
+        exitcode: int | None = None,
+        terminate_exitcode: int | None = -15,
+        kill_exitcode: int | None = -9,
+    ) -> None:
+        self.pid = pid
+        self.exitcode = exitcode
+        self.terminate_exitcode = terminate_exitcode
+        self.kill_exitcode = kill_exitcode
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.join_calls: list[float | None] = []
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_calls.append(timeout)
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        if self.terminate_exitcode is not None:
+            self.exitcode = self.terminate_exitcode
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        if self.kill_exitcode is not None:
+            self.exitcode = self.kill_exitcode
+
+
 def test_convert_sup_to_srt_releases_backend_on_success(monkeypatch, tmp_path: Path) -> None:
     input_sup = tmp_path / "input.sup"
     output_srt = tmp_path / "output.srt"
@@ -461,6 +521,99 @@ def test_convert_sup_to_srt_uses_subprocess_prepared_inputs_when_enabled(monkeyp
 
     assert subprocess_calls["count"] == 1
     assert result.processed_count == 1
+
+
+def test_collect_prepared_ocr_inputs_via_subprocess_preserves_child_traceback(tmp_path: Path) -> None:
+    missing_input = tmp_path / "missing.sup"
+    spill_dir = tmp_path / "spill"
+
+    with pytest.raises(pipeline.PreparedInputSubprocessError) as exc_info:
+        pipeline._collect_prepared_ocr_inputs_via_subprocess(  # noqa: SLF001
+            missing_input,
+            max_items=None,
+            enable_furigana_mask=False,
+            verbose=False,
+            spill_dir=spill_dir,
+            timeout_sec=5.0,
+        )
+
+    message = str(exc_info.value)
+    assert "prepared-input subprocess failed" in message
+    assert "stage=collect" in message
+    assert "child error: FileNotFoundError" in message
+    assert "child traceback:" in message
+    assert f"Input SUP file not found: {missing_input}" in message
+
+
+def test_wait_for_prepared_input_worker_envelope_times_out_and_reaps_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    fault_dump_path = tmp_path / "fault.txt"
+    fault_dump_path.write_text("worker stuck in parser", encoding="utf-8")
+    request = pipeline._PreparedInputWorkerRequest(  # noqa: SLF001
+        input_sup=str(input_sup),
+        max_items=None,
+        enable_furigana_mask=False,
+        spill_dir=str(tmp_path / "spill"),
+        fault_dump_path=str(fault_dump_path),
+        fault_dump_delay_sec=0.05,
+    )
+    parent_conn = _FakeParentConnection(poll_results=[False, False, False])
+    process = _FakeProcess(terminate_exitcode=None, kill_exitcode=-9)
+    clock = _FakeMonotonicClock(start=10.0, step=0.05)
+    monkeypatch.setattr(pipeline.time, "monotonic", clock.monotonic)
+
+    with pytest.raises(pipeline.PreparedInputSubprocessError) as exc_info:
+        pipeline._wait_for_prepared_input_worker_envelope(  # noqa: SLF001
+            parent_conn,
+            process,
+            request=request,
+            timeout_sec=0.1,
+        )
+
+    message = str(exc_info.value)
+    assert "prepared-input subprocess timed out before sending a terminal result" in message
+    assert "child fault dump:" in message
+    assert "worker stuck in parser" in message
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+
+
+def test_wait_for_prepared_input_worker_envelope_reports_abnormal_exit_without_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    request = pipeline._PreparedInputWorkerRequest(  # noqa: SLF001
+        input_sup=str(input_sup),
+        max_items=None,
+        enable_furigana_mask=False,
+        spill_dir=str(tmp_path / "spill"),
+        fault_dump_path=str(tmp_path / "fault.txt"),
+        fault_dump_delay_sec=0.05,
+    )
+    parent_conn = _FakeParentConnection(poll_results=[False])
+    process = _FakeProcess(exitcode=23)
+    clock = _FakeMonotonicClock(start=20.0, step=0.05)
+    monkeypatch.setattr(pipeline.time, "monotonic", clock.monotonic)
+
+    with pytest.raises(pipeline.PreparedInputSubprocessError) as exc_info:
+        pipeline._wait_for_prepared_input_worker_envelope(  # noqa: SLF001
+            parent_conn,
+            process,
+            request=request,
+            timeout_sec=1.0,
+        )
+
+    message = str(exc_info.value)
+    assert "prepared-input subprocess exited before sending a terminal result" in message
+    assert "exit=23" in message
+    assert process.terminate_calls == 0
+    assert process.kill_calls == 0
 
 
 def test_prepare_inputs_in_subprocess_defaults_to_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
