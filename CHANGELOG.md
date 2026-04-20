@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.3.6] - 2026-04-20
+- Made shared `smoke` lifecycle policy caller-selectable so GUI code can choose whether missing output dirs become temporary workspaces and whether successful temporary smoke runs are cleaned up automatically.
 - Replaced the remaining raw pipeline and doctor return objects at the shared app boundary with explicit command result types so future GUI code can depend on stable app-layer contracts.
 - Moved `setup`, `materialize-mmproj`, and `auth` execution into shared application services so the remaining command workflows no longer depend on CLI-only orchestration.
 - Moved `doctor` request validation and runtime override planning into shared application services while keeping structured doctor output formatting in the CLI adapter.

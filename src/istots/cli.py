@@ -42,6 +42,7 @@ from istots.app.setup import (
 from istots.app.smoke import (
     SmokeArgumentError,
     SmokeCleanupError,
+    SmokeOutputPolicy,
     SmokePreparationError,
     SmokeRequest,
     execute_smoke_plan,
@@ -1443,6 +1444,10 @@ def _build_smoke_request(args: argparse.Namespace) -> SmokeRequest:
         corrector_gemini_max_workers=args.corrector_gemini_max_workers,
         srt_policy=args.srt_policy,
         force=args.force,
+        output_policy=SmokeOutputPolicy(
+            create_temp_output_dir_when_missing=True,
+            remove_temp_output_dir_on_success=True,
+        ),
     )
 
 
@@ -1470,7 +1475,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         force=args.force,
     )
     if overwrite_check != 0:
-        if plan.is_auto_output_dir:
+        if plan.created_temporary_output_dir:
             logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", plan.output_dir)
         return overwrite_check
 
@@ -1495,7 +1500,7 @@ def run_smoke(args: argparse.Namespace) -> int:
         return 1
     except Exception as exc:
         logging.getLogger(__name__).error("conversion failed: %s", exc)
-        if plan.is_auto_output_dir:
+        if plan.created_temporary_output_dir:
             logging.getLogger(__name__).error("retained temporary smoke artifacts at %s", plan.output_dir)
         return 1
 

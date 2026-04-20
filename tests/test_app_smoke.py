@@ -7,6 +7,7 @@ import pytest
 
 from istots.app.smoke import (
     SmokeArgumentError,
+    SmokeOutputPolicy,
     SmokeRequest,
     execute_smoke_plan,
     plan_smoke_request,
@@ -27,7 +28,7 @@ def test_plan_smoke_request_uses_explicit_output_dir_and_detector_artifact(tmp_p
     )
 
     assert plan.output_dir == output_dir.resolve()
-    assert plan.is_auto_output_dir is False
+    assert plan.created_temporary_output_dir is False
     assert plan.convert_plan.input_sup == input_sup.resolve()
     assert plan.convert_plan.output_srt == (output_dir / "sample.smoke.srt").resolve()
     assert plan.convert_plan.detector_output == (output_dir / "sample.detector.jsonl").resolve()
@@ -84,7 +85,7 @@ def test_plan_smoke_request_uses_injected_tempdir_factory(tmp_path: Path) -> Non
     )
 
     assert plan.output_dir == auto_output_dir.resolve()
-    assert plan.is_auto_output_dir is True
+    assert plan.created_temporary_output_dir is True
 
 
 def test_plan_smoke_request_rejects_invalid_detector_combo(tmp_path: Path) -> None:
@@ -128,6 +129,58 @@ def test_execute_smoke_plan_removes_auto_output_dir_on_success(monkeypatch, tmp_
 
     assert result.removed_output_dir is True
     assert auto_output_dir.exists() is False
+
+
+def test_plan_smoke_request_can_disable_temp_output_dir_creation(tmp_path: Path) -> None:
+    input_sup = tmp_path / "sample.sup"
+    input_sup.write_bytes(b"PG")
+
+    with pytest.raises(SmokeArgumentError) as excinfo:
+        plan_smoke_request(
+            SmokeRequest(
+                input_sup=input_sup,
+                output_policy=SmokeOutputPolicy(
+                    create_temp_output_dir_when_missing=False,
+                    remove_temp_output_dir_on_success=False,
+                ),
+            )
+        )
+
+    assert "temporary output-dir creation is disabled" in str(excinfo.value)
+
+
+def test_execute_smoke_plan_can_keep_temp_output_dir_on_success(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "sample.sup"
+    input_sup.write_bytes(b"PG")
+    auto_output_dir = tmp_path / "auto-smoke"
+
+    monkeypatch.setattr(
+        "istots.app.smoke.execute_convert_plan",
+        lambda plan, verbose=True: SimpleNamespace(
+            written_count=1,
+            output_srt=plan.output_srt,
+            device_used="cpu",
+            detector_record_count=0,
+            correction_record_count=0,
+            correction_applied_count=0,
+        ),
+    )
+
+    plan = plan_smoke_request(
+        SmokeRequest(
+            input_sup=input_sup,
+            output_policy=SmokeOutputPolicy(
+                create_temp_output_dir_when_missing=True,
+                remove_temp_output_dir_on_success=False,
+            ),
+        ),
+        make_tempdir=lambda prefix: str(auto_output_dir),
+    )
+    result = execute_smoke_plan(plan, verbose=False)
+
+    assert result.removed_output_dir is False
+    assert result.created_temporary_output_dir is True
+    assert auto_output_dir.exists() is True
 
 
 def test_execute_smoke_plan_keeps_explicit_output_dir_on_success(monkeypatch, tmp_path: Path) -> None:

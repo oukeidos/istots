@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +28,12 @@ class SmokePreparationError(RuntimeError):
 
 class SmokeCleanupError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SmokeOutputPolicy:
+    create_temp_output_dir_when_missing: bool = True
+    remove_temp_output_dir_on_success: bool = True
 
 
 @dataclass(frozen=True)
@@ -74,19 +80,21 @@ class SmokeRequest:
     corrector_gemini_max_workers: int = 3
     srt_policy: str = "safe"
     force: bool = False
+    output_policy: SmokeOutputPolicy = field(default_factory=SmokeOutputPolicy)
 
 
 @dataclass(frozen=True)
 class SmokeExecutionPlan:
     output_dir: Path
-    is_auto_output_dir: bool
+    created_temporary_output_dir: bool
+    remove_output_dir_on_success: bool
     convert_plan: ConvertExecutionPlan
 
 
 @dataclass(frozen=True)
 class SmokeExecutionResult:
     output_dir: Path
-    is_auto_output_dir: bool
+    created_temporary_output_dir: bool
     removed_output_dir: bool
     convert_result: ConvertResult
 
@@ -98,12 +106,16 @@ def plan_smoke_request(
 ) -> SmokeExecutionPlan:
     _validate_smoke_request(request)
 
-    is_auto_output_dir = request.output_dir is None
+    created_temporary_output_dir = request.output_dir is None
     if request.output_dir is not None:
         output_dir = request.output_dir.expanduser().resolve()
         if output_dir.exists() and not output_dir.is_dir():
             raise SmokeArgumentError("--output-dir must be a directory path")
     else:
+        if not request.output_policy.create_temp_output_dir_when_missing:
+            raise SmokeArgumentError(
+                "smoke requires output_dir when temporary output-dir creation is disabled"
+            )
         factory = make_tempdir or tempfile.mkdtemp
         output_dir = Path(factory(prefix="istots-smoke-")).resolve()
 
@@ -176,7 +188,10 @@ def plan_smoke_request(
 
     return SmokeExecutionPlan(
         output_dir=output_dir,
-        is_auto_output_dir=is_auto_output_dir,
+        created_temporary_output_dir=created_temporary_output_dir,
+        remove_output_dir_on_success=(
+            created_temporary_output_dir and request.output_policy.remove_temp_output_dir_on_success
+        ),
         convert_plan=convert_plan,
     )
 
@@ -188,7 +203,7 @@ def execute_smoke_plan(
 ) -> SmokeExecutionResult:
     convert_result = execute_convert_plan(plan.convert_plan, verbose=verbose)
     removed_output_dir = False
-    if plan.is_auto_output_dir:
+    if plan.remove_output_dir_on_success:
         try:
             shutil.rmtree(plan.output_dir)
         except FileNotFoundError:
@@ -201,7 +216,7 @@ def execute_smoke_plan(
             removed_output_dir = True
     return SmokeExecutionResult(
         output_dir=plan.output_dir,
-        is_auto_output_dir=plan.is_auto_output_dir,
+        created_temporary_output_dir=plan.created_temporary_output_dir,
         removed_output_dir=removed_output_dir,
         convert_result=convert_result,
     )
