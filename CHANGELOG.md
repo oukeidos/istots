@@ -1,12 +1,7 @@
 # Changelog
 
 ## [0.3.6] - 2026-04-20
-- Made shared `smoke` lifecycle policy caller-selectable so GUI code can choose whether missing output dirs become temporary workspaces and whether successful temporary smoke runs are cleaned up automatically.
-- Replaced the remaining raw pipeline and doctor return objects at the shared app boundary with explicit command result types so future GUI code can depend on stable app-layer contracts.
-- Moved `setup`, `materialize-mmproj`, and `auth` execution into shared application services so the remaining command workflows no longer depend on CLI-only orchestration.
-- Moved `doctor` request validation and runtime override planning into shared application services while keeping structured doctor output formatting in the CLI adapter.
-- Moved the `smoke` workflow into shared application services so temporary output planning and cleanup no longer depend on a hidden CLI-only convert wrapper.
-- Started moving conversion orchestration out of the terminal wrapper so the `convert` workflow can be reused by a future GUI and other shared entrypoints.
+- Refactored the CLI around shared application services so the upcoming GUI can reuse the same workflows directly with less duplicated logic and easier maintenance.
 - Prevented some PGS subtitles from disappearing during finalization so end-of-stream and long-gap cues are kept visible instead of being dropped.
 - Made conversion startup more reliable by stopping stuck preprocessing workers with a clear error instead of leaving runs hanging indefinitely.
 - Stopped shared `llama-server` startup from hanging forever behind a stuck previous run by failing within the startup timeout and reporting the blocking manager lock details.
