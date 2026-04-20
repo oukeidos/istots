@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.6] - 2026-04-20
+- Retained final PGS candidates that would otherwise collapse to zero duration at EOF by assigning a deterministic `2.0s` fallback instead of dropping the subtitle outright.
+- Removed the `10s` long-gap drop guard during PGS candidate finalization so zero-duration cues are still repaired toward the next start with the existing `1ms` floor.
+- Expanded focused PGS assembly regression coverage to lock in EOF no-drop repair, long-gap no-drop repair, and the preserved short-gap repair behavior.
+
 ## [0.3.5] - 2026-04-19
 - Narrowed the default `setup` path to the primary GGUF runtime and made HF fallback provisioning an explicit `--with-hf-fallback` opt-in.
 - Pinned the built-in setup model bundles to explicit upstream revisions and verified their downloaded artifacts against repository-maintained SHA-256 hashes, while keeping custom setup values available as user-managed paths.

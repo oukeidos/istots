@@ -4,8 +4,8 @@ from dataclasses import dataclass, replace
 from typing import Callable, Protocol, Sequence, TypeVar
 
 
-TEN_SECONDS_PTS = 900_000
 ONE_MS_PTS = 90
+EOF_FALLBACK_PTS = 180_000
 DEDUPE_MAX_GAP_PTS = ONE_MS_PTS * 2
 
 
@@ -147,14 +147,12 @@ def finalize_candidates(candidates: Sequence[_T], max_items: int | None) -> list
 
         if end_pts <= start_pts:
             if idx + 1 >= len(candidates):
-                continue
-            next_item = candidates[idx + 1]
-            if start_pts + TEN_SECONDS_PTS < next_item.start_pts:
-                continue
-
-            min_end = start_pts + ONE_MS_PTS
-            next_adjusted = max(0, next_item.start_pts - ONE_MS_PTS)
-            end_pts = max(min_end, next_adjusted)
+                end_pts = start_pts + EOF_FALLBACK_PTS
+            else:
+                next_item = candidates[idx + 1]
+                min_end = start_pts + ONE_MS_PTS
+                next_adjusted = max(0, next_item.start_pts - ONE_MS_PTS)
+                end_pts = max(min_end, next_adjusted)
 
         finalized.append(replace(item, end_pts=end_pts))
 
