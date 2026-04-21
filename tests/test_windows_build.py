@@ -277,7 +277,7 @@ def test_windows_build_workflow_uses_supported_contract() -> None:
     assert "runs-on: windows-latest" in workflow_text
     assert "actions/checkout@v6" in workflow_text
     assert "actions/setup-python@v6" in workflow_text
-    assert "astral-sh/setup-uv@v8" in workflow_text
+    assert "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b" in workflow_text
     assert "actions/upload-artifact@v7" in workflow_text
     assert "uv sync --frozen --extra gui" in workflow_text
     assert "uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py" in workflow_text
