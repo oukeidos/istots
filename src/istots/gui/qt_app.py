@@ -1242,8 +1242,8 @@ if QtWidgets is not None:  # pragma: no branch
             )
             self._screen_state = GuiScreenState(
                 runtime_status=self._runtime_status,
-                input_sup=Path("episode_07.sup"),
-                output_srt=Path("episode_07 (2).srt"),
+                input_sup=Path("test.sup"),
+                output_srt=Path("test.srt"),
                 enable_furigana_mask=True,
             )
             self._check_feedback = _CheckFeedback(state="ok", summary="Passed", detail="Runtime test passed.")
