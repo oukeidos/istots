@@ -5,6 +5,7 @@
 - Added a Windows desktop packaging and installer path so the GUI can be distributed more cleanly on supported systems.
 - Improved packaged-app setup and runtime behavior so environment preparation, checks, OCR work, and recovery are more reliable during everyday use.
 - Improved packaged GUI feedback by showing the app version and making long setup steps look active instead of stalled.
+- Improved packaged Windows setup stability during model downloads.
 
 ## [0.4.2] - 2026-04-21
 - Made the Windows desktop app much easier to set up by guiding users through downloading the needed local runtime, checking required system components, and confirming that setup finished successfully.

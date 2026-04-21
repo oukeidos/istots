@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from istots.derived_assets import resolve_derived_mmproj_output_path
 
@@ -170,6 +172,33 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
+@contextmanager
+def _managed_snapshot_download_environment() -> Iterator[None]:
+    previous_disable_xet = os.environ.get("HF_HUB_DISABLE_XET")
+    constants_module = sys.modules.get("huggingface_hub.constants")
+    had_constants_value = constants_module is not None and hasattr(constants_module, "HF_HUB_DISABLE_XET")
+    previous_constants_value = (
+        getattr(constants_module, "HF_HUB_DISABLE_XET")
+        if had_constants_value
+        else None
+    )
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
+    if constants_module is not None:
+        setattr(constants_module, "HF_HUB_DISABLE_XET", True)
+    try:
+        yield
+    finally:
+        if previous_disable_xet is None:
+            os.environ.pop("HF_HUB_DISABLE_XET", None)
+        else:
+            os.environ["HF_HUB_DISABLE_XET"] = previous_disable_xet
+        if constants_module is not None:
+            if had_constants_value:
+                setattr(constants_module, "HF_HUB_DISABLE_XET", previous_constants_value)
+            else:
+                delattr(constants_module, "HF_HUB_DISABLE_XET")
+
+
 def _snapshot_download_to_target(
     *,
     repo_id: str,
@@ -179,29 +208,30 @@ def _snapshot_download_to_target(
     allow_patterns: list[str] | None = None,
     cancel_callback: Callable[[], None] | None = None,
 ) -> None:
-    try:
-        from huggingface_hub import snapshot_download
-    except Exception as exc:
-        raise RuntimeError("huggingface_hub is required for `istots setup`.") from exc
+    with _managed_snapshot_download_environment():
+        try:
+            from huggingface_hub import snapshot_download
+        except Exception as exc:
+            raise RuntimeError("huggingface_hub is required for `istots setup`.") from exc
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    _invoke_cancel_callback(cancel_callback)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _invoke_cancel_callback(cancel_callback)
 
-    if force and target.exists():
-        _ensure_safe_force_delete_target(target)
-        shutil.rmtree(target)
+        if force and target.exists():
+            _ensure_safe_force_delete_target(target)
+            shutil.rmtree(target)
 
-    kwargs = {
-        "repo_id": repo_id,
-        "local_dir": str(target),
-        "local_files_only": False,
-    }
-    if revision is not None:
-        kwargs["revision"] = revision
-    if allow_patterns is not None:
-        kwargs["allow_patterns"] = list(allow_patterns)
-    snapshot_download(**kwargs)
-    _invoke_cancel_callback(cancel_callback)
+        kwargs = {
+            "repo_id": repo_id,
+            "local_dir": str(target),
+            "local_files_only": False,
+        }
+        if revision is not None:
+            kwargs["revision"] = revision
+        if allow_patterns is not None:
+            kwargs["allow_patterns"] = list(allow_patterns)
+        snapshot_download(**kwargs)
+        _invoke_cancel_callback(cancel_callback)
 
 
 def _verify_pinned_snapshot_files(
