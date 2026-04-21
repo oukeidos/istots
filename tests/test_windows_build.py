@@ -137,7 +137,7 @@ def test_filter_pyinstaller_binaries_by_name_removes_path_leaked_openssl_entries
 
 
 def test_project_version_reads_the_pyproject_version() -> None:
-    assert project_version(_project_root()) == "0.4.4"
+    assert project_version(_project_root()) == "0.4.5"
 
 
 def test_windows_installer_build_layout_uses_expected_paths() -> None:

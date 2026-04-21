@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.5] - 2026-04-22
+- Fixed Windows packaged setup failures caused by inconsistent bundled HTTPS runtime libraries in GitHub-built artifacts.
+
 ## [0.4.4] - 2026-04-21
 - Fixed a packaged Windows setup crash that could occur during model downloads.
 
