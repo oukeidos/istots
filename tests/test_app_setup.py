@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -47,6 +48,7 @@ def test_execute_setup_request_returns_artifacts_and_custom_bundle_flags(monkeyp
 
     assert captured["hf_model_id"] == "custom/hf"
     assert captured["gguf_model_id"] == "custom/gguf"
+    assert captured["cancel_callback"] is None
     assert result.artifacts is artifacts
     assert result.custom_hf_bundle is True
     assert result.custom_gguf_bundle is True
@@ -94,6 +96,7 @@ def test_execute_setup_request_bootstraps_managed_runtime_and_emits_progress(
     assert result.artifacts is artifacts
     assert bootstrapped and bootstrapped[0]["requested_variant"] == "auto"
     assert bootstrapped[0]["install_prerequisites"] is True
+    assert bootstrapped[0]["cancel_event"] is None
     assert setup_calls and setup_calls[0]["derived_mmproj_output_path"] == (
         tmp_path / "derived" / "custom-mmproj.minpix32768.gguf"
     )
@@ -125,3 +128,19 @@ def test_execute_setup_request_can_skip_completion_event(monkeypatch, tmp_path: 
     )
 
     assert [event.phase for event in progress_events] == ["model_setup"]
+
+
+def test_execute_setup_request_cancels_before_model_setup(monkeypatch, tmp_path: Path) -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    monkeypatch.setattr(
+        "istots.app.setup.model_store.setup_default_runtime_assets",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("setup assets should not start after cancellation")),
+    )
+
+    with pytest.raises(Exception, match="setup cancelled during startup"):
+        execute_setup_request(
+            SetupRequest(models_dir=tmp_path / "models"),
+            cancel_event=cancel_event,
+        )

@@ -49,6 +49,7 @@ def iter_sup_frames(
     input_sup: Path,
     max_items: int | None = None,
     on_total: Callable[[int], None] | None = None,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> Iterator[SubtitleFrame]:
     if not input_sup.exists():
         raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
@@ -57,9 +58,19 @@ def iter_sup_frames(
     heartbeat_stop, started_at = _start_heartbeat("Python parser")
     try:
         engine = PgsEngine(input_sup)
-        display_sets = engine.parse_display_sets(predecode_workers=-1, include_decoded_pixels=True)
+        _invoke_cancel_callback(cancel_callback)
+        parse_kwargs = {
+            "predecode_workers": -1,
+            "include_decoded_pixels": True,
+        }
+        if cancel_callback is not None:
+            parse_kwargs["cancel_callback"] = cancel_callback
+        display_sets = engine.parse_display_sets(**parse_kwargs)
+        _invoke_cancel_callback(cancel_callback)
         candidates = build_frame_candidates(display_sets, hash_pixels=hash_gray_pixels)
+        _invoke_cancel_callback(cancel_callback)
         finalized = finalize_candidates(candidates, max_items=max_items)
+        _invoke_cancel_callback(cancel_callback)
         frames = dedupe_consecutive_identical(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
     finally:
         heartbeat_stop.set()
@@ -71,6 +82,7 @@ def iter_sup_frames(
         on_total(len(frames))
 
     for frame in frames:
+        _invoke_cancel_callback(cancel_callback)
         start_ms = _pts_to_ms(frame.start_pts)
         end_ms = _pts_to_ms(frame.end_pts)
         if end_ms <= start_ms:
@@ -87,6 +99,7 @@ def iter_sup_window_frames(
     input_sup: Path,
     max_items: int | None = None,
     on_total: Callable[[int], None] | None = None,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> Iterator[SubtitleWindowFrame]:
     if not input_sup.exists():
         raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
@@ -95,9 +108,19 @@ def iter_sup_window_frames(
     heartbeat_stop, started_at = _start_heartbeat("Python parser")
     try:
         engine = PgsEngine(input_sup)
-        display_sets = engine.parse_display_sets(predecode_workers=-1, include_decoded_pixels=False)
+        _invoke_cancel_callback(cancel_callback)
+        parse_kwargs = {
+            "predecode_workers": -1,
+            "include_decoded_pixels": False,
+        }
+        if cancel_callback is not None:
+            parse_kwargs["cancel_callback"] = cancel_callback
+        display_sets = engine.parse_display_sets(**parse_kwargs)
+        _invoke_cancel_callback(cancel_callback)
         candidates = build_window_frame_candidates(display_sets, hash_pixels=hash_gray_pixels)
+        _invoke_cancel_callback(cancel_callback)
         finalized = finalize_candidates(candidates, max_items=max_items)
+        _invoke_cancel_callback(cancel_callback)
         frames = dedupe_window_candidates(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
     finally:
         heartbeat_stop.set()
@@ -109,6 +132,7 @@ def iter_sup_window_frames(
         on_total(len(frames))
 
     for frame in frames:
+        _invoke_cancel_callback(cancel_callback)
         start_ms = _pts_to_ms(frame.start_pts)
         end_ms = _pts_to_ms(frame.end_pts)
         if end_ms <= start_ms:
@@ -159,3 +183,9 @@ def _start_heartbeat(task_label: str) -> tuple[threading.Event, float]:
     thread = threading.Thread(target=_run, name="python-parser-heartbeat", daemon=True)
     thread.start()
     return stop_event, started_at
+
+
+def _invoke_cancel_callback(cancel_callback: Callable[[], None] | None) -> None:
+    if cancel_callback is None:
+        return
+    cancel_callback()

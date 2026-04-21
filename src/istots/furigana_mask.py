@@ -5,7 +5,7 @@ import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 from PIL import Image
@@ -179,17 +179,32 @@ def build_furigana_mask(
     return _finalize_analysis(analysis, global_stats)
 
 
-def build_furigana_masks(images: Sequence[Image.Image]) -> list[FuriganaMaskResult]:
-    analyses = _analyze_images(images)
+def build_furigana_masks(
+    images: Sequence[Image.Image],
+    *,
+    cancel_callback: Callable[[], None] | None = None,
+) -> list[FuriganaMaskResult]:
+    analyses = _analyze_images(images, cancel_callback=cancel_callback)
     global_stats = _build_global_line_stats(analyses)
-    return [_finalize_analysis(analysis, global_stats) for analysis in analyses]
+    results: list[FuriganaMaskResult] = []
+    for analysis in analyses:
+        _invoke_cancel_callback(cancel_callback)
+        results.append(_finalize_analysis(analysis, global_stats))
+    return results
 
 
-def _analyze_images(images: Sequence[Image.Image]) -> list[_FrameAnalysis]:
+def _analyze_images(
+    images: Sequence[Image.Image],
+    *,
+    cancel_callback: Callable[[], None] | None = None,
+) -> list[_FrameAnalysis]:
     unique_images, analysis_order = _deduplicate_analysis_images(images)
     worker_count = _parallel_analyze_worker_count(len(unique_images))
     if worker_count < 2:
-        unique_analyses = [_analyze_image(image) for image in unique_images]
+        unique_analyses = []
+        for image in unique_images:
+            _invoke_cancel_callback(cancel_callback)
+            unique_analyses.append(_analyze_image(image))
     else:
         target_chunks_per_worker = _parallel_analyze_target_chunks_per_worker()
         chunk_size = max(1, len(unique_images) // (worker_count * target_chunks_per_worker))
@@ -197,7 +212,10 @@ def _analyze_images(images: Sequence[Image.Image]) -> list[_FrameAnalysis]:
             max_workers=worker_count,
             mp_context=_parallel_analyze_context(),
         ) as executor:
-            unique_analyses = list(executor.map(_analyze_image, unique_images, chunksize=chunk_size))
+            unique_analyses = []
+            for analysis in executor.map(_analyze_image, unique_images, chunksize=chunk_size):
+                _invoke_cancel_callback(cancel_callback)
+                unique_analyses.append(analysis)
 
     return [unique_analyses[index] for index in analysis_order]
 
@@ -1459,3 +1477,9 @@ def _build_selected_mask(
         selected_mask[top : bottom + 1, left : right + 1] = True
 
     return selected_mask
+
+
+def _invoke_cancel_callback(cancel_callback: Callable[[], None] | None) -> None:
+    if cancel_callback is None:
+        return
+    cancel_callback()

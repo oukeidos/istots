@@ -278,7 +278,7 @@ def test_convert_sup_to_srt_applies_furigana_mask_when_enabled(monkeypatch, tmp_
     monkeypatch.setattr(
         pipeline,
         "build_furigana_masks",
-        lambda images: [SimpleNamespace(image=masked) for _ in images],
+        lambda images, cancel_callback=None: [SimpleNamespace(image=masked) for _ in images],
     )
 
     pipeline.convert_sup_to_srt(
@@ -433,6 +433,78 @@ def test_collect_prepared_ocr_inputs_releases_parser_predecode_workers_on_error(
     assert release_calls["count"] == 1
 
 
+def test_collect_prepared_ocr_inputs_inprocess_passes_cancel_callback_to_parser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    def fake_iter_sup_window_frames(*args, **kwargs):
+        kwargs["cancel_callback"]()
+        return iter(())
+
+    monkeypatch.setattr(pipeline, "iter_sup_window_frames", fake_iter_sup_window_frames)
+    monkeypatch.setattr(pipeline, "release_parser_predecode_workers", lambda: None)
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="prepared-input collection"):
+        pipeline._collect_prepared_ocr_inputs_inprocess(  # noqa: SLF001
+            input_sup,
+            max_items=None,
+            enable_furigana_mask=False,
+            verbose=False,
+            cancel_event=cancel_event,
+        )
+
+
+def test_collect_prepared_ocr_inputs_inprocess_passes_cancel_callback_to_furigana_mask(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr(
+        pipeline,
+        "iter_sup_window_frames",
+        lambda *args, **kwargs: iter([
+            SimpleNamespace(
+                raw_index=0,
+                window_id=0,
+                left=0,
+                top=0,
+                right=1,
+                bottom=1,
+                start=timedelta(),
+                end=timedelta(milliseconds=1),
+                image=Image.new("RGB", (2, 2), "white"),
+            )
+        ]),
+    )
+    monkeypatch.setattr(pipeline, "release_parser_predecode_workers", lambda: None)
+
+    def fake_build_furigana_masks(images, *, cancel_callback=None):
+        del images
+        cancel_event.set()
+        assert cancel_callback is not None
+        cancel_callback()
+        return []
+
+    monkeypatch.setattr(pipeline, "build_furigana_masks", fake_build_furigana_masks)
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="furigana masking"):
+        pipeline._collect_prepared_ocr_inputs_inprocess(  # noqa: SLF001
+            input_sup,
+            max_items=None,
+            enable_furigana_mask=True,
+            verbose=False,
+            cancel_event=cancel_event,
+        )
+
+
 def test_spill_prepared_inputs_to_directory_deduplicates_equal_images(tmp_path: Path) -> None:
     first = _prepared_input(index=0, image=Image.new("RGB", (2, 2), "white"))
     second = _prepared_input(index=1, image=Image.new("RGB", (2, 2), "white"))
@@ -521,6 +593,51 @@ def test_convert_sup_to_srt_uses_subprocess_prepared_inputs_when_enabled(monkeyp
 
     assert subprocess_calls["count"] == 1
     assert result.processed_count == 1
+
+
+def test_managed_prepared_ocr_inputs_cleans_spill_dir_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    seen: dict[str, Path] = {}
+
+    def fake_collect_via_subprocess(
+        input_sup: Path,
+        *,
+        max_items: int | None,
+        enable_furigana_mask: bool,
+        verbose: bool,
+        spill_dir: Path,
+        timeout_sec: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[pipeline._PreparedOCRInput]:
+        del input_sup, max_items, enable_furigana_mask, verbose, timeout_sec, cancel_event
+        seen["spill_dir"] = spill_dir
+        marker = spill_dir / "000000.png"
+        marker.write_bytes(b"spill")
+        seen["marker"] = marker
+        raise pipeline.ConversionCancelledError("conversion cancelled during prepared-input collection")
+
+    monkeypatch.setattr(
+        pipeline,
+        "_collect_prepared_ocr_inputs_via_subprocess",
+        fake_collect_via_subprocess,
+    )
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="prepared-input collection"):
+        with pipeline._managed_prepared_ocr_inputs(  # noqa: SLF001
+            input_sup,
+            max_items=None,
+            enable_furigana_mask=False,
+            use_temp_ocr_image_files=True,
+            verbose=False,
+        ):
+            raise AssertionError("managed prepared inputs should not yield after cancellation")
+
+    assert seen["marker"].exists() is False
+    assert seen["spill_dir"].exists() is False
 
 
 def test_collect_prepared_ocr_inputs_via_subprocess_preserves_child_traceback(tmp_path: Path) -> None:
@@ -614,6 +731,55 @@ def test_wait_for_prepared_input_worker_envelope_reports_abnormal_exit_without_m
     assert "exit=23" in message
     assert process.terminate_calls == 0
     assert process.kill_calls == 0
+
+
+def test_wait_for_prepared_input_worker_envelope_cancels_and_reaps_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    request = pipeline._PreparedInputWorkerRequest(  # noqa: SLF001
+        input_sup=str(input_sup),
+        max_items=None,
+        enable_furigana_mask=False,
+        spill_dir=str(tmp_path / "spill"),
+        fault_dump_path=str(tmp_path / "fault.txt"),
+        fault_dump_delay_sec=0.05,
+    )
+    parent_conn = _FakeParentConnection(poll_results=[False])
+    process = _FakeProcess(terminate_exitcode=-15, kill_exitcode=None)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="prepared-input collection"):
+        pipeline._wait_for_prepared_input_worker_envelope(  # noqa: SLF001
+            parent_conn,
+            process,
+            request=request,
+            timeout_sec=1.0,
+            cancel_event=cancel_event,
+        )
+
+    assert process.terminate_calls == 1
+
+
+def test_recognize_prepared_inputs_raises_when_cancelled() -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    class _Backend:
+        def recognize(self, image):  # noqa: ANN001
+            raise AssertionError("recognize should not run after cancellation")
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="default OCR"):
+        pipeline._recognize_prepared_inputs(  # noqa: SLF001
+            [_prepared_input(index=0, image=Image.new("RGB", (2, 2), "white"))],
+            backend=_Backend(),
+            verbose=False,
+            branch_label="default",
+            cancel_event=cancel_event,
+        )
 
 
 def test_prepare_inputs_in_subprocess_defaults_to_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

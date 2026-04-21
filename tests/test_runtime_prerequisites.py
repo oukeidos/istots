@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,7 +71,7 @@ def test_ensure_managed_runtime_prerequisites_installs_missing_items(monkeypatch
     monkeypatch.setattr(
         runtime_prerequisites,
         "_install_windows_vc_redist_x64",
-        lambda *, download_root, progress_callback: seen_installs.append(download_root),
+        lambda *, download_root, progress_callback, cancel_event=None: seen_installs.append(download_root),
     )
 
     runtime_prerequisites.ensure_managed_runtime_prerequisites(
@@ -94,3 +96,43 @@ def test_download_file_reuses_existing_installer(monkeypatch, tmp_path: Path) ->
         target,
         progress_callback=None,
     )
+
+
+def test_install_windows_vc_redist_uses_sanitized_subprocess_runtime(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    installer = tmp_path / "vc_redist.x64.exe"
+    installer.write_bytes(b"binary")
+    seen_kwargs: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_subprocess_runtime():
+        yield {"PATH": "clean"}
+
+    def _fake_download(url: str, target_path: Path, *, progress_callback, cancel_event=None) -> None:
+        target_path.write_bytes(installer.read_bytes())
+
+    monkeypatch.setattr(runtime_prerequisites, "_download_file", _fake_download)
+    monkeypatch.setattr(
+        runtime_prerequisites,
+        "sanitized_external_subprocess_runtime",
+        _fake_subprocess_runtime,
+    )
+    monkeypatch.setattr(
+        runtime_prerequisites.subprocess,
+        "Popen",
+        lambda *args, **kwargs: seen_kwargs.append(kwargs) or SimpleNamespace(args=args[0]),
+    )
+    monkeypatch.setattr(
+        runtime_prerequisites,
+        "_wait_for_prerequisite_installer",
+        lambda process, *, cancel_event: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    runtime_prerequisites._install_windows_vc_redist_x64(
+        download_root=tmp_path,
+        progress_callback=None,
+    )
+
+    assert seen_kwargs[0]["env"] == {"PATH": "clean"}

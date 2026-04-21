@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
@@ -14,12 +15,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
+from istots.frozen_subprocess import sanitized_external_subprocess_runtime
 from istots.llama_mmproj import default_materialized_mmproj_path
 from istots.runtime_prerequisites import (
     ensure_managed_runtime_prerequisites,
     format_missing_managed_runtime_prerequisites,
     missing_managed_runtime_prerequisites,
 )
+from istots.windows_subprocess import hidden_windows_subprocess_kwargs
 
 LLAMA_CPP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
 GUI_MANAGED_ROOT_ENV = "ISTOTS_GUI_MANAGED_ROOT"
@@ -325,6 +328,7 @@ def install_managed_llama_cpp_runtime(
     install_prerequisites: bool = True,
     progress_callback: Callable[[str, str, str, float | None], None] | None = None,
     fetch_bytes: Callable[[str], bytes] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ManagedLlamaCppRuntimeState:
     if os.name != "nt":
         raise RuntimeError("Managed llama.cpp bootstrap is currently supported only on Windows GUI.")
@@ -332,13 +336,16 @@ def install_managed_llama_cpp_runtime(
     paths = gui_managed_paths()
     paths.runtime_dir.mkdir(parents=True, exist_ok=True)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
+    _raise_if_bootstrap_cancelled(cancel_event, stage="prerequisite check")
     ensure_managed_runtime_prerequisites(
         install=install_prerequisites,
         download_root=paths.state_dir / "downloads",
+        cancel_event=cancel_event,
         progress_callback=progress_callback,
     )
     existing_state = load_managed_runtime_state()
     _report_progress(progress_callback, "runtime_resolve", "Resolve Runtime", "Querying latest llama.cpp release", 0.05)
+    _raise_if_bootstrap_cancelled(cancel_event, stage="release resolution")
     catalog = fetch_latest_llama_cpp_release(fetch_bytes=fetch_bytes)
     variant_id = resolve_runtime_variant(catalog, requested_variant=requested_variant)
     assets = select_release_assets(catalog, variant_id)
@@ -353,7 +360,7 @@ def install_managed_llama_cpp_runtime(
         and existing_state.variant_id == variant_id
     ):
         try:
-            validate_llama_server_binary(existing_state.binary_path)
+            validate_llama_server_binary(existing_state.binary_path, cancel_event=cancel_event)
         except RuntimeError:
             _report_progress(
                 progress_callback,
@@ -373,10 +380,10 @@ def install_managed_llama_cpp_runtime(
                     progress_callback,
                     "runtime_validate",
                     "Validate Runtime",
-                    "Checking existing installed runtime",
+                    "Checking existing installed runtime; waiting for llama-server to respond",
                     0.32,
                 )
-                validate_llama_server_binary(existing_binary)
+                validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
             except RuntimeError:
                 _report_progress(
                     progress_callback,
@@ -405,6 +412,7 @@ def install_managed_llama_cpp_runtime(
             assets=assets,
             stage_dir=stage_dir,
             progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
         if force and variant_dir.exists():
             _safe_rmtree(variant_dir, within=paths.runtime_dir)
@@ -413,6 +421,7 @@ def install_managed_llama_cpp_runtime(
             archives=archives,
             install_dir=variant_dir,
             progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
         binary_path = _locate_llama_server_binary(variant_dir)
         if binary_path is None:
@@ -423,10 +432,10 @@ def install_managed_llama_cpp_runtime(
             progress_callback,
             "runtime_validate",
             "Validate Runtime",
-            "Running startup probe",
+            "Running startup probe; waiting for llama-server to respond",
             0.96,
         )
-        validate_llama_server_binary(binary_path)
+        validate_llama_server_binary(binary_path, cancel_event=cancel_event)
         state = ManagedLlamaCppRuntimeState(
             release_tag=catalog.tag_name,
             variant_id=variant_id,
@@ -528,7 +537,12 @@ def _variant_install_dir(runtime_root: Path, release_tag: str, variant_id: str) 
     return (runtime_root / release_tag / variant_id.replace("/", "-")).resolve()
 
 
-def validate_llama_server_binary(binary_path: Path, *, timeout: int = 20) -> None:
+def validate_llama_server_binary(
+    binary_path: Path,
+    *,
+    timeout: int = 20,
+    cancel_event: threading.Event | None = None,
+) -> None:
     normalized_binary = binary_path.expanduser().resolve()
     missing_prerequisites = missing_managed_runtime_prerequisites()
     if missing_prerequisites:
@@ -539,12 +553,20 @@ def validate_llama_server_binary(binary_path: Path, *, timeout: int = 20) -> Non
     )
     failures: list[str] = []
     for probe_args in probes:
-        completed = subprocess.run(
-            [str(normalized_binary), *probe_args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with sanitized_external_subprocess_runtime() as sanitized_env:
+            process = subprocess.Popen(
+                [str(normalized_binary), *probe_args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=sanitized_env,
+                **hidden_windows_subprocess_kwargs(),
+            )
+            completed = _wait_for_validation_process(
+                process,
+                timeout=timeout,
+                cancel_event=cancel_event,
+            )
         if completed.returncode == 0:
             return
         failures.append(
@@ -579,11 +601,13 @@ def _download_release_assets(
     assets: tuple[LlamaCppReleaseAsset, ...],
     stage_dir: Path,
     progress_callback: Callable[[str, str, str, float | None], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Path, ...]:
     archives: list[Path] = []
     total_bytes = sum(asset.size_bytes for asset in assets if asset.size_bytes > 0)
     completed_bytes = 0
     for asset in assets:
+        _raise_if_bootstrap_cancelled(cancel_event, stage="runtime download")
         target_path = (stage_dir / asset.name).resolve()
         request = urllib.request.Request(
             asset.download_url,
@@ -594,6 +618,7 @@ def _download_release_assets(
             downloaded_bytes = 0
             with target_path.open("wb") as handle:
                 while True:
+                    _raise_if_bootstrap_cancelled(cancel_event, stage="runtime download")
                     chunk = response.read(1024 * 128)
                     if not chunk:
                         break
@@ -620,6 +645,7 @@ def _extract_release_archives(
     archives: tuple[Path, ...],
     install_dir: Path,
     progress_callback: Callable[[str, str, str, float | None], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     total_members = 0
     archive_members: list[tuple[Path, list[zipfile.ZipInfo]]] = []
@@ -634,6 +660,7 @@ def _extract_release_archives(
         with zipfile.ZipFile(archive_path) as archive:
             member_list = members or [None]
             for member in member_list:
+                _raise_if_bootstrap_cancelled(cancel_event, stage="runtime extraction")
                 if member is not None:
                     _safe_extract_member(archive, member, install_dir)
                     processed_members += 1
@@ -690,6 +717,39 @@ def _report_progress(
     if progress_callback is None:
         return
     progress_callback(phase, headline, detail, fraction)
+
+
+def _wait_for_validation_process(
+    process: subprocess.Popen[str],
+    *,
+    timeout: int,
+    cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    deadline = time.monotonic() + timeout
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(process.args, returncode, stdout, stderr)
+        _raise_if_bootstrap_cancelled(cancel_event, stage="runtime validation")
+        if time.monotonic() >= deadline:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        time.sleep(0.25)
+
+
+def _raise_if_bootstrap_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError(f"managed runtime bootstrap cancelled during {stage}")
 
 
 def _format_binary_probe_failure(

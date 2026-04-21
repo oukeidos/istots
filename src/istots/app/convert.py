@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 import time
 from typing import Callable
 
@@ -544,6 +545,7 @@ def execute_convert_plan(
     *,
     verbose: bool = True,
     progress_callback: Callable[[ConvertProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ConvertResult:
     result = pipeline.convert_sup_to_srt(
         input_sup=plan.input_sup,
@@ -568,6 +570,7 @@ def execute_convert_plan(
         use_temp_ocr_image_files=plan.use_temp_ocr_image_files,
         verbose=verbose,
         progress_callback=progress_callback,
+        cancel_event=cancel_event,
     )
     return ConvertResult(
         output_srt=result.output_srt,
