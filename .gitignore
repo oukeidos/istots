@@ -17,6 +17,8 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+packaging/inno/Output/
+packaging/inno/Build/
 
 # Local experiment outputs (README examples)
 out_images/

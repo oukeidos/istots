@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
+import threading
 from typing import Literal
 
 from istots.app.convert import (
@@ -762,6 +763,7 @@ if QtWidgets is not None:  # pragma: no branch
             self._preview_fixture = preview_fixture
             self._thread: QtCore.QThread | None = None
             self._worker: _FunctionWorker | None = None
+            self._active_task_cancel_event: threading.Event | None = None
             if preview_fixture:
                 self._runtime_status = GuiRuntimeStatus(
                     ready=True,
@@ -828,8 +830,10 @@ if QtWidgets is not None:  # pragma: no branch
                     event.ignore()
                     return
                 self._force_close_active_task_for_exit()
-                event.accept()
+                self.hide()
+                event.ignore()
                 return
+            self._cleanup_runtime_for_exit()
             super().closeEvent(event)
 
         def _configure_palette(self) -> None:
@@ -1319,10 +1323,12 @@ if QtWidgets is not None:  # pragma: no branch
 
         def _start_runtime_check(self) -> None:
             self._set_check_feedback("busy", "")
+            cancel_event = threading.Event()
             self._start_task(
                 title="Check",
-                fn=run_gui_doctor_check,
+                fn=lambda cancel_event=cancel_event: run_gui_doctor_check(cancel_event=cancel_event),
                 on_success=self._on_runtime_check_finished,
+                cancel_event=cancel_event,
             )
 
         def _sync_checkbox_state(self) -> None:
@@ -1384,14 +1390,17 @@ if QtWidgets is not None:  # pragma: no branch
             install_prerequisites = self._confirm_setup_prerequisites()
             if install_prerequisites is None:
                 return
+            cancel_event = threading.Event()
             self._start_task(
                 title="Setup",
-                fn=lambda emit, install_prerequisites=install_prerequisites: self._run_setup_task(
+                fn=lambda emit, install_prerequisites=install_prerequisites, cancel_event=cancel_event: self._run_setup_task(
                     emit,
                     install_prerequisites=install_prerequisites,
+                    cancel_event=cancel_event,
                 ),
                 on_success=self._on_setup_finished,
                 on_progress=self._on_setup_progress_event,
+                cancel_event=cancel_event,
             )
 
         def _confirm_setup_prerequisites(self) -> bool | None:
@@ -1418,7 +1427,13 @@ if QtWidgets is not None:  # pragma: no branch
                 return None
             return True
 
-        def _run_setup_task(self, emit, *, install_prerequisites: bool = False) -> SetupResult:
+        def _run_setup_task(
+            self,
+            emit,
+            *,
+            install_prerequisites: bool = False,
+            cancel_event: threading.Event | None = None,
+        ) -> SetupResult:
             request = build_setup_request_for_variant(
                 runtime_variant=self._selected_runtime_variant(),
                 install_prerequisites=install_prerequisites,
@@ -1427,7 +1442,10 @@ if QtWidgets is not None:  # pragma: no branch
                 request,
                 progress_callback=emit,
                 emit_completion_event=False,
+                cancel_event=cancel_event,
             )
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("setup cancelled during runtime validation")
             emit(
                 SetupProgressEvent(
                     phase="runtime_check",
@@ -1436,7 +1454,7 @@ if QtWidgets is not None:  # pragma: no branch
                     fraction=0.97,
                 )
             )
-            status = run_gui_doctor_check(models_dir=request.models_dir)
+            status = run_gui_doctor_check(models_dir=request.models_dir, cancel_event=cancel_event)
             if not status.ready:
                 if status.runtime_source == "managed":
                     record_managed_runtime_validation(
@@ -1477,15 +1495,18 @@ if QtWidgets is not None:  # pragma: no branch
             if not self._confirm_overwrite(plan.existing_output_artifacts):
                 return
             self._begin_convert_progress(plan)
+            cancel_event = threading.Event()
             self._start_task(
                 title="Run",
-                fn=lambda emit, plan=plan: execute_convert_plan(
+                fn=lambda emit, plan=plan, cancel_event=cancel_event: execute_convert_plan(
                     plan,
                     verbose=False,
                     progress_callback=emit,
+                    cancel_event=cancel_event,
                 ),
                 on_success=self._on_convert_finished,
                 on_progress=self._on_convert_progress_event,
+                cancel_event=cancel_event,
             )
 
         def _prepare_convert_plan(self):
@@ -1534,10 +1555,11 @@ if QtWidgets is not None:  # pragma: no branch
             self._progress_timer.stop()
             self._convert_progress_estimator = None
 
-        def _start_task(self, *, title: str, fn, on_success, on_progress=None) -> None:
+        def _start_task(self, *, title: str, fn, on_success, on_progress=None, cancel_event=None) -> None:
             if self._thread is not None:
                 return
             self._active_task_title = title
+            self._active_task_cancel_event = cancel_event
             if title == "Run":
                 self._progress_timer.start()
                 self._refresh_convert_progress_display()
@@ -1602,8 +1624,13 @@ if QtWidgets is not None:  # pragma: no branch
             self._active_task_title = ""
             self._thread = None
             self._worker = None
+            self._active_task_cancel_event = None
             self._set_busy(False)
             self._refresh_ui()
+            if self._closing_anyway:
+                app = QtWidgets.QApplication.instance()
+                if app is not None:
+                    QtCore.QTimer.singleShot(0, app.quit)
 
         def _on_task_failed(self, title: str, message: str) -> None:
             if title == "Check":
@@ -1645,16 +1672,35 @@ if QtWidgets is not None:  # pragma: no branch
                     message=message,
                 )
 
-        def _force_close_active_task_for_exit(self) -> None:
+        def _cleanup_runtime_for_exit(self) -> None:
             self._closing_anyway = True
-            self._clear_convert_progress()
-            self._clear_setup_progress()
+            cancel_event = self._active_task_cancel_event
+            if cancel_event is not None:
+                cancel_event.set()
             try:
                 from istots import llama_runtime
 
+                llama_runtime.request_llama_server_process_shutdown()
                 llama_runtime.cleanup_managed_llama_server_for_current_process()
             except Exception:
                 pass
+
+        def _terminate_active_task_thread_if_still_running(self) -> None:
+            if not self._closing_anyway:
+                return
+            thread = self._thread
+            if thread is None:
+                return
+            is_finished = getattr(thread, "isFinished", None)
+            if callable(is_finished) and is_finished():
+                return
+            thread.terminate()
+            thread.wait(1000)
+
+        def _force_close_active_task_for_exit(self) -> None:
+            self._cleanup_runtime_for_exit()
+            self._clear_convert_progress()
+            self._clear_setup_progress()
 
             thread = self._thread
             if thread is None:
@@ -1663,8 +1709,7 @@ if QtWidgets is not None:  # pragma: no branch
             thread.quit()
             if thread.wait(250):
                 return
-            thread.terminate()
-            thread.wait(1000)
+            QtCore.QTimer.singleShot(1500, self._terminate_active_task_thread_if_still_running)
 
         def _on_setup_progress_event(self, event: SetupProgressEvent) -> None:
             self._set_progress_state("running")
@@ -2069,8 +2114,12 @@ def render_theme_previews(output_dir: Path) -> tuple[Path, ...]:
 def launch_gui(*, theme_id: str | None = None) -> int:
     _ensure_qt()
     assert QtWidgets is not None
+    from istots import llama_runtime
+
+    llama_runtime.clear_llama_server_process_shutdown_request()
     app = QtWidgets.QApplication([])
     _apply_application_metadata(app)
     window = TastingWindow(theme_id=theme_id)
+    app.aboutToQuit.connect(window._cleanup_runtime_for_exit)
     window.show()
     return app.exec()

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from istots.frozen_subprocess import sanitized_external_subprocess_runtime
+from istots.windows_subprocess import hidden_windows_subprocess_kwargs
 
 try:
     import winreg
@@ -43,6 +48,7 @@ def ensure_managed_runtime_prerequisites(
     install: bool,
     download_root: Path,
     progress_callback: Callable[[str, str, str, float | None], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[RuntimePrerequisiteStatus, ...]:
     missing = missing_managed_runtime_prerequisites()
     if not missing:
@@ -68,10 +74,12 @@ def ensure_managed_runtime_prerequisites(
     download_root.mkdir(parents=True, exist_ok=True)
 
     for item in missing:
+        _raise_if_prerequisite_cancelled(cancel_event, stage="prerequisite installation")
         if item.key == "windows-msvc-v14-x64":
             _install_windows_vc_redist_x64(
                 download_root=download_root,
                 progress_callback=progress_callback,
+                cancel_event=cancel_event,
             )
             continue
         raise RuntimeError(format_missing_managed_runtime_prerequisites((item,)))
@@ -129,6 +137,7 @@ def _install_windows_vc_redist_x64(
     *,
     download_root: Path,
     progress_callback: Callable[[str, str, str, float | None], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     installer_path = (download_root / "vc_redist.x64.exe").resolve()
     log_path = (download_root / "vc_redist.x64.log").resolve()
@@ -140,7 +149,12 @@ def _install_windows_vc_redist_x64(
         detail="Microsoft Visual C++ Redistributable (x64)",
         fraction=0.04,
     )
-    _download_file(WINDOWS_VC_REDIST_X64_URL, installer_path, progress_callback=progress_callback)
+    _download_file(
+        WINDOWS_VC_REDIST_X64_URL,
+        installer_path,
+        progress_callback=progress_callback,
+        cancel_event=cancel_event,
+    )
 
     _report_progress(
         progress_callback,
@@ -149,19 +163,23 @@ def _install_windows_vc_redist_x64(
         detail="Microsoft Visual C++ Redistributable (x64)",
         fraction=0.08,
     )
-    completed = subprocess.run(
-        [
-            str(installer_path),
-            "/install",
-            "/passive",
-            "/norestart",
-            "/log",
-            str(log_path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
+    with sanitized_external_subprocess_runtime() as sanitized_env:
+        process = subprocess.Popen(
+            [
+                str(installer_path),
+                "/install",
+                "/passive",
+                "/norestart",
+                "/log",
+                str(log_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=sanitized_env,
+            **hidden_windows_subprocess_kwargs(),
+        )
+        completed = _wait_for_prerequisite_installer(process, cancel_event=cancel_event)
     if completed.returncode not in {0, 3010, 1638}:
         raise RuntimeError(
             "Microsoft Visual C++ Redistributable (x64) installation failed.\n"
@@ -177,6 +195,7 @@ def _download_file(
     target_path: Path,
     *,
     progress_callback: Callable[[str, str, str, float | None], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     if target_path.exists() and target_path.stat().st_size > 0:
         _report_progress(
@@ -196,6 +215,7 @@ def _download_file(
         downloaded_bytes = 0
         with target_path.open("wb") as handle:
             while True:
+                _raise_if_prerequisite_cancelled(cancel_event, stage="prerequisite download")
                 chunk = response.read(1024 * 128)
                 if not chunk:
                     break
@@ -216,6 +236,36 @@ def _download_file(
                     detail=detail,
                     fraction=fraction,
                 )
+
+
+def _wait_for_prerequisite_installer(
+    process: subprocess.Popen[str],
+    *,
+    cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            stdout, stderr = process.communicate()
+            return subprocess.CompletedProcess(process.args, returncode, stdout, stderr)
+        if cancel_event is not None and cancel_event.is_set():
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise RuntimeError("runtime prerequisite installation cancelled")
+        time.sleep(0.25)
+
+
+def _raise_if_prerequisite_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError(f"runtime prerequisite installation cancelled during {stage}")
 
 
 def _read_windows_vc_redist_registry_version(arch: str) -> str | None:

@@ -43,6 +43,37 @@ An optional desktop GUI is included as a foundation for a future
 Windows-focused packaged distribution. If you want to try it from source, use
 `uv sync --extra gui` and then launch it with `uv run istots-gui`.
 
+## Windows GUI Packaging
+
+The current packaging target is a Windows `x64` GUI build only. The packaged
+CLI is intentionally excluded. The canonical local bundle is a `PyInstaller`
+`onedir` build, and the Windows installer should wrap that same bundle with
+Inno Setup instead of introducing a different install layout.
+
+To build the local Windows GUI bundle from the project environment:
+
+```bash
+uv sync --extra gui
+uv run python scripts/build_windows_gui.py
+```
+
+This produces a portable `onedir` bundle under
+`dist/windows-gui/istots/`, including:
+
+- `istots.exe`
+- `istots.ico`
+- `docs/CHANGELOG.md`
+- `docs/CONTRIBUTING.md`
+- `docs/DISCLAIMER.md`
+- `docs/LICENSE`
+- `docs/README.md`
+- `docs/THIRD_PARTY_NOTICES.md`
+
+Managed runtime and model assets remain outside the install directory under
+`%LOCALAPPDATA%\istots\managed\`. Packaged builds must keep that lifecycle
+split, and installer work should preserve it across install, upgrade, and
+uninstall flows.
+
 Then prepare the default local runtime assets:
 
 ```bash

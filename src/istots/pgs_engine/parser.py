@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 import threading
-from typing import Iterator
+from typing import Callable, Iterator
 
 from PIL import Image
 
@@ -199,6 +199,7 @@ class PgsEngine:
         max_display_sets: int | None = None,
         predecode_workers: int = 0,
         include_decoded_pixels: bool = True,
+        cancel_callback: Callable[[], None] | None = None,
     ) -> list[ParsedDisplaySet]:
         if not self.input_sup.exists():
             raise FileNotFoundError(f"Input SUP file not found: {self.input_sup}")
@@ -213,6 +214,7 @@ class PgsEngine:
         self._windows.clear()
         self._display_decode_cache.clear()
         self._predecoded_object_cache.clear()
+        _invoke_cancel_callback(cancel_callback)
 
         sup_data: bytes | None = None
         if predecode_workers != 0:
@@ -221,10 +223,12 @@ class PgsEngine:
                 max_display_sets=max_display_sets,
                 predecode_workers=predecode_workers,
                 sup_data=sup_data,
+                cancel_callback=cancel_callback,
             )
 
         rows: list[ParsedDisplaySet] = []
         for raw_index, packets in enumerate(_iter_display_set_packets(self.input_sup, sup_data=sup_data)):
+            _invoke_cancel_callback(cancel_callback)
             rows.append(
                 self._parse_display_set(
                     raw_index,
@@ -240,17 +244,25 @@ class PgsEngine:
         self,
         max_items: int | None = None,
         predecode_workers: int = -1,
+        cancel_callback: Callable[[], None] | None = None,
     ) -> list[EngineFrame]:
         if max_items is not None and max_items <= 0:
             raise ValueError("max_items must be a positive integer")
 
-        display_sets = self.parse_display_sets(predecode_workers=predecode_workers)
+        display_sets = self.parse_display_sets(
+            predecode_workers=predecode_workers,
+            cancel_callback=cancel_callback,
+        )
+        _invoke_cancel_callback(cancel_callback)
         candidates = build_frame_candidates(display_sets, hash_pixels=_hash_pixels)
+        _invoke_cancel_callback(cancel_callback)
         finalized = finalize_candidates(candidates, max_items=max_items)
+        _invoke_cancel_callback(cancel_callback)
         deduped = dedupe_consecutive_identical(finalized, max_gap_pts=DEDUPE_MAX_GAP_PTS)
 
         frames: list[EngineFrame] = []
         for row in deduped:
+            _invoke_cancel_callback(cancel_callback)
             start_ms = _pts_to_ms(row.start_pts)
             end_ms = _pts_to_ms(row.end_pts)
             if end_ms <= start_ms:
@@ -355,15 +367,18 @@ class PgsEngine:
         max_display_sets: int | None,
         predecode_workers: int,
         sup_data: bytes | None,
+        cancel_callback: Callable[[], None] | None = None,
     ) -> None:
         worker_count = _resolve_predecode_workers(predecode_workers)
         if worker_count <= 0:
             return
 
+        _invoke_cancel_callback(cancel_callback)
         unique_objects = _collect_unique_completed_objects(
             path=self.input_sup,
             max_display_sets=max_display_sets,
             sup_data=sup_data,
+            cancel_callback=cancel_callback,
         )
         if not unique_objects:
             return
@@ -375,6 +390,7 @@ class PgsEngine:
 
         if worker_count == 1:
             for key, (data, width, height) in unique_objects.items():
+                _invoke_cancel_callback(cancel_callback)
                 self._predecoded_object_cache[key] = _decode_object_rle(data, width, height)
             return
 
@@ -390,6 +406,7 @@ class PgsEngine:
             work_items,
             chunksize=chunk_size,
         ):
+            _invoke_cancel_callback(cancel_callback)
             width, height, _ = key
             self._predecoded_object_cache[key] = _flat_bytes_to_rows(flat, width, height)
 
@@ -398,9 +415,14 @@ def iter_engine_frames(
     input_sup: Path,
     max_items: int | None = None,
     predecode_workers: int = -1,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> Iterator[EngineFrame]:
     engine = PgsEngine(input_sup)
-    yield from engine.build_frames(max_items=max_items, predecode_workers=predecode_workers)
+    yield from engine.build_frames(
+        max_items=max_items,
+        predecode_workers=predecode_workers,
+        cancel_callback=cancel_callback,
+    )
 
 
 def _iter_display_set_packets(path: Path, sup_data: bytes | None = None) -> Iterator[list[_Packet]]:
@@ -479,11 +501,13 @@ def _collect_unique_completed_objects(
     path: Path,
     max_display_sets: int | None,
     sup_data: bytes | None = None,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> dict[tuple[int, int, bytes], tuple[bytes, int, int]]:
     objects: dict[int, ObjectBuffer] = {}
     unique: dict[tuple[int, int, bytes], tuple[bytes, int, int]] = {}
 
     for display_set_index, packets in enumerate(_iter_display_set_packets(path, sup_data=sup_data)):
+        _invoke_cancel_callback(cancel_callback)
         for packet in packets:
             if packet.segment_type == SEGMENT_PCS:
                 if _is_reset_pcs_payload(packet.payload):
@@ -1311,3 +1335,9 @@ def _hash_pixels(pixels: list[list[int]]) -> int:
 
 def hash_gray_pixels(pixels: list[list[int]]) -> int:
     return _hash_pixels(pixels)
+
+
+def _invoke_cancel_callback(cancel_callback: Callable[[], None] | None) -> None:
+    if cancel_callback is None:
+        return
+    cancel_callback()

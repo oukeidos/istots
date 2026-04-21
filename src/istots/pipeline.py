@@ -220,6 +220,19 @@ class PreparedInputSubprocessError(RuntimeError):
         return "\n".join(lines)
 
 
+class ConversionCancelledError(RuntimeError):
+    pass
+
+
+def _raise_if_conversion_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ConversionCancelledError(f"conversion cancelled during {stage}")
+
+
 @dataclass(frozen=True)
 class _GeminiCorrectionOutcome:
     corrector_text: str
@@ -499,11 +512,18 @@ def _wait_for_prepared_input_worker_envelope(
     *,
     request: _PreparedInputWorkerRequest,
     timeout_sec: float,
+    cancel_event: threading.Event | None = None,
 ) -> _PreparedInputWorkerEnvelope:
     started_at = time.monotonic()
     fault_dump_path = Path(request.fault_dump_path)
 
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            exitcode = _stop_prepared_input_subprocess(process)
+            raise ConversionCancelledError(
+                f"conversion cancelled during prepared-input collection: input={request.input_sup} "
+                f"pid={process.pid} exit={exitcode}"
+            )
         remaining_sec = (started_at + timeout_sec) - time.monotonic()
         if remaining_sec <= 0:
             exitcode = _stop_prepared_input_subprocess(process)
@@ -598,6 +618,7 @@ def _collect_prepared_ocr_inputs_via_subprocess(
     verbose: bool,
     spill_dir: Path,
     timeout_sec: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[_PreparedOCRInput]:
     context = multiprocessing.get_context("spawn")
     resolved_timeout_sec = _prepared_input_subprocess_timeout_sec(timeout_sec)
@@ -623,6 +644,7 @@ def _collect_prepared_ocr_inputs_via_subprocess(
             process,
             request=request,
             timeout_sec=resolved_timeout_sec,
+            cancel_event=cancel_event,
         )
     finally:
         parent_conn.close()
@@ -768,10 +790,12 @@ def convert_sup_to_srt(
     use_temp_ocr_image_files: bool | None = None,
     verbose: bool = True,
     progress_callback: Callable[[ConversionProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ConversionResult:
     if not input_sup.exists():
         raise FileNotFoundError(f"Input SUP file not found: {input_sup}")
 
+    _raise_if_conversion_cancelled(cancel_event, stage="startup")
     started_at = time.monotonic()
     logger.info("starting conversion: input=%s output=%s", input_sup, output_srt)
     _emit_conversion_progress(
@@ -837,6 +861,7 @@ def convert_sup_to_srt(
             verbose=verbose,
             progress_callback=progress_callback,
             progress_started_at=started_at,
+            cancel_event=cancel_event,
         )
     if detector_output is not None or corrector_config is not None:
         return _convert_sup_to_srt_default_with_detector(
@@ -854,14 +879,17 @@ def convert_sup_to_srt(
             use_temp_ocr_image_files=use_temp_ocr_image_files,
             srt_policy=srt_policy,
             verbose=verbose,
+            cancel_event=cancel_event,
         )
 
+    _raise_if_conversion_cancelled(cancel_event, stage="prepared-input collection")
     with _managed_prepared_ocr_inputs(
         input_sup,
         max_items=max_items,
         enable_furigana_mask=enable_furigana_mask,
         use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
+        cancel_event=cancel_event,
     ) as prepared_inputs:
         _emit_conversion_progress(
             progress_callback,
@@ -905,13 +933,16 @@ def convert_sup_to_srt(
                 branch_label="default",
                 progress_callback=progress_callback,
                 progress_started_at=started_at,
+                cancel_event=cancel_event,
             )
+            _raise_if_conversion_cancelled(cancel_event, stage="result assembly")
             segments = [
                 segment
                 for item, text in zip(prepared_inputs, texts, strict=True)
                 if (segment := _build_window_text_segment(item, text)) is not None
             ]
             entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+            _raise_if_conversion_cancelled(cancel_event, stage="output write")
             _emit_conversion_progress(
                 progress_callback,
                 started_at=started_at,
@@ -957,13 +988,16 @@ def _convert_sup_to_srt_fast(
     verbose: bool,
     progress_callback: Callable[[ConversionProgressEvent], None] | None,
     progress_started_at: float,
+    cancel_event: threading.Event | None,
 ) -> ConversionResult:
+    _raise_if_conversion_cancelled(cancel_event, stage="prepared-input collection")
     with _managed_prepared_ocr_inputs(
         input_sup,
         max_items=max_items,
         enable_furigana_mask=enable_furigana_mask,
         use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
+        cancel_event=cancel_event,
     ) as prepared_inputs:
         _emit_conversion_progress(
             progress_callback,
@@ -1024,6 +1058,7 @@ def _convert_sup_to_srt_fast(
         recognized_by_index: dict[int, str] = {}
 
         for role, config in backend_specs:
+            _raise_if_conversion_cancelled(cancel_event, stage=f"{role} backend setup")
             branch_inputs = wide_inputs if role == "ocr-fast" else tall_inputs
             branch_plan = wide_plan if role == "ocr-fast" else tall_plan
             branch_label = "non-tall-fast" if role == "ocr-fast" else "tall-default"
@@ -1086,16 +1121,19 @@ def _convert_sup_to_srt_fast(
                     recognition_plan=branch_plan,
                     progress_callback=progress_callback,
                     progress_started_at=progress_started_at,
+                    cancel_event=cancel_event,
                 )
                 for item, text in zip(branch_inputs, branch_texts, strict=True):
                     recognized_by_index[item.index] = text
 
+        _raise_if_conversion_cancelled(cancel_event, stage="result assembly")
         segments = [
             segment
             for item in prepared_inputs
             if (segment := _build_window_text_segment(item, recognized_by_index.get(item.index, ""))) is not None
         ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        _raise_if_conversion_cancelled(cancel_event, stage="output write")
         _emit_conversion_progress(
             progress_callback,
             started_at=progress_started_at,
@@ -1150,13 +1188,16 @@ def _convert_sup_to_srt_default_with_detector(
     use_temp_ocr_image_files: bool | None,
     srt_policy: str,
     verbose: bool,
+    cancel_event: threading.Event | None,
 ) -> ConversionResult:
+    _raise_if_conversion_cancelled(cancel_event, stage="prepared-input collection")
     with _managed_prepared_ocr_inputs(
         input_sup,
         max_items=max_items,
         enable_furigana_mask=enable_furigana_mask,
         use_temp_ocr_image_files=use_temp_ocr_image_files,
         verbose=verbose,
+        cancel_event=cancel_event,
     ) as prepared_inputs:
         with _managed_ocr_backend(
             _build_paddle_backend_config(
@@ -1174,8 +1215,10 @@ def _convert_sup_to_srt_default_with_detector(
                 backend=baseline_backend,
                 verbose=verbose,
                 branch_label="default",
+                cancel_event=cancel_event,
             )
 
+        _raise_if_conversion_cancelled(cancel_event, stage="detector preparation")
         detector_records = _build_detector_surface_records(
             prepared_inputs=prepared_inputs,
             baseline_texts=baseline_texts,
@@ -1206,6 +1249,7 @@ def _convert_sup_to_srt_default_with_detector(
         correction_records: list[ConservativeCorrectionRecord] = []
         final_texts = list(baseline_texts)
         if corrector_config is not None:
+            _raise_if_conversion_cancelled(cancel_event, stage="correction")
             correction_records = _apply_conservative_corrections(
                 prepared_inputs=prepared_inputs,
                 detector_records=detector_records,
@@ -1225,6 +1269,7 @@ def _convert_sup_to_srt_default_with_detector(
             if (segment := _build_window_text_segment(item, text)) is not None
         ]
         entries = _build_subtitle_entries(segments, srt_policy=srt_policy)
+        _raise_if_conversion_cancelled(cancel_event, stage="output write")
         write_srt(entries, output_srt)
         correction_fallback_count = sum(
             1 for record in correction_records if record.corrector_status == "fallback_baseline"
@@ -1275,13 +1320,16 @@ def _managed_prepared_ocr_inputs(
     enable_furigana_mask: bool,
     use_temp_ocr_image_files: bool | None,
     verbose: bool,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[list[_PreparedOCRInput]]:
+    _raise_if_conversion_cancelled(cancel_event, stage="prepared-input collection")
     if not _prepare_inputs_in_subprocess_enabled(use_temp_ocr_image_files):
         yield _collect_prepared_ocr_inputs_inprocess(
             input_sup,
             max_items=max_items,
             enable_furigana_mask=enable_furigana_mask,
             verbose=verbose,
+            cancel_event=cancel_event,
         )
         return
 
@@ -1295,6 +1343,7 @@ def _managed_prepared_ocr_inputs(
             enable_furigana_mask=enable_furigana_mask,
             verbose=verbose,
             spill_dir=spill_dir,
+            cancel_event=cancel_event,
         )
 
 
@@ -1319,6 +1368,7 @@ def _collect_prepared_ocr_inputs_inprocess(
     max_items: int | None,
     enable_furigana_mask: bool,
     verbose: bool,
+    cancel_event: threading.Event | None = None,
 ) -> list[_PreparedOCRInput]:
     total = 0
 
@@ -1329,13 +1379,35 @@ def _collect_prepared_ocr_inputs_inprocess(
             logger.info("parsed SUP OCR inputs: total=%d", total)
 
     try:
-        frames = list(iter_sup_window_frames(input_sup, max_items=max_items, on_total=on_total))
+        frames = list(
+            iter_sup_window_frames(
+                input_sup,
+                max_items=max_items,
+                on_total=on_total,
+                cancel_callback=(
+                    None
+                    if cancel_event is None
+                    else lambda: _raise_if_conversion_cancelled(cancel_event, stage="prepared-input collection")
+                ),
+            )
+        )
     finally:
         release_parser_predecode_workers()
+    _raise_if_conversion_cancelled(cancel_event, stage="furigana masking")
     if enable_furigana_mask:
         if verbose:
             logger.info("building furigana mask statistics by orientation")
-        images = [result.image for result in build_furigana_masks([frame.image for frame in frames])]
+        images = [
+            result.image
+            for result in build_furigana_masks(
+                [frame.image for frame in frames],
+                cancel_callback=(
+                    None
+                    if cancel_event is None
+                    else lambda: _raise_if_conversion_cancelled(cancel_event, stage="furigana masking")
+                ),
+            )
+        ]
     else:
         images = [frame.image for frame in frames]
     return [
@@ -1436,10 +1508,12 @@ def _recognize_prepared_inputs(
     recognition_plan: _PreparedOCRRecognitionPlan | None = None,
     progress_callback: Callable[[ConversionProgressEvent], None] | None = None,
     progress_started_at: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[str]:
     if not prepared_inputs:
         return []
 
+    _raise_if_conversion_cancelled(cancel_event, stage=f"{branch_label} OCR setup")
     plan = recognition_plan or _build_prepared_recognition_plan(prepared_inputs)
 
     recognized_unique: list[str] = []
@@ -1456,6 +1530,7 @@ def _recognize_prepared_inputs(
             branch_total_unique=total,
         )
     for processed, item in enumerate(plan.unique_inputs, start=1):
+        _raise_if_conversion_cancelled(cancel_event, stage=f"{branch_label} OCR")
         unique_index = processed - 1
         if verbose:
             logger.info(
@@ -1466,6 +1541,7 @@ def _recognize_prepared_inputs(
             )
         ocr_started = time.monotonic()
         text = _recognize_single_image(backend, _prepared_image(item))
+        _raise_if_conversion_cancelled(cancel_event, stage=f"{branch_label} OCR")
         recognized_unique.append(text)
         processed_rows += plan.unique_group_sizes[unique_index]
         if progress_started_at is not None:

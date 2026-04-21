@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -506,6 +507,46 @@ def test_run_gui_doctor_check_surfaces_role_specific_failures(monkeypatch: pytes
     assert "- ocr-fast: requested port is already in use" in status.detail
     assert "Issues:" in status.detail
     assert "ocr-fast:port_in_use" in status.missing_items
+
+
+def test_run_gui_doctor_check_passes_cancel_event_to_runtime_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    import istots.gui.core as gui_core
+
+    class _Report:
+        def __init__(self) -> None:
+            self.role = "ocr"
+            self.launch_spec = None
+            self.issues = ()
+            self.ok = True
+
+    seen_cancel_events: list[object] = []
+
+    monkeypatch.setattr(
+        gui_core,
+        "resolve_gui_runtime_binding",
+        lambda explicit_binary_path=None: type(
+            "_Binding",
+            (),
+            {
+                "source": "managed",
+                "binary_path": Path("/tmp/llama-server"),
+                "models_dir": Path("/tmp/models"),
+                "release_tag": "b8855",
+                "variant_id": "x64/cpu",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        gui_core,
+        "run_llama_server_doctor",
+        lambda **kwargs: seen_cancel_events.append(kwargs["cancel_event"]) or _Report(),
+    )
+
+    cancel_event = threading.Event()
+    status = run_gui_doctor_check(cancel_event=cancel_event)
+
+    assert status.ready is True
+    assert seen_cancel_events == [cancel_event, cancel_event]
 
 
 def test_format_setup_summary_keeps_setup_lane_single_line_and_targeted(tmp_path: Path) -> None:

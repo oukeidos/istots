@@ -174,6 +174,7 @@ def test_execute_convert_plan_calls_pipeline(monkeypatch, tmp_path: Path) -> Non
     assert captured["engine"] == "llama-server"
     assert captured["verbose"] is False
     assert captured["progress_callback"] is None
+    assert captured["cancel_event"] is None
     assert captured["paddle_runtime_overrides"] == PaddleOCRVLRuntimeOverrides(
         profile="cpu",
         port=19005,

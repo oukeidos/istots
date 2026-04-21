@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,15 @@ from istots.gui.qt_app import (
     resolve_gui_theme,
 )
 from istots.runtime_prerequisites import RuntimePrerequisiteStatus
+
+
+@pytest.fixture(autouse=True)
+def _reset_llama_runtime_shutdown_flag() -> None:
+    from istots import llama_runtime
+
+    llama_runtime.clear_llama_server_process_shutdown_request()
+    yield
+    llama_runtime.clear_llama_server_process_shutdown_request()
 
 
 def test_status_glyph_shapes_distinguish_states_beyond_color() -> None:
@@ -228,14 +238,15 @@ def test_tasting_window_close_event_can_close_anyway_during_active_task(monkeypa
         event = QtGui.QCloseEvent()
         window.closeEvent(event)
 
-        assert event.isAccepted() is True
+        assert event.isAccepted() is False
         assert closed == ["forced"]
+        assert window.isVisible() is False
     finally:
         window._thread = None
         window.close()
 
 
-def test_tasting_window_force_close_active_task_cleans_runtime_and_terminates_thread(monkeypatch) -> None:
+def test_tasting_window_force_close_active_task_cleans_runtime_and_schedules_termination(monkeypatch) -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6 import QtWidgets
 
@@ -267,22 +278,102 @@ def test_tasting_window_force_close_active_task_cleans_runtime_and_terminates_th
     try:
         thread = _FakeThread()
         window._thread = thread
+        window._active_task_cancel_event = threading.Event()
         cleaned: list[str] = []
+        shutdown_requested: list[str] = []
+        single_shots: list[tuple[int, object]] = []
+        monkeypatch.setattr(
+            "istots.llama_runtime.request_llama_server_process_shutdown",
+            lambda: shutdown_requested.append("shutdown"),
+        )
         monkeypatch.setattr(
             "istots.llama_runtime.cleanup_managed_llama_server_for_current_process",
             lambda: cleaned.append("runtime") or True,
+        )
+        monkeypatch.setattr(
+            "istots.gui.qt_app.QtCore.QTimer.singleShot",
+            lambda delay_ms, callback: single_shots.append((delay_ms, callback)),
         )
 
         window._force_close_active_task_for_exit()
 
         assert window._closing_anyway is True
+        assert window._active_task_cancel_event is not None
+        assert window._active_task_cancel_event.is_set() is True
+        assert shutdown_requested == ["shutdown"]
         assert cleaned == ["runtime"]
         assert thread.interruption_requested is True
         assert thread.quit_called is True
-        assert thread.wait_calls == [250, 1000]
-        assert thread.terminate_called is True
+        assert thread.wait_calls == [250]
+        assert thread.terminate_called is False
+        assert len(single_shots) == 1
+        assert single_shots[0][0] == 1500
     finally:
         window._thread = None
+        window.close()
+
+
+def test_tasting_window_force_close_termination_fallback_terminates_thread() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    class _FakeThread:
+        def __init__(self) -> None:
+            self.terminate_called = False
+            self.wait_calls: list[int] = []
+
+        def isFinished(self) -> bool:
+            return False
+
+        def terminate(self) -> None:
+            self.terminate_called = True
+
+        def wait(self, timeout: int) -> bool:
+            self.wait_calls.append(timeout)
+            return True
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        thread = _FakeThread()
+        window._thread = thread
+        window._closing_anyway = True
+
+        window._terminate_active_task_thread_if_still_running()
+
+        assert thread.terminate_called is True
+        assert thread.wait_calls == [1000]
+    finally:
+        window._thread = None
+        window.close()
+
+
+def test_tasting_window_close_event_cleans_runtime_without_active_task(monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtGui, QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        cleaned: list[str] = []
+        monkeypatch.setattr(
+            window,
+            "_cleanup_runtime_for_exit",
+            lambda: cleaned.append("runtime"),
+        )
+
+        event = QtGui.QCloseEvent()
+        window.closeEvent(event)
+
+        assert event.isAccepted() is True
+        assert cleaned == ["runtime"]
+    finally:
         window.close()
 
 
@@ -307,8 +398,9 @@ def test_tasting_window_setup_task_raises_when_final_runtime_check_fails(
             lambda **kwargs: request,
         )
 
-        def _fake_execute_setup_request(_request, *, progress_callback, emit_completion_event):
+        def _fake_execute_setup_request(_request, *, progress_callback, emit_completion_event, cancel_event):
             assert emit_completion_event is False
+            assert cancel_event is None or hasattr(cancel_event, "is_set")
             progress_callback(
                 SetupProgressEvent(
                     phase="model_setup",
@@ -372,7 +464,7 @@ def test_tasting_window_setup_task_uses_selected_runtime_variant(
         )
         monkeypatch.setattr(
             "istots.gui.qt_app.execute_setup_request",
-            lambda _request, *, progress_callback, emit_completion_event: SetupResult(
+            lambda _request, *, progress_callback, emit_completion_event, cancel_event: SetupResult(
                 artifacts=SimpleNamespace(),
                 custom_hf_bundle=False,
                 custom_gguf_bundle=False,
@@ -476,6 +568,7 @@ def test_tasting_window_handle_setup_action_confirms_prerequisite_install(
         assert len(started) == 1
         setup_kwargs = started[0]
         assert setup_kwargs["title"] == "Setup"
+        assert setup_kwargs["cancel_event"] is not None
 
         seen_install_flags: list[bool] = []
         request = SetupRequest(models_dir=tmp_path / "models", bootstrap_managed_runtime=True)
@@ -485,7 +578,7 @@ def test_tasting_window_handle_setup_action_confirms_prerequisite_install(
         )
         monkeypatch.setattr(
             "istots.gui.qt_app.execute_setup_request",
-            lambda _request, *, progress_callback, emit_completion_event: SetupResult(
+            lambda _request, *, progress_callback, emit_completion_event, cancel_event: SetupResult(
                 artifacts=SimpleNamespace(),
                 custom_hf_bundle=False,
                 custom_gguf_bundle=False,
@@ -505,6 +598,28 @@ def test_tasting_window_handle_setup_action_confirms_prerequisite_install(
         setup_kwargs["fn"](lambda event: None)
 
         assert seen_install_flags == [True]
+    finally:
+        window.close()
+
+
+def test_tasting_window_start_runtime_check_uses_cancel_event(monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        started: list[dict[str, object]] = []
+        monkeypatch.setattr(window, "_start_task", lambda **kwargs: started.append(kwargs))
+
+        window._start_runtime_check()
+
+        assert len(started) == 1
+        assert started[0]["title"] == "Check"
+        assert started[0]["cancel_event"] is not None
     finally:
         window.close()
 

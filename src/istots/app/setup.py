@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -12,6 +13,10 @@ class SetupArgumentError(ValueError):
 
 
 class SetupExecutionError(RuntimeError):
+    pass
+
+
+class SetupCancelledError(RuntimeError):
     pass
 
 
@@ -57,11 +62,13 @@ def execute_setup_request(
     *,
     progress_callback: Callable[[SetupProgressEvent], None] | None = None,
     emit_completion_event: bool = True,
+    cancel_event: threading.Event | None = None,
 ) -> SetupResult:
     if not request.with_hf_fallback and not model_store.is_default_pinned_hf_model(request.model_id):
         raise SetupArgumentError("--model-id requires --with-hf-fallback")
 
     try:
+        _raise_if_setup_cancelled(cancel_event, stage="startup")
         if request.bootstrap_managed_runtime:
             from istots.gui.bootstrap_windows import install_managed_llama_cpp_runtime
 
@@ -69,6 +76,7 @@ def execute_setup_request(
                 requested_variant=request.runtime_variant,
                 force=request.force,
                 install_prerequisites=request.install_prerequisites,
+                cancel_event=cancel_event,
                 progress_callback=lambda phase, headline, detail, fraction: _emit_progress(
                     progress_callback,
                     phase=phase,
@@ -77,6 +85,7 @@ def execute_setup_request(
                     fraction=fraction,
                 ),
             )
+        _raise_if_setup_cancelled(cancel_event, stage="model setup")
         _emit_progress(
             progress_callback,
             phase="model_setup",
@@ -99,10 +108,16 @@ def execute_setup_request(
             gguf_source_mode=request.gguf_source_mode,
             min_pixels=request.min_pixels,
             derived_mmproj_output_path=request.derived_mmproj_output_path,
+            cancel_callback=(
+                None
+                if cancel_event is None
+                else lambda: _raise_if_setup_cancelled(cancel_event, stage="model setup")
+            ),
         )
     except Exception as exc:
         raise SetupExecutionError(str(exc)) from exc
 
+    _raise_if_setup_cancelled(cancel_event, stage="completion")
     if emit_completion_event:
         _emit_progress(
             progress_callback,
@@ -123,6 +138,15 @@ def execute_setup_request(
             mmproj_filename=request.qwen_corrector_mmproj_filename,
         ),
     )
+
+
+def _raise_if_setup_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise SetupCancelledError(f"setup cancelled during {stage}")
 
 
 def _emit_progress(

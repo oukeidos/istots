@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.3] - 2026-04-21
+- Added a reproducible Windows `x64` GUI packaging path built around a `PyInstaller` `onedir` bundle, the required attached documents, and supporting local build tooling.
+- Hardened packaged GUI runtime behavior so setup, runtime checks, OCR work, and managed `llama-server` shutdown and recovery behave more reliably in frozen builds, with focused regression coverage for cancellation and cleanup.
+
 ## [0.4.2] - 2026-04-21
 - Made the Windows desktop app much easier to set up by guiding users through downloading the needed local runtime, checking required system components, and confirming that setup finished successfully.
 - Simplified setup behavior across the app and command line so supporting model files are prepared more consistently, while removing an advanced tuning option that most users should not need to manage directly.

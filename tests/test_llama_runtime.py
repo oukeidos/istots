@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import stat
 from pathlib import Path
 
+import pytest
+
 from istots.derived_assets import resolve_derived_mmproj_output_path
 from istots import llama_runtime
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_shutdown_request() -> None:
+    llama_runtime.clear_llama_server_process_shutdown_request()
+    yield
+    llama_runtime.clear_llama_server_process_shutdown_request()
 
 
 def test_build_llama_server_command_uses_auto_profile_defaults() -> None:
@@ -225,7 +235,7 @@ def test_run_llama_server_doctor_runs_smoke_on_ready_runtime(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
     monkeypatch.setattr(llama_runtime, "start_llama_server", lambda spec, startup_timeout_sec: process)
-    monkeypatch.setattr(llama_runtime, "request_llama_server_smoke", lambda spec: "OK")
+    monkeypatch.setattr(llama_runtime, "request_llama_server_smoke", lambda spec, cancel_event=None: "OK")
 
     stopped: list[object] = []
     monkeypatch.setattr(llama_runtime, "stop_llama_server", lambda proc: stopped.append(proc))
@@ -264,7 +274,7 @@ def test_run_llama_server_launch_spec_doctor_runs_smoke_on_ready_runtime(
 
     monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
     monkeypatch.setattr(llama_runtime, "start_llama_server", lambda spec, startup_timeout_sec: process)
-    monkeypatch.setattr(llama_runtime, "request_llama_server_smoke", lambda spec: "STRICT-OK")
+    monkeypatch.setattr(llama_runtime, "request_llama_server_smoke", lambda spec, cancel_event=None: "STRICT-OK")
 
     stopped: list[object] = []
     monkeypatch.setattr(llama_runtime, "stop_llama_server", lambda proc: stopped.append(proc))
@@ -593,6 +603,70 @@ def test_cleanup_managed_llama_server_for_current_process_terminates_matching_ru
     assert lock_path.exists() is False
 
 
+def test_cleanup_managed_llama_server_for_current_process_uses_active_lock_when_owner_metadata_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    current_pid = os.getpid()
+    state_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "current-owner",
+                "created_at": 10.0,
+                "pid": 8765,
+                "binary_path": "/tmp/llama-server",
+                "model_path": "/tmp/model.gguf",
+                "mmproj_path": "/tmp/mmproj.gguf",
+                "bind_host": "127.0.0.1",
+                "connect_host": "127.0.0.1",
+                "port": 18080,
+                "role": "ocr",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        llama_runtime,
+        "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS",
+        {
+            8765: llama_runtime.LlamaServerManagerLock(
+                paths=llama_runtime.llama_server_manager_paths(),
+                owner=llama_runtime.LlamaServerManagerLockOwner(
+                    pid=current_pid,
+                    instance_id="current-owner",
+                    created_at=10.0,
+                ),
+            )
+        },
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        llama_runtime,
+        "_terminate_llama_server_pid",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(
+        llama_runtime,
+        "_load_llama_server_process_identity",
+        lambda pid: llama_runtime.LlamaServerProcessIdentity(
+            pid=pid,
+            started_at=None,
+            executable_path="/tmp/llama-server",
+        ),
+    )
+
+    cleaned = llama_runtime.cleanup_managed_llama_server_for_current_process()
+
+    assert cleaned is True
+    assert terminated == [8765]
+    assert state_path.exists() is False
+    assert llama_runtime._ACTIVE_LLAMA_SERVER_MANAGER_LOCKS == {}
+
+
 def test_cleanup_managed_llama_server_skips_pid_reuse_with_mismatched_identity(
     monkeypatch,
     tmp_path: Path,
@@ -654,6 +728,59 @@ def test_cleanup_managed_llama_server_skips_pid_reuse_with_mismatched_identity(
     assert terminated == []
     assert state_path.exists() is False
     assert lock_path.exists() is False
+
+
+def test_cleanup_stale_managed_llama_server_processes_reclaims_live_orphan_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "orphan-instance",
+                "created_at": 10.0,
+                "pid": 8765,
+                "binary_path": "/tmp/llama-server",
+                "model_path": "/tmp/model.gguf",
+                "mmproj_path": "/tmp/mmproj.gguf",
+                "bind_host": "127.0.0.1",
+                "connect_host": "127.0.0.1",
+                "port": 18080,
+                "role": "ocr",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(
+        llama_runtime,
+        "_is_pid_alive",
+        lambda pid: pid == 8765,
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr(
+        llama_runtime,
+        "_terminate_llama_server_pid",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(
+        llama_runtime,
+        "_load_llama_server_process_identity",
+        lambda pid: llama_runtime.LlamaServerProcessIdentity(
+            pid=pid,
+            started_at=None,
+            executable_path="/tmp/llama-server",
+        ),
+    )
+
+    cleaned = llama_runtime.cleanup_stale_managed_llama_server_processes()
+
+    assert cleaned is True
+    assert terminated == [8765]
+    assert state_path.exists() is False
 
 
 def test_start_llama_server_times_out_waiting_for_live_owner_lock(
@@ -719,11 +846,18 @@ def test_start_llama_server_waits_on_connect_host(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
     monkeypatch.setattr(llama_runtime, "build_llama_server_command", lambda spec: ["llama-server"])
     monkeypatch.setattr(llama_runtime, "is_port_in_use", lambda host, port: False)
-    monkeypatch.setattr(
-        llama_runtime.subprocess,
-        "Popen",
-        lambda *args, **kwargs: _FakePopen(pid=1234),
-    )
+    popen_kwargs_seen: list[dict[str, object]] = []
+
+    @contextmanager
+    def _fake_subprocess_runtime():
+        yield {"PATH": "clean"}
+
+    def _fake_popen(*args, **kwargs):
+        popen_kwargs_seen.append(kwargs)
+        return _FakePopen(pid=1234)
+
+    monkeypatch.setattr(llama_runtime, "sanitized_external_subprocess_runtime", _fake_subprocess_runtime)
+    monkeypatch.setattr(llama_runtime.subprocess, "Popen", _fake_popen)
 
     waited_on: list[tuple[str, int]] = []
     monkeypatch.setattr(
@@ -735,8 +869,50 @@ def test_start_llama_server_waits_on_connect_host(monkeypatch, tmp_path: Path) -
     process = llama_runtime.start_llama_server(spec, startup_timeout_sec=1.0)
     try:
         assert waited_on == [("127.0.0.1", 18080)]
+        assert popen_kwargs_seen
+        assert popen_kwargs_seen[0]["creationflags"] & getattr(
+            llama_runtime.subprocess,
+            "CREATE_NO_WINDOW",
+            0,
+        )
+        assert popen_kwargs_seen[0]["creationflags"] & getattr(
+            llama_runtime.subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            0,
+        )
+        assert popen_kwargs_seen[0]["env"] == {"PATH": "clean"}
     finally:
         llama_runtime.stop_llama_server(process)
+
+
+def test_start_llama_server_rejects_launch_when_process_shutdown_requested(monkeypatch, tmp_path: Path) -> None:
+    lock_path = tmp_path / "llama.lock"
+    state_path = tmp_path / "llama-state.json"
+    spec = llama_runtime.LlamaServerLaunchSpec(
+        role=llama_runtime.LlamaServerRole.OCR,
+        profile=llama_runtime.LlamaServerProfile.AUTO,
+        binary_path=Path("/tmp/llama-server"),
+        model_path=Path("/tmp/model.gguf"),
+        mmproj_path=Path("/tmp/mmproj.gguf"),
+        host="127.0.0.1",
+        port=18080,
+    )
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_LOCK_PATH", str(lock_path))
+    monkeypatch.setenv("ISTOTS_LLAMA_SERVER_MANAGER_STATE_PATH", str(state_path))
+    monkeypatch.setattr(llama_runtime, "_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS", {})
+    llama_runtime.request_llama_server_process_shutdown()
+    popen_calls: list[object] = []
+    monkeypatch.setattr(
+        llama_runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="shutdown is in progress"):
+        llama_runtime.start_llama_server(spec, startup_timeout_sec=1.0)
+
+    assert popen_calls == []
+    llama_runtime.clear_llama_server_process_shutdown_request()
 
 
 def test_stop_llama_server_clears_manager_state(monkeypatch, tmp_path: Path) -> None:

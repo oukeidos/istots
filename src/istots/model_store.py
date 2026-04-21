@@ -5,6 +5,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from istots.derived_assets import resolve_derived_mmproj_output_path
 
@@ -176,6 +177,7 @@ def _snapshot_download_to_target(
     force: bool = False,
     revision: str | None = None,
     allow_patterns: list[str] | None = None,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> None:
     try:
         from huggingface_hub import snapshot_download
@@ -183,6 +185,7 @@ def _snapshot_download_to_target(
         raise RuntimeError("huggingface_hub is required for `istots setup`.") from exc
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    _invoke_cancel_callback(cancel_callback)
 
     if force and target.exists():
         _ensure_safe_force_delete_target(target)
@@ -198,6 +201,7 @@ def _snapshot_download_to_target(
     if allow_patterns is not None:
         kwargs["allow_patterns"] = list(allow_patterns)
     snapshot_download(**kwargs)
+    _invoke_cancel_callback(cancel_callback)
 
 
 def _verify_pinned_snapshot_files(
@@ -225,6 +229,7 @@ def _download_pinned_snapshot_bundle(
     bundle: PinnedSnapshotBundle,
     models_dir: Path | None = None,
     force: bool = False,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> tuple[Path, dict[str, Path]]:
     revision = bundle.revision.strip()
     if not revision:
@@ -237,7 +242,9 @@ def _download_pinned_snapshot_bundle(
         force=force,
         revision=revision,
         allow_patterns=list(bundle.file_hashes),
+        cancel_callback=cancel_callback,
     )
+    _invoke_cancel_callback(cancel_callback)
     resolved_paths = _verify_pinned_snapshot_files(target=target, bundle=bundle)
     _mark_setup_target_managed(
         target,
@@ -270,12 +277,18 @@ def ensure_local_model(model_id: str, models_dir: Path | None = None) -> Path:
     return path
 
 
-def download_model(model_id: str, models_dir: Path | None = None, force: bool = False) -> Path:
+def download_model(
+    model_id: str,
+    models_dir: Path | None = None,
+    force: bool = False,
+    cancel_callback: Callable[[], None] | None = None,
+) -> Path:
     if is_default_pinned_hf_model(model_id):
         target, _ = _download_pinned_snapshot_bundle(
             bundle=DEFAULT_HF_MODEL_BUNDLE,
             models_dir=models_dir,
             force=force,
+            cancel_callback=cancel_callback,
         )
         return target
 
@@ -284,6 +297,7 @@ def download_model(model_id: str, models_dir: Path | None = None, force: bool = 
         repo_id=model_id,
         target=target,
         force=force,
+        cancel_callback=cancel_callback,
     )
     _mark_setup_target_managed(target, model_id=model_id, verification="unverified")
     return target.resolve()
@@ -295,6 +309,7 @@ def _download_snapshot_files(
     required_filenames: tuple[str, ...],
     models_dir: Path | None = None,
     force: bool = False,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> tuple[Path, tuple[Path, ...]]:
     target = resolve_setup_download_path(model_id=model_id, models_dir=models_dir)
     _snapshot_download_to_target(
@@ -307,10 +322,12 @@ def _download_snapshot_files(
             "README*",
             "*.json",
         ],
+        cancel_callback=cancel_callback,
     )
 
     resolved_paths: list[Path] = []
     for filename in required_filenames:
+        _invoke_cancel_callback(cancel_callback)
         path = target / filename
         if not path.exists():
             raise RuntimeError(f"required file missing after setup: {path}")
@@ -324,12 +341,14 @@ def download_gguf_runtime_assets(
     model_id: str = DEFAULT_GGUF_MODEL_ID,
     models_dir: Path | None = None,
     force: bool = False,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> tuple[Path, Path, Path]:
     if is_default_pinned_gguf_model(model_id):
         target, resolved_paths = _download_pinned_snapshot_bundle(
             bundle=DEFAULT_GGUF_RUNTIME_BUNDLE,
             models_dir=models_dir,
             force=force,
+            cancel_callback=cancel_callback,
         )
         return (
             target,
@@ -345,6 +364,7 @@ def download_gguf_runtime_assets(
         ),
         models_dir=models_dir,
         force=force,
+        cancel_callback=cancel_callback,
     )
     model_path, mmproj_path = paths
     return target, model_path, mmproj_path
@@ -357,6 +377,7 @@ def download_qwen_corrector_assets(
     mmproj_filename: str = DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
     models_dir: Path | None = None,
     force: bool = False,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> tuple[Path, Path, Path]:
     if is_default_pinned_qwen_bundle(
         model_id=model_id,
@@ -367,6 +388,7 @@ def download_qwen_corrector_assets(
             bundle=DEFAULT_QWEN_CORRECTOR_BUNDLE,
             models_dir=models_dir,
             force=force,
+            cancel_callback=cancel_callback,
         )
         return (
             target,
@@ -379,6 +401,7 @@ def download_qwen_corrector_assets(
         required_filenames=(model_filename, mmproj_filename),
         models_dir=models_dir,
         force=force,
+        cancel_callback=cancel_callback,
     )
     model_path, mmproj_path = paths
     return target, model_path, mmproj_path
@@ -420,6 +443,7 @@ def setup_default_runtime_assets(
     gguf_source_mode: str = "auto",
     min_pixels: int = 32768,
     derived_mmproj_output_path: Path | None = None,
+    cancel_callback: Callable[[], None] | None = None,
 ) -> SetupArtifacts:
     from istots.llama_mmproj import materialize_mmproj
 
@@ -428,16 +452,21 @@ def setup_default_runtime_assets(
 
     hf_model_dir: Path | None = None
     if with_hf_fallback:
+        _invoke_cancel_callback(cancel_callback)
         hf_model_dir = download_model(
             model_id=hf_model_id,
             models_dir=models_dir,
             force=force,
+            cancel_callback=cancel_callback,
         )
+    _invoke_cancel_callback(cancel_callback)
     gguf_model_dir, gguf_model_path, gguf_mmproj_path = download_gguf_runtime_assets(
         model_id=gguf_model_id,
         models_dir=models_dir,
         force=force,
+        cancel_callback=cancel_callback,
     )
+    _invoke_cancel_callback(cancel_callback)
     derived_mmproj_path = materialize_mmproj(
         base_mmproj=gguf_mmproj_path,
         output_path=(
@@ -458,6 +487,7 @@ def setup_default_runtime_assets(
     qwen_corrector_model_path: Path | None = None
     qwen_corrector_mmproj_path: Path | None = None
     if with_qwen_corrector:
+        _invoke_cancel_callback(cancel_callback)
         (
             qwen_corrector_dir,
             qwen_corrector_model_path,
@@ -468,6 +498,7 @@ def setup_default_runtime_assets(
             mmproj_filename=qwen_corrector_mmproj_filename,
             models_dir=models_dir,
             force=force,
+            cancel_callback=cancel_callback,
         )
     return SetupArtifacts(
         hf_model_dir=hf_model_dir,
@@ -479,3 +510,9 @@ def setup_default_runtime_assets(
         qwen_corrector_model_path=qwen_corrector_model_path,
         qwen_corrector_mmproj_path=qwen_corrector_mmproj_path,
     )
+
+
+def _invoke_cancel_callback(cancel_callback: Callable[[], None] | None) -> None:
+    if cancel_callback is None:
+        return
+    cancel_callback()

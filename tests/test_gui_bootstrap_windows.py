@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -119,31 +120,53 @@ def test_resolve_gui_runtime_binding_falls_back_to_external_when_managed_missing
 def test_validate_llama_server_binary_accepts_zero_exit_probe(monkeypatch, tmp_path: Path) -> None:
     binary = tmp_path / "llama-server.exe"
     binary.write_text("", encoding="utf-8")
-    seen: list[list[str]] = []
+    seen: list[tuple[list[str], dict[str, object]]] = []
 
-    def _fake_run(command, **kwargs):
-        seen.append(command)
-        return SimpleNamespace(returncode=0, stdout="version", stderr="")
+    @contextmanager
+    def _fake_subprocess_runtime():
+        yield {"PATH": "clean"}
+
+    def _fake_popen(command, **kwargs):
+        seen.append((command, kwargs))
+        return SimpleNamespace(args=command)
 
     monkeypatch.setattr(bootstrap_windows, "missing_managed_runtime_prerequisites", lambda: ())
-    monkeypatch.setattr(bootstrap_windows.subprocess, "run", _fake_run)
+    monkeypatch.setattr(bootstrap_windows, "sanitized_external_subprocess_runtime", _fake_subprocess_runtime)
+    monkeypatch.setattr(bootstrap_windows.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "_wait_for_validation_process",
+        lambda process, *, timeout, cancel_event: SimpleNamespace(returncode=0, stdout="version", stderr=""),
+    )
 
     bootstrap_windows.validate_llama_server_binary(binary)
 
-    assert seen == [[str(binary.resolve()), "--version"]]
+    assert seen[0][0] == [str(binary.resolve()), "--version"]
+    assert seen[0][1]["creationflags"] & getattr(bootstrap_windows.subprocess, "CREATE_NO_WINDOW", 0)
+    assert seen[0][1]["env"] == {"PATH": "clean"}
 
 
 def test_validate_llama_server_binary_reports_failed_probes(monkeypatch, tmp_path: Path) -> None:
     binary = tmp_path / "llama-server.exe"
     binary.write_text("", encoding="utf-8")
-    seen: list[list[str]] = []
+    seen: list[tuple[list[str], dict[str, object]]] = []
 
-    def _fake_run(command, **kwargs):
-        seen.append(command)
-        return SimpleNamespace(returncode=3221225477, stdout="", stderr="")
+    @contextmanager
+    def _fake_subprocess_runtime():
+        yield {"PATH": "clean"}
+
+    def _fake_popen(command, **kwargs):
+        seen.append((command, kwargs))
+        return SimpleNamespace(args=command)
 
     monkeypatch.setattr(bootstrap_windows, "missing_managed_runtime_prerequisites", lambda: ())
-    monkeypatch.setattr(bootstrap_windows.subprocess, "run", _fake_run)
+    monkeypatch.setattr(bootstrap_windows, "sanitized_external_subprocess_runtime", _fake_subprocess_runtime)
+    monkeypatch.setattr(bootstrap_windows.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "_wait_for_validation_process",
+        lambda process, *, timeout, cancel_event: SimpleNamespace(returncode=3221225477, stdout="", stderr=""),
+    )
 
     try:
         bootstrap_windows.validate_llama_server_binary(binary)
@@ -155,10 +178,15 @@ def test_validate_llama_server_binary_reports_failed_probes(monkeypatch, tmp_pat
     else:
         raise AssertionError("expected startup validation failure")
 
-    assert seen == [
+    assert [command for command, _ in seen] == [
         [str(binary.resolve()), "--version"],
         [str(binary.resolve()), "--help"],
     ]
+    assert all(
+        kwargs["creationflags"] & getattr(bootstrap_windows.subprocess, "CREATE_NO_WINDOW", 0)
+        for _, kwargs in seen
+    )
+    assert all(kwargs["env"] == {"PATH": "clean"} for _, kwargs in seen)
 
 
 def test_validate_llama_server_binary_reports_missing_prerequisite(monkeypatch, tmp_path: Path) -> None:
@@ -230,7 +258,11 @@ def test_install_managed_runtime_revalidates_existing_variant_dir_before_reuse(
         raise RuntimeError("broken runtime")
 
     monkeypatch.setattr(bootstrap_windows, "_locate_llama_server_binary", _fake_locate)
-    monkeypatch.setattr(bootstrap_windows, "validate_llama_server_binary", _fake_validate)
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "validate_llama_server_binary",
+        lambda path, cancel_event=None: _fake_validate(path),
+    )
     monkeypatch.setattr(
         bootstrap_windows,
         "_download_release_assets",
@@ -296,7 +328,11 @@ def test_install_managed_runtime_does_not_reuse_existing_state_for_different_req
     monkeypatch.setattr(bootstrap_windows, "load_managed_runtime_state", lambda: existing_state)
     monkeypatch.setattr(bootstrap_windows, "write_managed_runtime_state", writes.append)
     monkeypatch.setattr(bootstrap_windows, "fetch_latest_llama_cpp_release", lambda **kwargs: catalog)
-    monkeypatch.setattr(bootstrap_windows, "validate_llama_server_binary", lambda path: validations.append(path))
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "validate_llama_server_binary",
+        lambda path, cancel_event=None: validations.append(path),
+    )
     monkeypatch.setattr(
         bootstrap_windows,
         "_download_release_assets",

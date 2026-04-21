@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,6 +172,7 @@ def run_gui_doctor_check(
     runtime_binary_path: Path | None = None,
     min_pixels: int = 32768,
     host: str = DEFAULT_LLAMA_SERVER_HOST,
+    cancel_event: threading.Event | None = None,
 ) -> GuiRuntimeStatus:
     issue_labels: list[str] = []
     issue_messages: list[str] = []
@@ -187,6 +189,7 @@ def run_gui_doctor_check(
     )
 
     for role in ("ocr", "ocr-fast"):
+        _raise_if_gui_check_cancelled(cancel_event, stage=f"{role} runtime check")
         report = run_llama_server_doctor(
             role=role,
             models_dir=effective_models_dir,
@@ -194,6 +197,7 @@ def run_gui_doctor_check(
             explicit_binary_path=effective_binary_path,
             host=host,
             overrides=_default_gui_doctor_overrides(),
+            cancel_event=cancel_event,
         )
         if report.ok:
             continue
@@ -244,6 +248,15 @@ def run_gui_doctor_check(
         runtime_release_tag=binding.release_tag,
         runtime_variant_id=binding.variant_id,
     )
+
+
+def _raise_if_gui_check_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError(f"GUI runtime check cancelled during {stage}")
 
 
 def derive_primary_action(state: GuiScreenState) -> GuiPrimaryAction:

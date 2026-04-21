@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -19,6 +20,7 @@ from typing import Any
 from PIL import Image
 
 from istots.derived_assets import resolve_derived_mmproj_output_path
+from istots.frozen_subprocess import sanitized_external_subprocess_runtime
 from istots.llama_sampling import (
     PADDLEOCR_LLAMA_OCR_EXPLICIT_DEFAULTS,
     apply_openai_sampling_recipe,
@@ -29,6 +31,7 @@ from istots.model_store import (
     DEFAULT_GGUF_MMPROJ_FILENAME,
     resolve_local_model_path,
 )
+from istots.windows_subprocess import hidden_windows_subprocess_kwargs
 
 DEFAULT_LLAMA_SERVER_HOST = "127.0.0.1"
 DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC = 120.0
@@ -42,6 +45,7 @@ DEFAULT_LLAMA_SERVER_MANAGER_LOCK_STALE_GRACE_SEC = 5.0
 DEFAULT_LLAMA_SERVER_PROCESS_IDENTITY_TOLERANCE_SEC = 5.0
 
 _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS: dict[int, Any] = {}
+_LLAMA_SERVER_SHUTDOWN_REQUESTED = False
 
 
 class LlamaServerRole(StrEnum):
@@ -261,6 +265,21 @@ class LlamaServerOCRResponse:
     text: str
     finish_reason: str | None = None
     completion_tokens: int | None = None
+
+
+def request_llama_server_process_shutdown() -> None:
+    global _LLAMA_SERVER_SHUTDOWN_REQUESTED
+    _LLAMA_SERVER_SHUTDOWN_REQUESTED = True
+
+
+def clear_llama_server_process_shutdown_request() -> None:
+    global _LLAMA_SERVER_SHUTDOWN_REQUESTED
+    _LLAMA_SERVER_SHUTDOWN_REQUESTED = False
+
+
+def _raise_if_llama_server_shutdown_requested() -> None:
+    if _LLAMA_SERVER_SHUTDOWN_REQUESTED:
+        raise RuntimeError("llama-server launch blocked because process shutdown is in progress")
 
 
 def detect_llama_server_path(explicit: Path | None = None) -> Path | None:
@@ -762,12 +781,14 @@ def _load_llama_server_process_identity_posix(pid: int) -> LlamaServerProcessIde
         started_at = _read_linux_process_started_at(pid)
     else:
         try:
-            completed = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "lstart=", "-o", "comm="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with sanitized_external_subprocess_runtime() as sanitized_env:
+                completed = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "lstart=", "-o", "comm="],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=sanitized_env,
+                )
         except OSError:
             completed = None
         if completed is not None and completed.returncode == 0:
@@ -889,23 +910,89 @@ def _cleanup_llama_server_manager_state_process(
     return terminated
 
 
-def cleanup_managed_llama_server_for_current_process() -> bool:
-    paths = llama_server_manager_paths()
-    owner = _load_llama_server_manager_lock_owner(paths)
-    if owner is None or owner.pid != os.getpid():
-        return False
+def _cleanup_current_process_manager_lock(
+    lock: LlamaServerManagerLock,
+    *,
+    managed_pid: int | None = None,
+) -> bool:
     terminated = _cleanup_llama_server_manager_state_process(
-        expected_instance_id=owner.instance_id,
+        expected_instance_id=lock.owner.instance_id,
     )
-    _clear_llama_server_manager_state(instance_id=owner.instance_id)
-    _release_llama_server_manager_lock(
-        LlamaServerManagerLock(paths=paths, owner=owner),
-    )
+    if not terminated and managed_pid is not None:
+        terminated = _terminate_llama_server_pid(managed_pid)
+    _clear_llama_server_manager_state(instance_id=lock.owner.instance_id)
+    _release_llama_server_manager_lock(lock)
     return terminated
 
 
-def _cleanup_stale_llama_server_manager_state() -> None:
-    _clear_llama_server_manager_state()
+def cleanup_managed_llama_server_for_current_process() -> bool:
+    paths = llama_server_manager_paths()
+    cleaned = False
+    processed_instance_ids: set[str] = set()
+    owner = _load_llama_server_manager_lock_owner(paths)
+    if owner is not None and owner.pid == os.getpid():
+        cleaned = _cleanup_current_process_manager_lock(
+            LlamaServerManagerLock(paths=paths, owner=owner),
+        ) or cleaned
+        processed_instance_ids.add(owner.instance_id)
+
+    for managed_pid, manager_lock in list(_ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.items()):
+        if manager_lock.owner.pid != os.getpid():
+            continue
+        if manager_lock.owner.instance_id in processed_instance_ids:
+            _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(managed_pid, None)
+            continue
+        cleaned = _cleanup_current_process_manager_lock(
+            manager_lock,
+            managed_pid=managed_pid,
+        ) or cleaned
+        processed_instance_ids.add(manager_lock.owner.instance_id)
+        _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(managed_pid, None)
+
+    return cleaned
+
+
+def _cleanup_stale_llama_server_manager_state(
+    paths: LlamaServerManagerPaths | None = None,
+) -> bool:
+    normalized_paths = paths or llama_server_manager_paths()
+    cleaned = _cleanup_stale_llama_server_manager_lock(normalized_paths)
+    state = _load_llama_server_manager_state()
+    if state is None:
+        return cleaned
+
+    lock_exists = normalized_paths.lock_dir.exists()
+    owner = _load_llama_server_manager_lock_owner(normalized_paths) if lock_exists else None
+    owner_is_alive = owner is not None and _is_pid_alive(owner.pid)
+    if owner_is_alive and owner.instance_id == state.instance_id:
+        return cleaned
+
+    if not _is_pid_alive(state.pid):
+        _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(state.pid, None)
+        _clear_llama_server_manager_state(pid=state.pid, instance_id=state.instance_id)
+        return True
+
+    identity = _load_llama_server_process_identity(state.pid)
+    if not _state_matches_llama_server_process_identity(state, identity):
+        _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(state.pid, None)
+        _clear_llama_server_manager_state(pid=state.pid, instance_id=state.instance_id)
+        return True
+
+    if lock_exists and owner is None:
+        return cleaned
+    if state.pid == os.getpid():
+        return cleaned
+
+    terminated = _terminate_llama_server_pid(state.pid)
+    if terminated:
+        _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(state.pid, None)
+        _clear_llama_server_manager_state(pid=state.pid, instance_id=state.instance_id)
+        return True
+    return cleaned
+
+
+def cleanup_stale_managed_llama_server_processes() -> bool:
+    return _cleanup_stale_llama_server_manager_state(llama_server_manager_paths())
 
 
 def resolve_llama_server_role_assets(
@@ -1035,11 +1122,13 @@ def wait_until_ready(
     timeout_sec: float,
     *,
     process: subprocess.Popen[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_sec
     url = f"http://{host}:{port}/health"
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        _raise_if_runtime_cancelled(cancel_event, stage="runtime startup")
         if process is not None and process.poll() is not None:
             raise RuntimeError(
                 f"llama-server exited before becoming ready (exit={process.returncode})"
@@ -1092,6 +1181,7 @@ def _start_llama_server_with_timeout_budget(
     spec: LlamaServerLaunchSpec,
     timeout_budget: _TimeoutBudget,
 ) -> subprocess.Popen[str]:
+    _raise_if_llama_server_shutdown_requested()
     if _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS:
         raise RuntimeError(
             "llama-server manager already has an active runtime in this process; "
@@ -1101,6 +1191,7 @@ def _start_llama_server_with_timeout_budget(
     manager_lock = _acquire_llama_server_manager_lock(timeout_budget=timeout_budget)
     command = build_llama_server_command(spec)
     try:
+        _raise_if_llama_server_shutdown_requested()
         _cleanup_stale_llama_server_manager_state()
         occupied_ports = [port for port in _reserved_llama_server_ports(spec.port) if is_port_in_use(spec.host, port)]
         if occupied_ports:
@@ -1112,16 +1203,20 @@ def _start_llama_server_with_timeout_budget(
             "text": True,
         }
         if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            popen_kwargs.update(hidden_windows_subprocess_kwargs(new_process_group=True))
         else:
             popen_kwargs["start_new_session"] = True
-        process = subprocess.Popen(command, **popen_kwargs)
+        with sanitized_external_subprocess_runtime() as sanitized_env:
+            if sanitized_env is not None:
+                popen_kwargs["env"] = sanitized_env
+            process = subprocess.Popen(command, **popen_kwargs)
         _write_llama_server_manager_state(
             spec,
             pid=process.pid,
             instance_id=manager_lock.owner.instance_id,
         )
         _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS[process.pid] = manager_lock
+        _raise_if_llama_server_shutdown_requested()
         ready_timeout_sec = timeout_budget.remaining_sec()
         if ready_timeout_sec <= 0:
             raise TimeoutError(
@@ -1171,13 +1266,18 @@ def stop_llama_server(process: subprocess.Popen[str]) -> None:
         _release_llama_server_manager_lock(manager_lock)
 
 
-def request_llama_server_smoke(spec: LlamaServerLaunchSpec) -> str:
+def request_llama_server_smoke(
+    spec: LlamaServerLaunchSpec,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> str:
     image = Image.new("RGB", (1, 1), "white")
     return request_llama_server_ocr(
         spec,
         image,
         max_new_tokens=DEFAULT_LLAMA_SERVER_SMOKE_MAX_TOKENS,
         prompt_text=spec.prompt_text,
+        cancel_event=cancel_event,
     )
 
 
@@ -1187,12 +1287,14 @@ def request_llama_server_ocr(
     *,
     max_new_tokens: int,
     prompt_text: str = "OCR:",
+    cancel_event: threading.Event | None = None,
 ) -> str:
     return request_llama_server_ocr_response(
         spec,
         image,
         max_new_tokens=max_new_tokens,
         prompt_text=prompt_text,
+        cancel_event=cancel_event,
     ).text
 
 
@@ -1202,7 +1304,9 @@ def request_llama_server_ocr_response(
     *,
     max_new_tokens: int,
     prompt_text: str = "OCR:",
+    cancel_event: threading.Event | None = None,
 ) -> LlamaServerOCRResponse:
+    _raise_if_runtime_cancelled(cancel_event, stage="runtime OCR request")
     url = f"http://{spec.connect_host}:{spec.port}/v1/chat/completions"
     body: dict[str, Any] = {
         "model": "gpt-3.5-turbo",
@@ -1229,6 +1333,7 @@ def request_llama_server_ocr_response(
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=60) as response:
+        _raise_if_runtime_cancelled(cancel_event, stage="runtime OCR request")
         parsed = json.loads(response.read().decode("utf-8"))
     return LlamaServerOCRResponse(
         text=str(parsed["choices"][0]["message"]["content"]).strip(),
@@ -1241,6 +1346,7 @@ def run_llama_server_launch_spec_doctor(
     spec: LlamaServerLaunchSpec,
     *,
     startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
+    cancel_event: threading.Event | None = None,
 ) -> LlamaServerDoctorReport:
     issues: list[LlamaServerDoctorIssue] = []
     timeout_budget = _TimeoutBudget.start(startup_timeout_sec)
@@ -1259,6 +1365,7 @@ def run_llama_server_launch_spec_doctor(
             )
 
     try:
+        _raise_if_runtime_cancelled(cancel_event, stage="doctor preflight")
         manager_lock = _acquire_llama_server_manager_lock(timeout_budget=timeout_budget)
     except LlamaServerManagerLockTimeoutError as exc:
         issues.append(
@@ -1274,6 +1381,7 @@ def run_llama_server_launch_spec_doctor(
             issues=tuple(issues),
         )
     try:
+        _raise_if_runtime_cancelled(cancel_event, stage="doctor stale cleanup")
         _cleanup_stale_llama_server_manager_state()
         try:
             port_in_use = is_port_in_use(spec.host, spec.port)
@@ -1305,6 +1413,7 @@ def run_llama_server_launch_spec_doctor(
         )
 
     try:
+        _raise_if_runtime_cancelled(cancel_event, stage="doctor startup")
         process = start_llama_server(spec, startup_timeout_sec=startup_timeout_sec)
     except LlamaServerManagerLockTimeoutError as exc:
         issues.append(
@@ -1333,7 +1442,8 @@ def run_llama_server_launch_spec_doctor(
             issues=tuple(issues),
         )
     try:
-        smoke_response = request_llama_server_smoke(spec)
+        _raise_if_runtime_cancelled(cancel_event, stage="doctor smoke")
+        smoke_response = request_llama_server_smoke(spec, cancel_event=cancel_event)
     except Exception as exc:
         issues.append(
             LlamaServerDoctorIssue(
@@ -1368,6 +1478,7 @@ def run_llama_server_doctor(
     host: str = DEFAULT_LLAMA_SERVER_HOST,
     overrides: LlamaServerOverrides | None = None,
     startup_timeout_sec: float = DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
+    cancel_event: threading.Event | None = None,
 ) -> LlamaServerDoctorReport:
     normalized_role = normalize_llama_server_role(role)
     normalized_overrides = overrides or LlamaServerOverrides()
@@ -1415,6 +1526,7 @@ def run_llama_server_doctor(
     return run_llama_server_launch_spec_doctor(
         launch_spec,
         startup_timeout_sec=startup_timeout_sec,
+        cancel_event=cancel_event,
     )
 
 
@@ -1428,6 +1540,15 @@ def normalize_llama_server_profile(profile: str | LlamaServerProfile) -> LlamaSe
     if isinstance(profile, LlamaServerProfile):
         return profile
     return LlamaServerProfile(profile)
+
+
+def _raise_if_runtime_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    stage: str,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError(f"llama-server runtime operation cancelled during {stage}")
 
 
 def image_to_data_url(image: Image.Image) -> str:
