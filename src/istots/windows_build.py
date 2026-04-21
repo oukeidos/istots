@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import shutil
+import tomllib
 
 WINDOWS_GUI_APP_NAME = "istots"
+WINDOWS_INSTALLER_APP_NAME = "IStoTS"
+WINDOWS_INSTALLER_APP_PUBLISHER = "oukeidos"
+WINDOWS_INSTALLER_APP_GUID = "07ac00d9-1e18-4ee9-8af6-01c007408576"
+WINDOWS_INSTALLER_APP_ID = "{{" + WINDOWS_INSTALLER_APP_GUID + "}"
 WINDOWS_GUI_DIST_DIRNAME = "windows-gui"
 WINDOWS_GUI_WORK_RELATIVE_PATH = Path("build") / "pyinstaller" / WINDOWS_GUI_DIST_DIRNAME
 WINDOWS_GUI_DIST_RELATIVE_PATH = Path("dist") / WINDOWS_GUI_DIST_DIRNAME
 WINDOWS_GUI_SPEC_RELATIVE_PATH = Path("packaging") / "pyinstaller" / "istots_gui.spec"
+WINDOWS_INNO_RELATIVE_PATH = Path("packaging") / "inno"
+WINDOWS_INNO_SCRIPT_RELATIVE_PATH = WINDOWS_INNO_RELATIVE_PATH / "istots_gui.iss"
+WINDOWS_INNO_OUTPUT_RELATIVE_PATH = WINDOWS_INNO_RELATIVE_PATH / "Output"
 WINDOWS_APP_ICON_RELATIVE_PATH = (
     Path("src") / "istots" / "resources" / "icons" / "windows" / "istots.ico"
 )
@@ -37,6 +46,15 @@ class WindowsGuiBuildLayout:
     bundle_app_icon_path: Path
     app_icon_source_path: Path
     installer_icon_source_path: Path
+
+
+@dataclass(frozen=True)
+class WindowsInstallerBuildLayout:
+    project_root: Path
+    gui_bundle_layout: WindowsGuiBuildLayout
+    script_path: Path
+    output_dir: Path
+    output_base_filename: str
 
 
 def packaged_document_paths(project_root: Path) -> tuple[Path, ...]:
@@ -72,6 +90,28 @@ def windows_gui_build_layout(project_root: Path) -> WindowsGuiBuildLayout:
     )
 
 
+def project_version(project_root: Path) -> str:
+    pyproject_path = project_root.expanduser().resolve() / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    return str(data["project"]["version"])
+
+
+def windows_installer_output_base_filename(*, version: str) -> str:
+    return f"{WINDOWS_INSTALLER_APP_NAME}-{version}-windows-x64-setup"
+
+
+def windows_installer_build_layout(project_root: Path) -> WindowsInstallerBuildLayout:
+    root = project_root.expanduser().resolve()
+    version = project_version(root)
+    return WindowsInstallerBuildLayout(
+        project_root=root,
+        gui_bundle_layout=windows_gui_build_layout(root),
+        script_path=(root / WINDOWS_INNO_SCRIPT_RELATIVE_PATH).resolve(),
+        output_dir=(root / WINDOWS_INNO_OUTPUT_RELATIVE_PATH).resolve(),
+        output_base_filename=windows_installer_output_base_filename(version=version),
+    )
+
+
 def build_windows_gui_command(
     layout: WindowsGuiBuildLayout,
     *,
@@ -89,6 +129,64 @@ def build_windows_gui_command(
         str(layout.work_root),
         str(layout.spec_path),
     )
+
+
+def build_windows_installer_command(
+    layout: WindowsInstallerBuildLayout,
+    *,
+    compiler_path: Path,
+) -> tuple[str, ...]:
+    return (
+        str(compiler_path.expanduser().resolve()),
+        f"/DMyAppVersion={project_version(layout.project_root)}",
+        f"/DMyBundleRoot={layout.gui_bundle_layout.bundle_root}",
+        f"/DMyOutputDir={layout.output_dir}",
+        f"/DMyOutputBaseFilename={layout.output_base_filename}",
+        str(layout.script_path),
+    )
+
+
+def expected_windows_installer_output_path(layout: WindowsInstallerBuildLayout) -> Path:
+    return (layout.output_dir / f"{layout.output_base_filename}.exe").resolve()
+
+
+def verify_windows_installer_inputs(layout: WindowsInstallerBuildLayout) -> None:
+    verify_windows_gui_bundle(layout.gui_bundle_layout)
+    if not layout.script_path.exists():
+        raise RuntimeError(f"Windows installer script is missing: {layout.script_path}")
+
+
+def inno_setup_compiler_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    configured_path = os.environ.get("ISCC_EXE")
+    if configured_path:
+        candidates.append(Path(configured_path).expanduser())
+
+    for env_name in ("ProgramFiles(x86)", "ProgramFiles"):
+        base = os.environ.get(env_name)
+        if not base:
+            continue
+        candidates.append(Path(base) / "Inno Setup 6" / "ISCC.exe")
+
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            continue
+        deduped.append(resolved)
+        seen.add(resolved)
+    return tuple(deduped)
+
+
+def detect_inno_setup_compiler() -> Path | None:
+    for candidate in inno_setup_compiler_candidates():
+        if candidate.exists():
+            return candidate
+    which_path = shutil.which("ISCC.exe")
+    if which_path:
+        return Path(which_path).expanduser().resolve()
+    return None
 
 
 def required_bundle_paths(layout: WindowsGuiBuildLayout) -> tuple[Path, ...]:

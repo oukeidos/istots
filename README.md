@@ -50,6 +50,12 @@ CLI is intentionally excluded. The canonical local bundle is a `PyInstaller`
 `onedir` build, and the Windows installer should wrap that same bundle with
 Inno Setup instead of introducing a different install layout.
 
+The current Windows installer identity is fixed to:
+
+- `AppId={{07ac00d9-1e18-4ee9-8af6-01c007408576}`
+- `AppName=IStoTS`
+- `AppPublisher=oukeidos`
+
 To build the local Windows GUI bundle from the project environment:
 
 ```bash
@@ -74,6 +80,38 @@ Managed runtime and model assets remain outside the install directory under
 split, and installer work should preserve it across install, upgrade, and
 uninstall flows.
 
+To compile the current Inno Setup installer from the validated GUI bundle, make
+sure Inno Setup 6 is installed and `ISCC.exe` is available either through the
+default install path or the `ISCC_EXE` environment variable, then run:
+
+```bash
+uv run python scripts/build_windows_installer.py
+```
+
+The current installer script lives at `packaging/inno/istots_gui.iss` and
+installs only the packaged GUI bundle contents. It intentionally does not
+bundle managed runtime or model assets into `{app}`. The current local build
+output path is:
+
+- `packaging/inno/Output/IStoTS-<version>-windows-x64-setup.exe`
+
+The current uninstall policy is:
+
+- normal app upgrades keep `%LOCALAPPDATA%\istots\managed\` untouched
+- manual uninstall asks whether managed runtime and model assets should also be
+  removed
+- silent uninstall skips managed asset deletion so unattended removal paths do
+  not erase them unexpectedly
+
+Desktop shortcuts remain optional, but the installer selects them by default
+on first install and reuses the user's previous task choice on later installs.
+
+The installer also does not bundle or preinstall the Microsoft Visual C++
+Redistributable. For the packaged app, that prerequisite remains part of the
+runtime setup flow instead of the installer payload. This keeps the installer
+lighter and avoids adding a separately managed Microsoft redistributable binary
+to the application release artifact.
+
 Then prepare the default local runtime assets:
 
 ```bash
@@ -86,6 +124,12 @@ PaddleOCR-VL GGUF model, the base mmproj, and the derived `min_pixels=32768`
 mmproj used by the fast OCR branch. For the built-in bundles that `setup`
 provisions, `istots setup` pins explicit upstream revisions and verifies the
 downloaded artifacts against repository-maintained SHA-256 hashes.
+
+On Windows packaged installs, this same setup flow is also responsible for
+checking the Microsoft Visual C++ Redistributable required by the official
+Windows `llama.cpp` builds, downloading it when needed, and guiding the user
+through the repair path if the prerequisite is missing or later drifts out of
+policy.
 
 If you want to run actual OCR inference through `--engine hf`, install the HF
 runtime dependencies as well:

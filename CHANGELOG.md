@@ -2,6 +2,7 @@
 
 ## [0.4.3] - 2026-04-21
 - Added a reproducible Windows `x64` GUI packaging path built around a `PyInstaller` `onedir` bundle, the required attached documents, and supporting local build tooling.
+- Added an Inno Setup Windows installer path with fixed app identity, managed-asset-aware uninstall behavior, and documented app-managed prerequisite handling for packaged installs.
 - Hardened packaged GUI runtime behavior so setup, runtime checks, OCR work, and managed `llama-server` shutdown and recovery behave more reliably in frozen builds, with focused regression coverage for cancellation and cleanup.
 - Polished the packaged GUI by exposing the app version, keeping setup progress visibly active during quiet download and validation phases, and confirming cancelled OCR preparation cleans up temporary image spill files.
 

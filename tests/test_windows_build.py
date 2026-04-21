@@ -7,10 +7,22 @@ import pytest
 from istots.windows_build import (
     PACKAGED_DOCUMENT_NAMES,
     build_windows_gui_command,
+    build_windows_installer_command,
+    detect_inno_setup_compiler,
+    expected_windows_installer_output_path,
+    inno_setup_compiler_candidates,
     packaged_document_paths,
+    project_version,
     stage_windows_gui_bundle_assets,
     verify_windows_gui_bundle,
+    verify_windows_installer_inputs,
     windows_gui_build_layout,
+    windows_installer_build_layout,
+    windows_installer_output_base_filename,
+    WINDOWS_INSTALLER_APP_GUID,
+    WINDOWS_INSTALLER_APP_ID,
+    WINDOWS_INSTALLER_APP_NAME,
+    WINDOWS_INSTALLER_APP_PUBLISHER,
 )
 
 
@@ -46,6 +58,46 @@ def test_windows_gui_build_layout_uses_expected_paths() -> None:
     assert layout.installer_icon_source_path.exists()
 
 
+def test_windows_installer_metadata_is_fixed() -> None:
+    assert WINDOWS_INSTALLER_APP_NAME == "IStoTS"
+    assert WINDOWS_INSTALLER_APP_PUBLISHER == "oukeidos"
+    assert WINDOWS_INSTALLER_APP_GUID == "07ac00d9-1e18-4ee9-8af6-01c007408576"
+    assert WINDOWS_INSTALLER_APP_ID == "{{07ac00d9-1e18-4ee9-8af6-01c007408576}"
+
+
+def test_project_version_reads_the_pyproject_version() -> None:
+    assert project_version(_project_root()) == "0.4.3"
+
+
+def test_windows_installer_build_layout_uses_expected_paths() -> None:
+    project_root = _project_root()
+
+    layout = windows_installer_build_layout(project_root)
+
+    assert layout.gui_bundle_layout == windows_gui_build_layout(project_root)
+    assert layout.script_path == project_root / "packaging" / "inno" / "istots_gui.iss"
+    assert layout.output_dir == project_root / "packaging" / "inno" / "Output"
+    assert layout.output_base_filename == "IStoTS-0.4.3-windows-x64-setup"
+
+
+def test_inno_setup_script_preserves_desktop_shortcut_choice_and_defaults_checked() -> None:
+    script_text = windows_installer_build_layout(_project_root()).script_path.read_text(encoding="utf-8")
+
+    assert "UsePreviousTasks=yes" in script_text
+    assert 'Name: "desktopicon"; Description: "Create a desktop shortcut"' in script_text
+    assert "Flags: unchecked" not in script_text.split("[Tasks]", 1)[1].split("[Files]", 1)[0]
+
+
+def test_inno_setup_script_only_removes_managed_assets_on_manual_uninstall() -> None:
+    script_text = windows_installer_build_layout(_project_root()).script_path.read_text(encoding="utf-8")
+
+    assert "if UninstallSilent() then" in script_text
+    assert "ShouldRemoveManagedAssets := False;" in script_text
+    assert "Choose No to keep them for a later reinstall or upgrade." in script_text
+    assert "DelTree(ManagedAssetsDir(), True, True, True)" in script_text
+    assert "ExpandConstant('{localappdata}\\istots\\managed')" in script_text
+
+
 def test_build_windows_gui_command_uses_pyinstaller_module() -> None:
     layout = windows_gui_build_layout(_project_root())
 
@@ -55,6 +107,27 @@ def test_build_windows_gui_command_uses_pyinstaller_module() -> None:
     assert "--distpath" in command
     assert "--workpath" in command
     assert str(layout.spec_path) == command[-1]
+
+
+def test_build_windows_installer_command_uses_iscc_defines() -> None:
+    layout = windows_installer_build_layout(_project_root())
+
+    command = build_windows_installer_command(layout, compiler_path=Path("C:/Inno Setup 6/ISCC.exe"))
+
+    assert command[0] == "C:\\Inno Setup 6\\ISCC.exe"
+    assert f"/DMyAppVersion={project_version(_project_root())}" in command
+    assert f"/DMyBundleRoot={layout.gui_bundle_layout.bundle_root}" in command
+    assert f"/DMyOutputDir={layout.output_dir}" in command
+    assert f"/DMyOutputBaseFilename={layout.output_base_filename}" in command
+    assert command[-1] == str(layout.script_path)
+
+
+def test_expected_windows_installer_output_path_uses_fixed_filename() -> None:
+    layout = windows_installer_build_layout(_project_root())
+
+    assert expected_windows_installer_output_path(layout) == (
+        _project_root() / "packaging" / "inno" / "Output" / "IStoTS-0.4.3-windows-x64-setup.exe"
+    )
 
 
 def test_verify_windows_gui_bundle_requires_executable_icon_and_documents(tmp_path: Path) -> None:
@@ -78,6 +151,23 @@ def test_verify_windows_gui_bundle_reports_missing_files(tmp_path: Path) -> None
         verify_windows_gui_bundle(layout)
 
 
+def test_verify_windows_installer_inputs_requires_bundle_and_script(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "pyproject.toml").write_text('[project]\nversion = "0.4.3"\n', encoding="utf-8")
+    layout = windows_installer_build_layout(project_root)
+
+    layout.gui_bundle_layout.bundle_root.mkdir(parents=True, exist_ok=True)
+    layout.gui_bundle_layout.docs_dir.mkdir(parents=True, exist_ok=True)
+    layout.gui_bundle_layout.executable_path.write_text("", encoding="utf-8")
+    layout.gui_bundle_layout.bundle_app_icon_path.write_text("", encoding="utf-8")
+    for name in PACKAGED_DOCUMENT_NAMES:
+        (layout.gui_bundle_layout.docs_dir / name).write_text(name, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Windows installer script is missing"):
+        verify_windows_installer_inputs(layout)
+
+
 def test_stage_windows_gui_bundle_assets_copies_documents_and_icon(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     layout = windows_gui_build_layout(project_root)
@@ -95,3 +185,30 @@ def test_stage_windows_gui_bundle_assets_copies_documents_and_icon(tmp_path: Pat
     assert layout.bundle_app_icon_path.read_text(encoding="utf-8") == "icon"
     for name in PACKAGED_DOCUMENT_NAMES:
         assert (layout.docs_dir / name).read_text(encoding="utf-8") == name
+
+
+def test_windows_installer_output_base_filename_uses_fixed_contract() -> None:
+    assert windows_installer_output_base_filename(version="1.2.3") == "IStoTS-1.2.3-windows-x64-setup"
+
+
+def test_inno_setup_compiler_candidates_respect_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ISCC_EXE", r"C:\Custom Tools\ISCC.exe")
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    candidates = inno_setup_compiler_candidates()
+
+    assert candidates[0] == Path(r"C:\Custom Tools\ISCC.exe")
+    assert Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe") in candidates
+    assert Path(r"C:\Program Files\Inno Setup 6\ISCC.exe") in candidates
+
+
+def test_detect_inno_setup_compiler_returns_none_when_no_candidate_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ISCC_EXE", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.setattr("istots.windows_build.shutil.which", lambda _binary: None)
+
+    assert detect_inno_setup_compiler() is None
