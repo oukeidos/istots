@@ -4,7 +4,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
+import sys
 import tomllib
+from typing import Iterable
 
 WINDOWS_GUI_APP_NAME = "istots"
 WINDOWS_INSTALLER_APP_NAME = "IStoTS"
@@ -33,6 +35,7 @@ PACKAGED_DOCUMENT_NAMES = (
     "README.md",
     "THIRD_PARTY_NOTICES.md",
 )
+WINDOWS_PYTHON_OPENSSL_DLL_NAMES = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
 
 
 @dataclass(frozen=True)
@@ -260,3 +263,51 @@ def build_windows_portable_archive(layout: WindowsPortableBuildLayout) -> Path:
         base_dir=layout.gui_bundle_layout.bundle_root.name,
     )
     return Path(created_archive).resolve()
+
+
+def python_runtime_dll_dir(*, base_prefix: Path | None = None) -> Path:
+    runtime_root = Path(sys.base_prefix if base_prefix is None else base_prefix).expanduser().resolve()
+    return (runtime_root / "DLLs").resolve()
+
+
+def python_runtime_openssl_paths(*, base_prefix: Path | None = None) -> tuple[Path, ...]:
+    dll_dir = python_runtime_dll_dir(base_prefix=base_prefix)
+    paths = tuple((dll_dir / name).resolve() for name in WINDOWS_PYTHON_OPENSSL_DLL_NAMES)
+    missing = tuple(path for path in paths if not path.exists())
+    if not missing:
+        return paths
+    missing_lines = "\n".join(f"- {path}" for path in missing)
+    raise RuntimeError(
+        "Python runtime OpenSSL DLL discovery failed. The following files are missing:\n"
+        f"{missing_lines}"
+    )
+
+
+def python_runtime_openssl_binary_specs(*, base_prefix: Path | None = None) -> list[tuple[str, str]]:
+    return [(str(path), ".") for path in python_runtime_openssl_paths(base_prefix=base_prefix)]
+
+
+def pyinstaller_binary_toc_entries(
+    binary_specs: Iterable[tuple[str, str]],
+) -> list[tuple[str, str, str]]:
+    toc_entries: list[tuple[str, str, str]] = []
+    for source_path_text, target_dir in binary_specs:
+        source_path = Path(source_path_text).expanduser().resolve()
+        normalized_target = "." if target_dir in ("", ".") else target_dir.replace("\\", "/").strip("/")
+        dest_name = source_path.name if normalized_target == "." else f"{normalized_target}/{source_path.name}"
+        toc_entries.append((dest_name, str(source_path), "BINARY"))
+    return toc_entries
+
+
+def filter_pyinstaller_binaries_by_name(
+    binaries: Iterable[tuple[str, str, str]],
+    *,
+    excluded_names: Iterable[str],
+) -> list[tuple[str, str, str]]:
+    excluded = {name.casefold() for name in excluded_names}
+    filtered: list[tuple[str, str, str]] = []
+    for entry in binaries:
+        if Path(str(entry[0])).name.casefold() in excluded:
+            continue
+        filtered.append(entry)
+    return filtered
