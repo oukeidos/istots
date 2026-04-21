@@ -3,6 +3,7 @@
 from pathlib import Path
 import sys
 
+from PyInstaller.building.datastruct import TOC
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parents[1]
@@ -11,9 +12,16 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from istots.windows_build import windows_gui_build_layout
+from istots.windows_build import (
+    WINDOWS_PYTHON_OPENSSL_DLL_NAMES,
+    filter_pyinstaller_binaries_by_name,
+    pyinstaller_binary_toc_entries,
+    python_runtime_openssl_binary_specs,
+    windows_gui_build_layout,
+)
 
 layout = windows_gui_build_layout(PROJECT_ROOT)
+openssl_binary_specs = python_runtime_openssl_binary_specs()
 
 datas = collect_data_files("istots.resources") + copy_metadata("istots")
 
@@ -31,6 +39,13 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=0,
+)
+a.binaries = TOC(
+    filter_pyinstaller_binaries_by_name(
+        a.binaries,
+        excluded_names=WINDOWS_PYTHON_OPENSSL_DLL_NAMES,
+    )
+    + pyinstaller_binary_toc_entries(openssl_binary_specs)
 )
 pyz = PYZ(a.pure)
 

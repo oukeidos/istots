@@ -17,6 +17,7 @@ from typing import Callable
 
 from istots.frozen_subprocess import sanitized_external_subprocess_runtime
 from istots.llama_mmproj import default_materialized_mmproj_path
+from istots.runtime_diagnostics import append_runtime_diagnostic_event
 from istots.runtime_prerequisites import (
     ensure_managed_runtime_prerequisites,
     format_missing_managed_runtime_prerequisites,
@@ -333,123 +334,177 @@ def install_managed_llama_cpp_runtime(
     if os.name != "nt":
         raise RuntimeError("Managed llama.cpp bootstrap is currently supported only on Windows GUI.")
 
+    append_runtime_diagnostic_event(
+        "managed_runtime_install_start",
+        requested_variant=requested_variant,
+        force=force,
+        install_prerequisites=install_prerequisites,
+    )
     paths = gui_managed_paths()
     paths.runtime_dir.mkdir(parents=True, exist_ok=True)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
-    _raise_if_bootstrap_cancelled(cancel_event, stage="prerequisite check")
-    ensure_managed_runtime_prerequisites(
-        install=install_prerequisites,
-        download_root=paths.state_dir / "downloads",
-        cancel_event=cancel_event,
-        progress_callback=progress_callback,
-    )
-    existing_state = load_managed_runtime_state()
-    _report_progress(progress_callback, "runtime_resolve", "Resolve Runtime", "Querying latest llama.cpp release", 0.05)
-    _raise_if_bootstrap_cancelled(cancel_event, stage="release resolution")
-    catalog = fetch_latest_llama_cpp_release(fetch_bytes=fetch_bytes)
-    variant_id = resolve_runtime_variant(catalog, requested_variant=requested_variant)
-    assets = select_release_assets(catalog, variant_id)
-    variant_dir = _variant_install_dir(paths.runtime_dir, catalog.tag_name, variant_id)
+    try:
+        _raise_if_bootstrap_cancelled(cancel_event, stage="prerequisite check")
+        ensure_managed_runtime_prerequisites(
+            install=install_prerequisites,
+            download_root=paths.state_dir / "downloads",
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
+        existing_state = load_managed_runtime_state()
+        _report_progress(progress_callback, "runtime_resolve", "Resolve Runtime", "Querying latest llama.cpp release", 0.05)
+        _raise_if_bootstrap_cancelled(cancel_event, stage="release resolution")
+        catalog = fetch_latest_llama_cpp_release(fetch_bytes=fetch_bytes)
+        variant_id = resolve_runtime_variant(catalog, requested_variant=requested_variant)
+        assets = select_release_assets(catalog, variant_id)
+        variant_dir = _variant_install_dir(paths.runtime_dir, catalog.tag_name, variant_id)
+        append_runtime_diagnostic_event(
+            "managed_runtime_release_resolved",
+            release_tag=catalog.tag_name,
+            variant_id=variant_id,
+            assets=[asset.name for asset in assets],
+            variant_dir=variant_dir,
+        )
 
-    if (
-        not force
-        and existing_state is not None
-        and existing_state.binary_path.exists()
-        and existing_state.install_dir.exists()
-        and existing_state.release_tag == catalog.tag_name
-        and existing_state.variant_id == variant_id
-    ):
-        try:
-            validate_llama_server_binary(existing_state.binary_path, cancel_event=cancel_event)
-        except RuntimeError:
-            _report_progress(
-                progress_callback,
-                "runtime_validate",
-                "Validate Runtime",
-                "Existing managed runtime failed validation; reinstalling",
-                0.12,
-            )
-        else:
-            return existing_state
-
-    if not force:
-        existing_binary = _locate_llama_server_binary(variant_dir)
-        if existing_binary is not None:
+        if (
+            not force
+            and existing_state is not None
+            and existing_state.binary_path.exists()
+            and existing_state.install_dir.exists()
+            and existing_state.release_tag == catalog.tag_name
+            and existing_state.variant_id == variant_id
+        ):
             try:
-                _report_progress(
-                    progress_callback,
-                    "runtime_validate",
-                    "Validate Runtime",
-                    "Checking existing installed runtime; waiting for llama-server to respond",
-                    0.32,
-                )
-                validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
+                validate_llama_server_binary(existing_state.binary_path, cancel_event=cancel_event)
             except RuntimeError:
                 _report_progress(
                     progress_callback,
                     "runtime_validate",
                     "Validate Runtime",
-                    "Installed runtime failed validation; reinstalling",
-                    0.36,
+                    "Existing managed runtime failed validation; reinstalling",
+                    0.12,
                 )
-                if variant_dir.exists():
-                    _safe_rmtree(variant_dir, within=paths.runtime_dir)
             else:
-                state = ManagedLlamaCppRuntimeState(
-                    release_tag=catalog.tag_name,
-                    variant_id=variant_id,
-                    install_dir=variant_dir,
-                    binary_path=existing_binary,
-                    preferred_source=MANAGED_RUNTIME_SOURCE,
-                    installed_at=time.time(),
+                append_runtime_diagnostic_event(
+                    "managed_runtime_reuse_existing_state",
+                    release_tag=existing_state.release_tag,
+                    variant_id=existing_state.variant_id,
+                    binary_path=existing_state.binary_path,
                 )
-                write_managed_runtime_state(state)
-                return state
+                return existing_state
 
-    stage_dir = Path(tempfile.mkdtemp(prefix="llama-cpp-", dir=str(paths.runtime_dir))).resolve()
-    try:
-        archives = _download_release_assets(
-            assets=assets,
-            stage_dir=stage_dir,
-            progress_callback=progress_callback,
-            cancel_event=cancel_event,
-        )
-        if force and variant_dir.exists():
-            _safe_rmtree(variant_dir, within=paths.runtime_dir)
-        variant_dir.mkdir(parents=True, exist_ok=True)
-        _extract_release_archives(
-            archives=archives,
-            install_dir=variant_dir,
-            progress_callback=progress_callback,
-            cancel_event=cancel_event,
-        )
-        binary_path = _locate_llama_server_binary(variant_dir)
-        if binary_path is None:
-            raise RuntimeError(
-                f"downloaded llama.cpp runtime for {catalog.tag_name} {variant_id} did not contain llama-server.exe"
+        if not force:
+            existing_binary = _locate_llama_server_binary(variant_dir)
+            if existing_binary is not None:
+                try:
+                    _report_progress(
+                        progress_callback,
+                        "runtime_validate",
+                        "Validate Runtime",
+                        "Checking existing installed runtime; waiting for llama-server to respond",
+                        0.32,
+                    )
+                    validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
+                except RuntimeError:
+                    _report_progress(
+                        progress_callback,
+                        "runtime_validate",
+                        "Validate Runtime",
+                        "Installed runtime failed validation; reinstalling",
+                        0.36,
+                    )
+                    if variant_dir.exists():
+                        _safe_rmtree(variant_dir, within=paths.runtime_dir)
+                else:
+                    state = ManagedLlamaCppRuntimeState(
+                        release_tag=catalog.tag_name,
+                        variant_id=variant_id,
+                        install_dir=variant_dir,
+                        binary_path=existing_binary,
+                        preferred_source=MANAGED_RUNTIME_SOURCE,
+                        installed_at=time.time(),
+                    )
+                    write_managed_runtime_state(state)
+                    append_runtime_diagnostic_event(
+                        "managed_runtime_reuse_variant_dir",
+                        release_tag=state.release_tag,
+                        variant_id=state.variant_id,
+                        binary_path=state.binary_path,
+                    )
+                    return state
+
+        stage_dir = Path(tempfile.mkdtemp(prefix="llama-cpp-", dir=str(paths.runtime_dir))).resolve()
+        try:
+            archives = _download_release_assets(
+                assets=assets,
+                stage_dir=stage_dir,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
             )
-        _report_progress(
-            progress_callback,
-            "runtime_validate",
-            "Validate Runtime",
-            "Running startup probe; waiting for llama-server to respond",
-            0.96,
+            if force and variant_dir.exists():
+                _safe_rmtree(variant_dir, within=paths.runtime_dir)
+            variant_dir.mkdir(parents=True, exist_ok=True)
+            append_runtime_diagnostic_event(
+                "managed_runtime_extract_start",
+                release_tag=catalog.tag_name,
+                variant_id=variant_id,
+                variant_dir=variant_dir,
+                archives=archives,
+            )
+            _extract_release_archives(
+                archives=archives,
+                install_dir=variant_dir,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+            append_runtime_diagnostic_event(
+                "managed_runtime_extract_complete",
+                release_tag=catalog.tag_name,
+                variant_id=variant_id,
+                variant_dir=variant_dir,
+            )
+            binary_path = _locate_llama_server_binary(variant_dir)
+            if binary_path is None:
+                raise RuntimeError(
+                    f"downloaded llama.cpp runtime for {catalog.tag_name} {variant_id} did not contain llama-server.exe"
+                )
+            _report_progress(
+                progress_callback,
+                "runtime_validate",
+                "Validate Runtime",
+                "Running startup probe; waiting for llama-server to respond",
+                0.96,
+            )
+            validate_llama_server_binary(binary_path, cancel_event=cancel_event)
+            state = ManagedLlamaCppRuntimeState(
+                release_tag=catalog.tag_name,
+                variant_id=variant_id,
+                install_dir=variant_dir,
+                binary_path=binary_path,
+                preferred_source=MANAGED_RUNTIME_SOURCE,
+                installed_at=time.time(),
+            )
+            write_managed_runtime_state(state)
+            _report_progress(progress_callback, "runtime_ready", "Runtime Ready", f"{catalog.tag_name} {variant_id}", 1.0)
+            append_runtime_diagnostic_event(
+                "managed_runtime_install_complete",
+                release_tag=state.release_tag,
+                variant_id=state.variant_id,
+                binary_path=state.binary_path,
+                install_dir=state.install_dir,
+            )
+            return state
+        finally:
+            if stage_dir.exists():
+                _safe_rmtree(stage_dir, within=paths.runtime_dir)
+    except Exception as exc:
+        append_runtime_diagnostic_event(
+            "managed_runtime_install_error",
+            requested_variant=requested_variant,
+            error_type=type(exc).__name__,
+            error=str(exc),
         )
-        validate_llama_server_binary(binary_path, cancel_event=cancel_event)
-        state = ManagedLlamaCppRuntimeState(
-            release_tag=catalog.tag_name,
-            variant_id=variant_id,
-            install_dir=variant_dir,
-            binary_path=binary_path,
-            preferred_source=MANAGED_RUNTIME_SOURCE,
-            installed_at=time.time(),
-        )
-        write_managed_runtime_state(state)
-        _report_progress(progress_callback, "runtime_ready", "Runtime Ready", f"{catalog.tag_name} {variant_id}", 1.0)
-        return state
-    finally:
-        if stage_dir.exists():
-            _safe_rmtree(stage_dir, within=paths.runtime_dir)
+        raise
 
 
 def resolve_gui_runtime_binding(
@@ -544,6 +599,11 @@ def validate_llama_server_binary(
     cancel_event: threading.Event | None = None,
 ) -> None:
     normalized_binary = binary_path.expanduser().resolve()
+    append_runtime_diagnostic_event(
+        "managed_runtime_validation_start",
+        binary_path=normalized_binary,
+        timeout=timeout,
+    )
     missing_prerequisites = missing_managed_runtime_prerequisites()
     if missing_prerequisites:
         raise RuntimeError(format_missing_managed_runtime_prerequisites(missing_prerequisites))
@@ -553,6 +613,11 @@ def validate_llama_server_binary(
     )
     failures: list[str] = []
     for probe_args in probes:
+        append_runtime_diagnostic_event(
+            "managed_runtime_validation_probe_start",
+            binary_path=normalized_binary,
+            probe_args=probe_args,
+        )
         with sanitized_external_subprocess_runtime() as sanitized_env:
             process = subprocess.Popen(
                 [str(normalized_binary), *probe_args],
@@ -568,6 +633,12 @@ def validate_llama_server_binary(
                 cancel_event=cancel_event,
             )
         if completed.returncode == 0:
+            append_runtime_diagnostic_event(
+                "managed_runtime_validation_probe_complete",
+                binary_path=normalized_binary,
+                probe_args=probe_args,
+                returncode=completed.returncode,
+            )
             return
         failures.append(
             _format_binary_probe_failure(
@@ -577,6 +648,19 @@ def validate_llama_server_binary(
                 stderr=completed.stderr,
             )
         )
+        append_runtime_diagnostic_event(
+            "managed_runtime_validation_probe_failed",
+            binary_path=normalized_binary,
+            probe_args=probe_args,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    append_runtime_diagnostic_event(
+        "managed_runtime_validation_failed",
+        binary_path=normalized_binary,
+        failures=failures,
+    )
     raise RuntimeError(
         "managed llama.cpp runtime failed startup validation.\n"
         f"Binary: {normalized_binary}\n"
@@ -609,34 +693,60 @@ def _download_release_assets(
     for asset in assets:
         _raise_if_bootstrap_cancelled(cancel_event, stage="runtime download")
         target_path = (stage_dir / asset.name).resolve()
+        append_runtime_diagnostic_event(
+            "managed_runtime_asset_download_start",
+            asset_name=asset.name,
+            target_path=target_path,
+            expected_bytes=asset.size_bytes,
+        )
         request = urllib.request.Request(
             asset.download_url,
             headers={"User-Agent": "istots-gui-bootstrap"},
         )
-        with urllib.request.urlopen(request, timeout=300) as response:
-            reported_total = int(response.headers.get("Content-Length") or asset.size_bytes or 0)
-            downloaded_bytes = 0
-            with target_path.open("wb") as handle:
-                while True:
-                    _raise_if_bootstrap_cancelled(cancel_event, stage="runtime download")
-                    chunk = response.read(1024 * 128)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    downloaded_bytes += len(chunk)
-                    if total_bytes > 0:
-                        ratio = min(1.0, (completed_bytes + downloaded_bytes) / total_bytes)
-                        fraction = 0.10 + (ratio * 0.55)
-                    elif reported_total > 0:
-                        fraction = 0.10 + (min(downloaded_bytes / reported_total, 1.0) * 0.55)
-                    else:
-                        fraction = None
-                    detail = asset.name
-                    if reported_total > 0:
-                        detail = f"{asset.name} {_format_megabytes(downloaded_bytes)}/{_format_megabytes(reported_total)}"
-                    _report_progress(progress_callback, "runtime_download", "Download Runtime", detail, fraction)
-        completed_bytes += downloaded_bytes
-        archives.append(target_path)
+        downloaded_bytes = 0
+        reported_total = 0
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                reported_total = int(response.headers.get("Content-Length") or asset.size_bytes or 0)
+                with target_path.open("wb") as handle:
+                    while True:
+                        _raise_if_bootstrap_cancelled(cancel_event, stage="runtime download")
+                        chunk = response.read(1024 * 128)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if total_bytes > 0:
+                            ratio = min(1.0, (completed_bytes + downloaded_bytes) / total_bytes)
+                            fraction = 0.10 + (ratio * 0.55)
+                        elif reported_total > 0:
+                            fraction = 0.10 + (min(downloaded_bytes / reported_total, 1.0) * 0.55)
+                        else:
+                            fraction = None
+                        detail = asset.name
+                        if reported_total > 0:
+                            detail = f"{asset.name} {_format_megabytes(downloaded_bytes)}/{_format_megabytes(reported_total)}"
+                        _report_progress(progress_callback, "runtime_download", "Download Runtime", detail, fraction)
+            completed_bytes += downloaded_bytes
+            archives.append(target_path)
+            append_runtime_diagnostic_event(
+                "managed_runtime_asset_download_complete",
+                asset_name=asset.name,
+                target_path=target_path,
+                downloaded_bytes=downloaded_bytes,
+                reported_total=reported_total,
+            )
+        except Exception as exc:
+            append_runtime_diagnostic_event(
+                "managed_runtime_asset_download_error",
+                asset_name=asset.name,
+                target_path=target_path,
+                downloaded_bytes=downloaded_bytes,
+                reported_total=reported_total,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
     return tuple(archives)
 
 

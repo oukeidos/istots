@@ -6,14 +6,20 @@ import pytest
 
 from istots.windows_build import (
     PACKAGED_DOCUMENT_NAMES,
+    WINDOWS_PYTHON_OPENSSL_DLL_NAMES,
     build_windows_gui_command,
     build_windows_portable_archive,
     build_windows_installer_command,
     detect_inno_setup_compiler,
     expected_windows_portable_archive_path,
     expected_windows_installer_output_path,
+    filter_pyinstaller_binaries_by_name,
     inno_setup_compiler_candidates,
     packaged_document_paths,
+    pyinstaller_binary_toc_entries,
+    python_runtime_dll_dir,
+    python_runtime_openssl_binary_specs,
+    python_runtime_openssl_paths,
     project_version,
     stage_windows_gui_bundle_assets,
     verify_windows_gui_bundle,
@@ -70,8 +76,68 @@ def test_windows_installer_metadata_is_fixed() -> None:
     assert WINDOWS_INSTALLER_APP_ID == "{{07ac00d9-1e18-4ee9-8af6-01c007408576}"
 
 
+def test_python_runtime_dll_dir_uses_base_prefix_dlls_subdir(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "python-runtime"
+
+    dll_dir = python_runtime_dll_dir(base_prefix=runtime_root)
+
+    assert dll_dir == runtime_root / "DLLs"
+
+
+def test_python_runtime_openssl_paths_read_from_python_dlls_dir(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "python-runtime"
+    dll_dir = runtime_root / "DLLs"
+    dll_dir.mkdir(parents=True, exist_ok=True)
+
+    expected_paths = []
+    for name in WINDOWS_PYTHON_OPENSSL_DLL_NAMES:
+        path = dll_dir / name
+        path.write_text(name, encoding="utf-8")
+        expected_paths.append(path)
+
+    assert python_runtime_openssl_paths(base_prefix=runtime_root) == tuple(expected_paths)
+    assert python_runtime_openssl_binary_specs(base_prefix=runtime_root) == [
+        (str(path), ".") for path in expected_paths
+    ]
+
+
+def test_python_runtime_openssl_paths_fail_when_runtime_dll_is_missing(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "python-runtime"
+    dll_dir = runtime_root / "DLLs"
+    dll_dir.mkdir(parents=True, exist_ok=True)
+    (dll_dir / WINDOWS_PYTHON_OPENSSL_DLL_NAMES[0]).write_text("openssl", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Python runtime OpenSSL DLL discovery failed"):
+        python_runtime_openssl_paths(base_prefix=runtime_root)
+
+
+def test_pyinstaller_binary_toc_entries_map_dot_target_to_bundle_root(tmp_path: Path) -> None:
+    source_path = tmp_path / "DLLs" / WINDOWS_PYTHON_OPENSSL_DLL_NAMES[0]
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("openssl", encoding="utf-8")
+
+    toc_entries = pyinstaller_binary_toc_entries([(str(source_path), ".")])
+
+    assert toc_entries == [(source_path.name, str(source_path), "BINARY")]
+
+
+def test_filter_pyinstaller_binaries_by_name_removes_path_leaked_openssl_entries() -> None:
+    binaries = [
+        ("libssl-3-x64.dll", r"C:\msys64\mingw64\bin\libssl-3-x64.dll", "BINARY"),
+        ("subdir/LIBCRYPTO-3-X64.DLL", r"C:\git\bin\libcrypto-3-x64.dll", "BINARY"),
+        ("VCRUNTIME140.dll", r"C:\Python\DLLs\VCRUNTIME140.dll", "BINARY"),
+    ]
+
+    filtered = filter_pyinstaller_binaries_by_name(
+        binaries,
+        excluded_names=WINDOWS_PYTHON_OPENSSL_DLL_NAMES,
+    )
+
+    assert filtered == [("VCRUNTIME140.dll", r"C:\Python\DLLs\VCRUNTIME140.dll", "BINARY")]
+
+
 def test_project_version_reads_the_pyproject_version() -> None:
-    assert project_version(_project_root()) == "0.4.4"
+    assert project_version(_project_root()) == "0.4.5"
 
 
 def test_windows_installer_build_layout_uses_expected_paths() -> None:
@@ -285,15 +351,24 @@ def test_windows_build_workflow_uses_supported_contract() -> None:
 
     assert "runs-on: windows-2025" in workflow_text
     assert "actions/checkout@v6" in workflow_text
-    assert "actions/setup-python@v6" in workflow_text
     assert "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b" in workflow_text
     assert "actions/upload-artifact@v7" in workflow_text
-    assert "uv sync --frozen --extra gui" in workflow_text
-    assert "uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py" in workflow_text
-    assert "uv run python scripts/build_windows_gui.py" in workflow_text
-    assert "uv run python scripts/smoke_windows_gui_bundle.py" in workflow_text
-    assert "uv run python scripts/build_windows_portable_zip.py" in workflow_text
-    assert "uv run python scripts/build_windows_installer.py" in workflow_text
+    assert "uv python install 3.14.4" in workflow_text
+    assert "uv sync --frozen --managed-python --python 3.14.4 --extra gui" in workflow_text
+    assert (
+        "uv run --managed-python --python 3.14.4 pytest --basetemp build/pytest-temp "
+        "tests/test_windows_build.py"
+    ) in workflow_text
+    assert "uv run --managed-python --python 3.14.4 python scripts/build_windows_gui.py" in workflow_text
+    assert (
+        "uv run --managed-python --python 3.14.4 python scripts/smoke_windows_gui_bundle.py"
+    ) in workflow_text
+    assert (
+        "uv run --managed-python --python 3.14.4 python scripts/build_windows_portable_zip.py"
+    ) in workflow_text
+    assert (
+        "uv run --managed-python --python 3.14.4 python scripts/build_windows_installer.py"
+    ) in workflow_text
     assert "gh release create" in workflow_text
     assert "gh release upload" in workflow_text
 

@@ -57,16 +57,18 @@ def test_download_default_gguf_runtime_assets_use_pinned_bundle(monkeypatch, tmp
         },
     )
 
-    def fake_snapshot_download(**kwargs) -> None:
-        captured.update(kwargs)
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
+        captured["bundle"] = bundle
+        captured["target"] = target
         target.mkdir(parents=True, exist_ok=True)
         (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"model")
         (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).write_bytes(b"mmproj")
 
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(snapshot_download=fake_snapshot_download),
+        SimpleNamespace(snapshot_download=lambda **kwargs: pytest.fail("snapshot_download should not run")),
     )
     monkeypatch.setattr(model_store, "DEFAULT_GGUF_RUNTIME_BUNDLE", fake_bundle)
 
@@ -75,13 +77,8 @@ def test_download_default_gguf_runtime_assets_use_pinned_bundle(monkeypatch, tmp
     assert gguf_dir == target.resolve()
     assert model_path == (target / model_store.DEFAULT_GGUF_FILENAME).resolve()
     assert mmproj_path == (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).resolve()
-    assert captured["repo_id"] == model_store.DEFAULT_GGUF_MODEL_ID
-    assert captured["revision"] == "gguf-revision"
-    assert "local_dir_use_symlinks" not in captured
-    assert captured["allow_patterns"] == [
-        model_store.DEFAULT_GGUF_FILENAME,
-        model_store.DEFAULT_GGUF_MMPROJ_FILENAME,
-    ]
+    assert captured["bundle"] == fake_bundle
+    assert Path(captured["target"]).parent == tmp_path.resolve()
     marker = model_store.managed_setup_target_marker_path(target).read_text(encoding="utf-8")
     assert "verification=pinned\n" in marker
     assert "revision=gguf-revision\n" in marker
@@ -136,16 +133,18 @@ def test_download_default_qwen_corrector_assets_use_pinned_bundle(monkeypatch, t
         },
     )
 
-    def fake_snapshot_download(**kwargs) -> None:
-        captured.update(kwargs)
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
+        captured["bundle"] = bundle
+        captured["target"] = target
         target.mkdir(parents=True, exist_ok=True)
         (target / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME).write_bytes(b"model")
         (target / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME).write_bytes(b"mmproj")
 
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(snapshot_download=fake_snapshot_download),
+        SimpleNamespace(snapshot_download=lambda **kwargs: pytest.fail("snapshot_download should not run")),
     )
     monkeypatch.setattr(model_store, "DEFAULT_QWEN_CORRECTOR_BUNDLE", fake_bundle)
 
@@ -154,12 +153,8 @@ def test_download_default_qwen_corrector_assets_use_pinned_bundle(monkeypatch, t
     assert qwen_dir == target.resolve()
     assert model_path == (target / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME).resolve()
     assert mmproj_path == (target / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME).resolve()
-    assert captured["repo_id"] == model_store.DEFAULT_QWEN_CORRECTOR_MODEL_ID
-    assert captured["revision"] == "qwen-revision"
-    assert captured["allow_patterns"] == [
-        model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
-        model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
-    ]
+    assert captured["bundle"] == fake_bundle
+    assert Path(captured["target"]).parent == tmp_path.resolve()
     marker = model_store.managed_setup_target_marker_path(target).read_text(encoding="utf-8")
     assert "verification=pinned\n" in marker
     assert "revision=qwen-revision\n" in marker
@@ -177,28 +172,47 @@ def test_download_default_hf_model_uses_pinned_bundle(monkeypatch, tmp_path: Pat
         },
     )
 
-    def fake_snapshot_download(**kwargs) -> None:
-        captured.update(kwargs)
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
+        captured["bundle"] = bundle
+        captured["target"] = target
         target.mkdir(parents=True, exist_ok=True)
         (target / "config.json").write_text("{}", encoding="utf-8")
         (target / "tokenizer.json").write_text("tokenizer", encoding="utf-8")
 
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(snapshot_download=fake_snapshot_download),
+        SimpleNamespace(snapshot_download=lambda **kwargs: pytest.fail("snapshot_download should not run")),
     )
     monkeypatch.setattr(model_store, "DEFAULT_HF_MODEL_BUNDLE", fake_bundle)
 
     resolved = model_store.download_model(model_store.DEFAULT_MODEL_ID, models_dir=tmp_path)
 
     assert resolved == target.resolve()
-    assert captured["repo_id"] == model_store.DEFAULT_MODEL_ID
-    assert captured["revision"] == "hf-revision"
-    assert captured["allow_patterns"] == ["config.json", "tokenizer.json"]
+    assert captured["bundle"] == fake_bundle
+    assert Path(captured["target"]).parent == tmp_path.resolve()
     marker = model_store.managed_setup_target_marker_path(target).read_text(encoding="utf-8")
     assert "verification=pinned\n" in marker
     assert "revision=hf-revision\n" in marker
+
+
+def test_pinned_bundle_download_url_quotes_repo_and_file_path() -> None:
+    bundle = model_store.PinnedSnapshotBundle(
+        repo_id="org name/model name",
+        revision="abc123",
+        file_hashes={"nested dir/file name.gguf": _sha256_bytes(b"payload")},
+    )
+
+    url = model_store._pinned_bundle_download_url(
+        bundle=bundle,
+        relative_path="nested dir/file name.gguf",
+    )
+
+    assert url == (
+        "https://huggingface.co/org%20name/model%20name/resolve/abc123/"
+        "nested%20dir/file%20name.gguf"
+    )
 
 
 def test_download_custom_hf_model_marks_target_as_unverified(monkeypatch, tmp_path: Path) -> None:
@@ -308,16 +322,12 @@ def test_download_pinned_bundle_rejects_hash_mismatch(monkeypatch, tmp_path: Pat
         },
     )
 
-    def fake_snapshot_download(**kwargs) -> None:
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
         target.mkdir(parents=True, exist_ok=True)
         (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"wrong-model")
         (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).write_bytes(b"expected-mmproj")
 
-    monkeypatch.setitem(
-        sys.modules,
-        "huggingface_hub",
-        SimpleNamespace(snapshot_download=fake_snapshot_download),
-    )
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
     monkeypatch.setattr(model_store, "DEFAULT_GGUF_RUNTIME_BUNDLE", fake_bundle)
 
     with pytest.raises(RuntimeError, match="failed hash check"):
@@ -395,25 +405,50 @@ def test_download_gguf_runtime_assets_force_rejects_unmanaged_existing_target(
 ) -> None:
     target = tmp_path / "PaddlePaddle__PaddleOCR-VL-1.5-GGUF"
     target.mkdir(parents=True, exist_ok=True)
-    (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"model")
-    (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).write_bytes(b"mmproj")
+    (target / "unexpected.txt").write_text("user file", encoding="utf-8")
     called = False
 
-    def fake_snapshot_download(**kwargs) -> None:
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
         nonlocal called
         called = True
 
-    monkeypatch.setitem(
-        sys.modules,
-        "huggingface_hub",
-        SimpleNamespace(snapshot_download=fake_snapshot_download),
-    )
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
 
-    with pytest.raises(RuntimeError, match="not marked as istots-managed"):
+    with pytest.raises(RuntimeError, match="not clearly app-managed"):
         model_store.download_gguf_runtime_assets(models_dir=tmp_path, force=True)
 
     assert called is False
     assert target.exists()
+
+
+def test_download_pinned_bundle_replaces_incomplete_expected_target(monkeypatch, tmp_path: Path) -> None:
+    target = tmp_path / "PaddlePaddle__PaddleOCR-VL-1.5-GGUF"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"partial-model")
+    fake_bundle = model_store.PinnedSnapshotBundle(
+        repo_id=model_store.DEFAULT_GGUF_MODEL_ID,
+        revision="gguf-revision",
+        file_hashes={
+            model_store.DEFAULT_GGUF_FILENAME: _sha256_bytes(b"model"),
+            model_store.DEFAULT_GGUF_MMPROJ_FILENAME: _sha256_bytes(b"mmproj"),
+        },
+    )
+
+    def fake_download_pinned_bundle_files(*, bundle, target, cancel_callback=None) -> None:
+        target.mkdir(parents=True, exist_ok=True)
+        (target / model_store.DEFAULT_GGUF_FILENAME).write_bytes(b"model")
+        (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).write_bytes(b"mmproj")
+
+    monkeypatch.setattr(model_store, "_download_pinned_bundle_files", fake_download_pinned_bundle_files)
+    monkeypatch.setattr(model_store, "DEFAULT_GGUF_RUNTIME_BUNDLE", fake_bundle)
+
+    resolved_dir, model_path, mmproj_path = model_store.download_gguf_runtime_assets(models_dir=tmp_path)
+
+    assert resolved_dir == target.resolve()
+    assert model_path.read_bytes() == b"model"
+    assert mmproj_path.read_bytes() == b"mmproj"
+    marker = model_store.managed_setup_target_marker_path(target).read_text(encoding="utf-8")
+    assert "verification=pinned\n" in marker
 
 
 def test_ensure_local_qwen_corrector_assets_resolves_default_download(monkeypatch, tmp_path: Path) -> None:
@@ -645,3 +680,88 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
 def test_setup_default_runtime_assets_rejects_custom_hf_model_without_opt_in() -> None:
     with pytest.raises(RuntimeError, match="require `with_hf_fallback=True`"):
         model_store.setup_default_runtime_assets(hf_model_id="org/model")
+
+
+def test_download_url_to_path_records_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    class _Response:
+        headers = {"Content-Length": "4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            if hasattr(self, "_done"):
+                return b""
+            self._done = True
+            return b"data"
+
+    monkeypatch.setattr(
+        model_store.urllib.request,
+        "urlopen",
+        lambda request, timeout=300: _Response(),
+    )
+    monkeypatch.setattr(
+        model_store,
+        "append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+
+    target = tmp_path / "payload.bin"
+    model_store._download_url_to_path(
+        url="https://example.invalid/payload.bin",
+        target=target,
+    )
+
+    assert target.read_bytes() == b"data"
+    assert seen == [
+        "direct_download_start",
+        "direct_download_complete",
+    ]
+
+
+def test_setup_default_runtime_assets_records_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    gguf_dir = tmp_path / "gguf_model"
+    gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
+    gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
+    derived_path = resolve_derived_mmproj_output_path(
+        base_mmproj=gguf_mmproj_path,
+        models_dir=tmp_path,
+        min_pixels=32768,
+    )
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        model_store,
+        "append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+    monkeypatch.setattr(
+        model_store,
+        "download_gguf_runtime_assets",
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False, cancel_callback=None: (
+            gguf_dir,
+            gguf_model_path,
+            gguf_mmproj_path,
+        ),
+    )
+    monkeypatch.setattr(
+        "istots.llama_mmproj.materialize_mmproj",
+        lambda **kwargs: derived_path,
+    )
+
+    artifacts = model_store.setup_default_runtime_assets(models_dir=tmp_path)
+
+    assert artifacts.gguf_mmproj_minpix32768_path == derived_path
+    assert seen == [
+        "setup_assets_begin",
+        "setup_assets_gguf_start",
+        "setup_assets_gguf_complete",
+        "setup_assets_mmproj_start",
+        "setup_assets_mmproj_complete",
+        "setup_assets_complete",
+    ]

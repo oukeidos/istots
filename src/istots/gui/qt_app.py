@@ -35,6 +35,7 @@ from istots.gui.core import (
     run_gui_doctor_check,
     suggest_output_srt_path,
 )
+from istots.runtime_diagnostics import append_runtime_diagnostic_event
 from istots.runtime_prerequisites import (
     format_missing_managed_runtime_prerequisites,
     missing_managed_runtime_prerequisites,
@@ -1449,46 +1450,72 @@ if QtWidgets is not None:  # pragma: no branch
                 runtime_variant=self._selected_runtime_variant(),
                 install_prerequisites=install_prerequisites,
             )
-            result = execute_setup_request(
-                request,
-                progress_callback=emit,
-                emit_completion_event=False,
-                cancel_event=cancel_event,
+            append_runtime_diagnostic_event(
+                "gui_setup_task_start",
+                runtime_variant=request.runtime_variant,
+                install_prerequisites=install_prerequisites,
+                models_dir=request.models_dir,
             )
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("setup cancelled during runtime validation")
-            emit(
-                SetupProgressEvent(
-                    phase="runtime_check",
-                    headline="Validate Setup",
-                    detail="Waiting for llama-server to respond",
-                    fraction=0.97,
+            try:
+                result = execute_setup_request(
+                    request,
+                    progress_callback=emit,
+                    emit_completion_event=False,
+                    cancel_event=cancel_event,
                 )
-            )
-            status = run_gui_doctor_check(models_dir=request.models_dir, cancel_event=cancel_event)
-            if not status.ready:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("setup cancelled during runtime validation")
+                emit(
+                    SetupProgressEvent(
+                        phase="runtime_check",
+                        headline="Validate Setup",
+                        detail="Waiting for llama-server to respond",
+                        fraction=0.97,
+                    )
+                )
+                append_runtime_diagnostic_event(
+                    "gui_setup_doctor_start",
+                    models_dir=request.models_dir,
+                )
+                status = run_gui_doctor_check(models_dir=request.models_dir, cancel_event=cancel_event)
+                append_runtime_diagnostic_event(
+                    "gui_setup_doctor_complete",
+                    ready=status.ready,
+                    detail=status.detail,
+                    runtime_source=status.runtime_source,
+                    runtime_binary_path=status.runtime_binary_path,
+                )
+                if not status.ready:
+                    if status.runtime_source == "managed":
+                        record_managed_runtime_validation(
+                            ok=False,
+                            detail=status.detail,
+                            binary_path=status.runtime_binary_path,
+                        )
+                    raise RuntimeError(status.detail)
                 if status.runtime_source == "managed":
                     record_managed_runtime_validation(
-                        ok=False,
+                        ok=True,
                         detail=status.detail,
                         binary_path=status.runtime_binary_path,
                     )
-                raise RuntimeError(status.detail)
-            if status.runtime_source == "managed":
-                record_managed_runtime_validation(
-                    ok=True,
-                    detail=status.detail,
-                    binary_path=status.runtime_binary_path,
+                emit(
+                    SetupProgressEvent(
+                        phase="complete",
+                        headline="Setup Complete",
+                        detail="Runtime test passed",
+                        fraction=1.0,
+                    )
                 )
-            emit(
-                SetupProgressEvent(
-                    phase="complete",
-                    headline="Setup Complete",
-                    detail="Runtime test passed",
-                    fraction=1.0,
+                append_runtime_diagnostic_event("gui_setup_task_complete")
+                return result
+            except Exception as exc:
+                append_runtime_diagnostic_event(
+                    "gui_setup_task_error",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
-            )
-            return result
+                raise
 
         def _handle_primary_action(self) -> None:
             action = derive_primary_action(self._screen_state)

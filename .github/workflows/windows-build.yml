@@ -29,21 +29,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-          architecture: "x64"
-
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
-          python-version: "3.11"
+
+      - name: Install managed Python 3.14.4
+        shell: pwsh
+        run: uv python install 3.14.4
 
       - name: Sync project dependencies
         shell: pwsh
-        run: uv sync --frozen --extra gui
+        run: uv sync --frozen --managed-python --python 3.14.4 --extra gui
 
       - name: Install Inno Setup 6
         shell: pwsh
@@ -75,23 +72,23 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py
+          uv run --managed-python --python 3.14.4 pytest --basetemp build/pytest-temp tests/test_windows_build.py
 
       - name: Build Windows GUI bundle
         shell: pwsh
-        run: uv run python scripts/build_windows_gui.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_gui.py
 
       - name: Smoke-test packaged Windows GUI bundle
         shell: pwsh
-        run: uv run python scripts/smoke_windows_gui_bundle.py
+        run: uv run --managed-python --python 3.14.4 python scripts/smoke_windows_gui_bundle.py
 
       - name: Build portable Windows bundle archive
         shell: pwsh
-        run: uv run python scripts/build_windows_portable_zip.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_portable_zip.py
 
       - name: Build Windows installer
         shell: pwsh
-        run: uv run python scripts/build_windows_installer.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_installer.py
 
       - name: Upload portable bundle artifact
         uses: actions/upload-artifact@v7

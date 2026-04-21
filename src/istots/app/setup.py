@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from istots import model_store
+from istots.runtime_diagnostics import append_runtime_diagnostic_event
 
 
 class SetupArgumentError(ValueError):
@@ -67,11 +68,26 @@ def execute_setup_request(
     if not request.with_hf_fallback and not model_store.is_default_pinned_hf_model(request.model_id):
         raise SetupArgumentError("--model-id requires --with-hf-fallback")
 
+    append_runtime_diagnostic_event(
+        "setup_request_start",
+        bootstrap_managed_runtime=request.bootstrap_managed_runtime,
+        runtime_variant=request.runtime_variant,
+        install_prerequisites=request.install_prerequisites,
+        with_hf_fallback=request.with_hf_fallback,
+        with_qwen_corrector=request.with_qwen_corrector,
+        models_dir=request.models_dir,
+        force=request.force,
+    )
     try:
         _raise_if_setup_cancelled(cancel_event, stage="startup")
         if request.bootstrap_managed_runtime:
             from istots.gui.bootstrap_windows import install_managed_llama_cpp_runtime
 
+            append_runtime_diagnostic_event(
+                "setup_runtime_bootstrap_start",
+                requested_variant=request.runtime_variant,
+                install_prerequisites=request.install_prerequisites,
+            )
             install_managed_llama_cpp_runtime(
                 requested_variant=request.runtime_variant,
                 force=request.force,
@@ -85,6 +101,10 @@ def execute_setup_request(
                     fraction=fraction,
                 ),
             )
+            append_runtime_diagnostic_event(
+                "setup_runtime_bootstrap_complete",
+                requested_variant=request.runtime_variant,
+            )
         _raise_if_setup_cancelled(cancel_event, stage="model setup")
         _emit_progress(
             progress_callback,
@@ -92,6 +112,13 @@ def execute_setup_request(
             headline="Setup Assets",
             detail="Preparing model assets; downloads can stay quiet for a while",
             fraction=0.80 if request.bootstrap_managed_runtime else 0.20,
+        )
+        append_runtime_diagnostic_event(
+            "setup_model_assets_start",
+            with_hf_fallback=request.with_hf_fallback,
+            with_qwen_corrector=request.with_qwen_corrector,
+            hf_model_id=request.model_id,
+            gguf_model_id=request.gguf_model_id,
         )
         artifacts = model_store.setup_default_runtime_assets(
             hf_model_id=request.model_id,
@@ -114,7 +141,23 @@ def execute_setup_request(
                 else lambda: _raise_if_setup_cancelled(cancel_event, stage="model setup")
             ),
         )
+        append_runtime_diagnostic_event(
+            "setup_model_assets_complete",
+            hf_model_dir=artifacts.hf_model_dir,
+            gguf_model_dir=artifacts.gguf_model_dir,
+            gguf_model_path=artifacts.gguf_model_path,
+            gguf_mmproj_path=artifacts.gguf_mmproj_path,
+            gguf_mmproj_minpix32768_path=artifacts.gguf_mmproj_minpix32768_path,
+            qwen_corrector_dir=artifacts.qwen_corrector_dir,
+            qwen_corrector_model_path=artifacts.qwen_corrector_model_path,
+            qwen_corrector_mmproj_path=artifacts.qwen_corrector_mmproj_path,
+        )
     except Exception as exc:
+        append_runtime_diagnostic_event(
+            "setup_request_error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         raise SetupExecutionError(str(exc)) from exc
 
     _raise_if_setup_cancelled(cancel_event, stage="completion")
@@ -126,6 +169,7 @@ def execute_setup_request(
             detail="Runtime assets are ready",
             fraction=1.0,
         )
+    append_runtime_diagnostic_event("setup_request_complete")
 
     return SetupResult(
         artifacts=artifacts,
