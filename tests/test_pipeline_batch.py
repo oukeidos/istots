@@ -595,6 +595,51 @@ def test_convert_sup_to_srt_uses_subprocess_prepared_inputs_when_enabled(monkeyp
     assert result.processed_count == 1
 
 
+def test_managed_prepared_ocr_inputs_cleans_spill_dir_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"")
+    seen: dict[str, Path] = {}
+
+    def fake_collect_via_subprocess(
+        input_sup: Path,
+        *,
+        max_items: int | None,
+        enable_furigana_mask: bool,
+        verbose: bool,
+        spill_dir: Path,
+        timeout_sec: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> list[pipeline._PreparedOCRInput]:
+        del input_sup, max_items, enable_furigana_mask, verbose, timeout_sec, cancel_event
+        seen["spill_dir"] = spill_dir
+        marker = spill_dir / "000000.png"
+        marker.write_bytes(b"spill")
+        seen["marker"] = marker
+        raise pipeline.ConversionCancelledError("conversion cancelled during prepared-input collection")
+
+    monkeypatch.setattr(
+        pipeline,
+        "_collect_prepared_ocr_inputs_via_subprocess",
+        fake_collect_via_subprocess,
+    )
+
+    with pytest.raises(pipeline.ConversionCancelledError, match="prepared-input collection"):
+        with pipeline._managed_prepared_ocr_inputs(  # noqa: SLF001
+            input_sup,
+            max_items=None,
+            enable_furigana_mask=False,
+            use_temp_ocr_image_files=True,
+            verbose=False,
+        ):
+            raise AssertionError("managed prepared inputs should not yield after cancellation")
+
+    assert seen["marker"].exists() is False
+    assert seen["spill_dir"].exists() is False
+
+
 def test_collect_prepared_ocr_inputs_via_subprocess_preserves_child_traceback(tmp_path: Path) -> None:
     missing_input = tmp_path / "missing.sup"
     spill_dir = tmp_path / "spill"

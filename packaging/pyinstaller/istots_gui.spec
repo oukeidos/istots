@@ -3,7 +3,7 @@
 from pathlib import Path
 import sys
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -15,7 +15,7 @@ from istots.windows_build import windows_gui_build_layout
 
 layout = windows_gui_build_layout(PROJECT_ROOT)
 
-datas = collect_data_files("istots.resources")
+datas = collect_data_files("istots.resources") + copy_metadata("istots")
 
 hiddenimports = collect_submodules("keyring.backends")
 

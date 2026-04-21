@@ -380,7 +380,7 @@ def install_managed_llama_cpp_runtime(
                     progress_callback,
                     "runtime_validate",
                     "Validate Runtime",
-                    "Checking existing installed runtime",
+                    "Checking existing installed runtime; waiting for llama-server to respond",
                     0.32,
                 )
                 validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
@@ -432,7 +432,7 @@ def install_managed_llama_cpp_runtime(
             progress_callback,
             "runtime_validate",
             "Validate Runtime",
-            "Running startup probe",
+            "Running startup probe; waiting for llama-server to respond",
             0.96,
         )
         validate_llama_server_binary(binary_path, cancel_event=cancel_event)

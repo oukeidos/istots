@@ -4,8 +4,10 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 import threading
+import time
 from typing import Literal
 
+from istots import __version__
 from istots.app.convert import (
     ConvertArgumentError,
     ConvertProgressEstimator,
@@ -463,6 +465,7 @@ def _build_gui_icon():
 
 def _apply_application_metadata(app) -> None:
     app.setApplicationName("istots")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("istots")
     icon = _build_gui_icon()
     if icon is not None and not icon.isNull():
@@ -780,12 +783,17 @@ if QtWidgets is not None:  # pragma: no branch
             self._active_task_title = ""
             self._closing_anyway = False
             self._convert_progress_estimator: ConvertProgressEstimator | None = None
+            self._setup_progress_started_at: float | None = None
+            self._setup_progress_last_event_at: float | None = None
             self._progress_timer = QtCore.QTimer(self)
             self._progress_timer.setInterval(250)
             self._progress_timer.timeout.connect(self._refresh_convert_progress_display)
+            self._setup_progress_timer = QtCore.QTimer(self)
+            self._setup_progress_timer.setInterval(1000)
+            self._setup_progress_timer.timeout.connect(self._refresh_setup_progress_display)
 
             self.setObjectName("AppWindow")
-            self.setWindowTitle("istots")
+            self.setWindowTitle(f"istots {__version__}")
             self._apply_window_icon()
             self.resize(920, 610)
             self.setMinimumSize(760, 610)
@@ -1277,6 +1285,9 @@ if QtWidgets is not None:  # pragma: no branch
             self._apply_run_feedback()
 
         def _clear_setup_progress(self) -> None:
+            self._setup_progress_timer.stop()
+            self._setup_progress_started_at = None
+            self._setup_progress_last_event_at = None
             self.progress.hide()
             self.progress_detail.clear()
             self.progress_detail.hide()
@@ -1450,7 +1461,7 @@ if QtWidgets is not None:  # pragma: no branch
                 SetupProgressEvent(
                     phase="runtime_check",
                     headline="Validate Setup",
-                    detail="Running runtime test",
+                    detail="Waiting for llama-server to respond",
                     fraction=0.97,
                 )
             )
@@ -1571,7 +1582,7 @@ if QtWidgets is not None:  # pragma: no branch
                 self.progress.setValue(0)
                 self.progress_detail.setText("Preparing setup")
                 self.progress_detail.show()
-                self.progress_time.hide()
+                self._begin_setup_progress()
             else:
                 self.progress.show()
                 self.progress.setRange(0, 0)
@@ -1712,6 +1723,7 @@ if QtWidgets is not None:  # pragma: no branch
             QtCore.QTimer.singleShot(1500, self._terminate_active_task_thread_if_still_running)
 
         def _on_setup_progress_event(self, event: SetupProgressEvent) -> None:
+            self._record_setup_progress_event()
             self._set_progress_state("running")
             self.progress.show()
             if event.fraction is None:
@@ -1724,7 +1736,7 @@ if QtWidgets is not None:  # pragma: no branch
                 detail = f"{detail} {event.detail}"
             self.progress_detail.setText(detail)
             self.progress_detail.show()
-            self.progress_time.hide()
+            self._refresh_setup_progress_display()
 
         def _on_setup_finished(self, _result: SetupResult) -> None:
             self._runtime_status = probe_runtime_status()
@@ -1805,6 +1817,35 @@ if QtWidgets is not None:  # pragma: no branch
                 time_text=self._format_progress_time(snapshot),
                 value=int(round(snapshot.fraction * 1000)),
             )
+
+        def _begin_setup_progress(self) -> None:
+            started_at = time.monotonic()
+            self._setup_progress_started_at = started_at
+            self._setup_progress_last_event_at = started_at
+            self._setup_progress_timer.start()
+            self._refresh_setup_progress_display()
+
+        def _record_setup_progress_event(self) -> None:
+            now = time.monotonic()
+            if self._setup_progress_started_at is None:
+                self._setup_progress_started_at = now
+                self._setup_progress_timer.start()
+            self._setup_progress_last_event_at = now
+
+        def _refresh_setup_progress_display(self) -> None:
+            if self._active_task_title != "Setup" or self._setup_progress_started_at is None:
+                return
+            time_text = self._format_setup_progress_time()
+            self.progress_time.setText(time_text)
+            self.progress_time.setVisible(bool(time_text))
+
+        def _format_setup_progress_time(self) -> str:
+            started_at = self._setup_progress_started_at
+            if started_at is None:
+                return ""
+            now = time.monotonic()
+            elapsed = self._format_duration(now - started_at)
+            return f"Still working... {elapsed} elapsed"
 
         def _format_progress_detail(self, snapshot: ConvertProgressSnapshot) -> str:
             percent = int(round(snapshot.fraction * 100.0))

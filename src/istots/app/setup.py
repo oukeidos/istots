@@ -90,7 +90,7 @@ def execute_setup_request(
             progress_callback,
             phase="model_setup",
             headline="Setup Assets",
-            detail="Provisioning model and mmproj assets",
+            detail="Preparing model assets; downloads can stay quiet for a while",
             fraction=0.80 if request.bootstrap_managed_runtime else 0.20,
         )
         artifacts = model_store.setup_default_runtime_assets(

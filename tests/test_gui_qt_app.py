@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from istots import __version__
 from istots.app.convert import ConvertProgressSnapshot
 from istots.app.setup import SetupProgressEvent, SetupRequest, SetupResult
 from istots.gui.core import GuiRuntimeStatus
 from istots.gui.qt_app import (
     TastingWindow,
+    _apply_application_metadata,
     _status_shape_name,
     _wrap_message_box_text,
     list_gui_theme_ids,
@@ -180,6 +182,83 @@ def test_tasting_window_relies_on_system_font_family_by_default() -> None:
 
     try:
         assert "font-family" not in window.styleSheet()
+    finally:
+        window.close()
+
+
+def test_apply_application_metadata_sets_application_version() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    _apply_application_metadata(app)
+
+    assert app.applicationName() == "istots"
+    assert app.applicationVersion() == __version__
+
+
+def test_tasting_window_title_includes_version() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+
+    try:
+        assert window.windowTitle() == f"istots {__version__}"
+    finally:
+        window.close()
+
+
+def test_tasting_window_setup_progress_time_reports_elapsed_and_quiet_period(monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr("istots.gui.qt_app.time.monotonic", lambda: clock["now"])
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        window._active_task_title = "Setup"
+        window._begin_setup_progress()
+        assert window.progress_time.text() == "Still working... 00:00 elapsed"
+        clock["now"] = 112.0
+        window._refresh_setup_progress_display()
+        assert window.progress_time.text() == "Still working... 00:12 elapsed"
+    finally:
+        window.close()
+
+
+def test_tasting_window_setup_progress_event_keeps_time_visible(monkeypatch) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    clock = {"now": 200.0}
+    monkeypatch.setattr("istots.gui.qt_app.time.monotonic", lambda: clock["now"])
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        window._active_task_title = "Setup"
+        window._on_setup_progress_event(
+            SetupProgressEvent(
+                phase="model_setup",
+                headline="Setup Assets",
+                detail="Preparing model assets; downloads can stay quiet for a while",
+                fraction=0.8,
+            )
+        )
+        assert window.progress_detail.text().startswith("Setup Assets")
+        assert window.progress_time.isVisible()
+        assert window.progress_time.text() == "Still working... 00:00 elapsed"
     finally:
         window.close()
 
