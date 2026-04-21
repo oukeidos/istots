@@ -1,6 +1,7 @@
 # Changelog
 
 ## [0.4.3] - 2026-04-21
+- Started automated Windows GitHub release builds for the packaged GUI, portable zip, and installer.
 - Added a Windows desktop packaging and installer path so the GUI can be distributed more cleanly on supported systems.
 - Improved packaged-app setup and runtime behavior so environment preparation, checks, OCR work, and recovery are more reliable during everyday use.
 - Improved packaged GUI feedback by showing the app version and making long setup steps look active instead of stalled.
