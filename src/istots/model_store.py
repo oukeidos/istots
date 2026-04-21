@@ -4,6 +4,9 @@ import hashlib
 import os
 import shutil
 import sys
+import tempfile
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,7 +257,95 @@ def _verify_pinned_snapshot_files(
     return resolved_paths
 
 
-def _download_pinned_snapshot_bundle(
+def _pinned_bundle_download_url(
+    *,
+    bundle: PinnedSnapshotBundle,
+    relative_path: str,
+) -> str:
+    repo_path = "/".join(urllib.parse.quote(part, safe="") for part in bundle.repo_id.split("/"))
+    revision = urllib.parse.quote(bundle.revision, safe="")
+    file_path = "/".join(urllib.parse.quote(part, safe="") for part in relative_path.split("/"))
+    return f"https://huggingface.co/{repo_path}/resolve/{revision}/{file_path}"
+
+
+def _download_url_to_path(
+    *,
+    url: str,
+    target: Path,
+    cancel_callback: Callable[[], None] | None = None,
+) -> None:
+    temp_target = target.with_name(f".{target.name}.part")
+    if temp_target.exists():
+        temp_target.unlink()
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "istots-setup"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            with temp_target.open("wb") as handle:
+                while True:
+                    _invoke_cancel_callback(cancel_callback)
+                    chunk = response.read(1024 * 128)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+        _invoke_cancel_callback(cancel_callback)
+        temp_target.replace(target)
+    finally:
+        if temp_target.exists():
+            temp_target.unlink()
+
+
+def _target_contains_only_expected_pinned_bundle_files(
+    target: Path,
+    bundle: PinnedSnapshotBundle,
+) -> bool:
+    if target.is_symlink() or not target.is_dir():
+        return False
+    expected_files = set(bundle.file_hashes) | {MANAGED_SETUP_TARGET_SENTINEL}
+    actual_files: set[str] = set()
+    for path in target.rglob("*"):
+        if path.is_symlink():
+            return False
+        if path.is_file():
+            actual_files.add(path.relative_to(target).as_posix())
+    return actual_files.issubset(expected_files)
+
+
+def _replace_invalid_pinned_bundle_target(
+    target: Path,
+    bundle: PinnedSnapshotBundle,
+) -> None:
+    marker = managed_setup_target_marker_path(target)
+    if marker.exists():
+        _ensure_safe_force_delete_target(target)
+    elif not _target_contains_only_expected_pinned_bundle_files(target, bundle):
+        raise RuntimeError(
+            "existing pinned setup target is invalid and not clearly app-managed: "
+            f"{target}. Remove it manually or rerun the setup path with force."
+        )
+    shutil.rmtree(target)
+
+
+def _download_pinned_bundle_files(
+    *,
+    bundle: PinnedSnapshotBundle,
+    target: Path,
+    cancel_callback: Callable[[], None] | None = None,
+) -> None:
+    for relative_path in bundle.file_hashes:
+        _invoke_cancel_callback(cancel_callback)
+        destination = target / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _download_url_to_path(
+            url=_pinned_bundle_download_url(bundle=bundle, relative_path=relative_path),
+            target=destination,
+            cancel_callback=cancel_callback,
+        )
+
+
+def _download_pinned_bundle(
     *,
     bundle: PinnedSnapshotBundle,
     models_dir: Path | None = None,
@@ -266,23 +357,49 @@ def _download_pinned_snapshot_bundle(
         raise RuntimeError(f"pinned setup bundle is missing a revision for {bundle.repo_id}")
 
     target = resolve_setup_download_path(model_id=bundle.repo_id, models_dir=models_dir)
-    _snapshot_download_to_target(
-        repo_id=bundle.repo_id,
-        target=target,
-        force=force,
-        revision=revision,
-        allow_patterns=list(bundle.file_hashes),
-        cancel_callback=cancel_callback,
-    )
-    _invoke_cancel_callback(cancel_callback)
-    resolved_paths = _verify_pinned_snapshot_files(target=target, bundle=bundle)
-    _mark_setup_target_managed(
-        target,
-        model_id=bundle.repo_id,
-        revision=revision,
-        verification="pinned",
-    )
-    return target.resolve(), resolved_paths
+    if force and target.exists():
+        _replace_invalid_pinned_bundle_target(target, bundle)
+    elif target.exists():
+        try:
+            resolved_paths = _verify_pinned_snapshot_files(target=target, bundle=bundle)
+        except RuntimeError:
+            _replace_invalid_pinned_bundle_target(target, bundle)
+        else:
+            _mark_setup_target_managed(
+                target,
+                model_id=bundle.repo_id,
+                revision=revision,
+                verification="pinned",
+            )
+            return target.resolve(), resolved_paths
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stage_dir = Path(tempfile.mkdtemp(prefix=f".{target.name}.download-", dir=str(target.parent))).resolve()
+    try:
+        _download_pinned_bundle_files(
+            bundle=bundle,
+            target=stage_dir,
+            cancel_callback=cancel_callback,
+        )
+        _invoke_cancel_callback(cancel_callback)
+        resolved_stage_paths = _verify_pinned_snapshot_files(target=stage_dir, bundle=bundle)
+        _mark_setup_target_managed(
+            stage_dir,
+            model_id=bundle.repo_id,
+            revision=revision,
+            verification="pinned",
+        )
+        if target.exists():
+            _replace_invalid_pinned_bundle_target(target, bundle)
+        stage_dir.replace(target)
+        resolved_paths = {
+            relative_path: (target / relative_path).resolve()
+            for relative_path in resolved_stage_paths
+        }
+        return target.resolve(), resolved_paths
+    finally:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
 
 
 def resolve_local_model_path(model_id: str, models_dir: Path | None = None) -> Path:
@@ -314,7 +431,7 @@ def download_model(
     cancel_callback: Callable[[], None] | None = None,
 ) -> Path:
     if is_default_pinned_hf_model(model_id):
-        target, _ = _download_pinned_snapshot_bundle(
+        target, _ = _download_pinned_bundle(
             bundle=DEFAULT_HF_MODEL_BUNDLE,
             models_dir=models_dir,
             force=force,
@@ -374,7 +491,7 @@ def download_gguf_runtime_assets(
     cancel_callback: Callable[[], None] | None = None,
 ) -> tuple[Path, Path, Path]:
     if is_default_pinned_gguf_model(model_id):
-        target, resolved_paths = _download_pinned_snapshot_bundle(
+        target, resolved_paths = _download_pinned_bundle(
             bundle=DEFAULT_GGUF_RUNTIME_BUNDLE,
             models_dir=models_dir,
             force=force,
@@ -414,7 +531,7 @@ def download_qwen_corrector_assets(
         model_filename=model_filename,
         mmproj_filename=mmproj_filename,
     ):
-        target, resolved_paths = _download_pinned_snapshot_bundle(
+        target, resolved_paths = _download_pinned_bundle(
             bundle=DEFAULT_QWEN_CORRECTOR_BUNDLE,
             models_dir=models_dir,
             force=force,
