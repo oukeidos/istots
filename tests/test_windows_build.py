@@ -287,21 +287,21 @@ def test_windows_build_workflow_uses_supported_contract() -> None:
     assert "actions/checkout@v6" in workflow_text
     assert "astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b" in workflow_text
     assert "actions/upload-artifact@v7" in workflow_text
-    assert "uv python install 3.11" in workflow_text
-    assert "uv sync --frozen --managed-python --python 3.11 --extra gui" in workflow_text
+    assert "uv python install 3.14.4" in workflow_text
+    assert "uv sync --frozen --managed-python --python 3.14.4 --extra gui" in workflow_text
     assert (
-        "uv run --managed-python --python 3.11 pytest --basetemp build/pytest-temp "
+        "uv run --managed-python --python 3.14.4 pytest --basetemp build/pytest-temp "
         "tests/test_windows_build.py"
     ) in workflow_text
-    assert "uv run --managed-python --python 3.11 python scripts/build_windows_gui.py" in workflow_text
+    assert "uv run --managed-python --python 3.14.4 python scripts/build_windows_gui.py" in workflow_text
     assert (
-        "uv run --managed-python --python 3.11 python scripts/smoke_windows_gui_bundle.py"
+        "uv run --managed-python --python 3.14.4 python scripts/smoke_windows_gui_bundle.py"
     ) in workflow_text
     assert (
-        "uv run --managed-python --python 3.11 python scripts/build_windows_portable_zip.py"
+        "uv run --managed-python --python 3.14.4 python scripts/build_windows_portable_zip.py"
     ) in workflow_text
     assert (
-        "uv run --managed-python --python 3.11 python scripts/build_windows_installer.py"
+        "uv run --managed-python --python 3.14.4 python scripts/build_windows_installer.py"
     ) in workflow_text
     assert "gh release create" in workflow_text
     assert "gh release upload" in workflow_text

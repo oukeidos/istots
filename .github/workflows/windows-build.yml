@@ -34,13 +34,13 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install managed Python 3.11
+      - name: Install managed Python 3.14.4
         shell: pwsh
-        run: uv python install 3.11
+        run: uv python install 3.14.4
 
       - name: Sync project dependencies
         shell: pwsh
-        run: uv sync --frozen --managed-python --python 3.11 --extra gui
+        run: uv sync --frozen --managed-python --python 3.14.4 --extra gui
 
       - name: Install Inno Setup 6
         shell: pwsh
@@ -72,23 +72,23 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          uv run --managed-python --python 3.11 pytest --basetemp build/pytest-temp tests/test_windows_build.py
+          uv run --managed-python --python 3.14.4 pytest --basetemp build/pytest-temp tests/test_windows_build.py
 
       - name: Build Windows GUI bundle
         shell: pwsh
-        run: uv run --managed-python --python 3.11 python scripts/build_windows_gui.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_gui.py
 
       - name: Smoke-test packaged Windows GUI bundle
         shell: pwsh
-        run: uv run --managed-python --python 3.11 python scripts/smoke_windows_gui_bundle.py
+        run: uv run --managed-python --python 3.14.4 python scripts/smoke_windows_gui_bundle.py
 
       - name: Build portable Windows bundle archive
         shell: pwsh
-        run: uv run --managed-python --python 3.11 python scripts/build_windows_portable_zip.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_portable_zip.py
 
       - name: Build Windows installer
         shell: pwsh
-        run: uv run --managed-python --python 3.11 python scripts/build_windows_installer.py
+        run: uv run --managed-python --python 3.14.4 python scripts/build_windows_installer.py
 
       - name: Upload portable bundle artifact
         uses: actions/upload-artifact@v7
