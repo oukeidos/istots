@@ -71,28 +71,30 @@ def test_windows_installer_metadata_is_fixed() -> None:
 
 
 def test_project_version_reads_the_pyproject_version() -> None:
-    assert project_version(_project_root()) == "0.4.3"
+    assert project_version(_project_root()) == "0.4.4"
 
 
 def test_windows_installer_build_layout_uses_expected_paths() -> None:
     project_root = _project_root()
+    version = project_version(project_root)
 
     layout = windows_installer_build_layout(project_root)
 
     assert layout.gui_bundle_layout == windows_gui_build_layout(project_root)
     assert layout.script_path == project_root / "packaging" / "inno" / "istots_gui.iss"
     assert layout.output_dir == project_root / "packaging" / "inno" / "Output"
-    assert layout.output_base_filename == "IStoTS-0.4.3-windows-x64-setup"
+    assert layout.output_base_filename == f"IStoTS-{version}-windows-x64-setup"
 
 
 def test_windows_portable_build_layout_uses_expected_paths() -> None:
     project_root = _project_root()
+    version = project_version(project_root)
 
     layout = windows_portable_build_layout(project_root)
 
     assert layout.gui_bundle_layout == windows_gui_build_layout(project_root)
     assert layout.output_dir == project_root / "dist" / "windows-release"
-    assert layout.output_base_filename == "IStoTS-0.4.3-windows-x64-portable"
+    assert layout.output_base_filename == f"IStoTS-{version}-windows-x64-portable"
 
 
 def test_inno_setup_script_preserves_desktop_shortcut_choice_and_defaults_checked() -> None:
@@ -141,7 +143,11 @@ def test_expected_windows_installer_output_path_uses_fixed_filename() -> None:
     layout = windows_installer_build_layout(_project_root())
 
     assert expected_windows_installer_output_path(layout) == (
-        _project_root() / "packaging" / "inno" / "Output" / "IStoTS-0.4.3-windows-x64-setup.exe"
+        _project_root()
+        / "packaging"
+        / "inno"
+        / "Output"
+        / f"IStoTS-{project_version(_project_root())}-windows-x64-setup.exe"
     )
 
 
@@ -149,7 +155,10 @@ def test_expected_windows_portable_archive_path_uses_fixed_filename() -> None:
     layout = windows_portable_build_layout(_project_root())
 
     assert expected_windows_portable_archive_path(layout) == (
-        _project_root() / "dist" / "windows-release" / "IStoTS-0.4.3-windows-x64-portable.zip"
+        _project_root()
+        / "dist"
+        / "windows-release"
+        / f"IStoTS-{project_version(_project_root())}-windows-x64-portable.zip"
     )
 
 

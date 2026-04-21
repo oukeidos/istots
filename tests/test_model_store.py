@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -224,6 +225,62 @@ def test_download_custom_hf_model_marks_target_as_unverified(monkeypatch, tmp_pa
     assert "verification=unverified\n" in marker
 
 
+def test_download_model_disables_xet_during_snapshot_download(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    constants_module = SimpleNamespace(HF_HUB_DISABLE_XET=False)
+
+    def fake_snapshot_download(**kwargs) -> None:
+        captured.update(kwargs)
+        captured["env_disable_xet"] = os.environ.get("HF_HUB_DISABLE_XET")
+        captured["constants_disable_xet"] = constants_module.HF_HUB_DISABLE_XET
+        target = Path(kwargs["local_dir"])
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", constants_module)
+
+    target = model_store.download_model("org/model", models_dir=tmp_path)
+
+    assert target == (tmp_path / "org__model").resolve()
+    assert captured["env_disable_xet"] == "1"
+    assert captured["constants_disable_xet"] is True
+    assert "HF_HUB_DISABLE_XET" not in os.environ
+    assert constants_module.HF_HUB_DISABLE_XET is False
+
+
+def test_download_model_restores_existing_xet_environment_override(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    constants_module = SimpleNamespace(HF_HUB_DISABLE_XET=False)
+
+    def fake_snapshot_download(**kwargs) -> None:
+        captured["env_disable_xet"] = os.environ.get("HF_HUB_DISABLE_XET")
+        captured["constants_disable_xet"] = constants_module.HF_HUB_DISABLE_XET
+        target = Path(kwargs["local_dir"])
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("HF_HUB_DISABLE_XET", "0")
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=fake_snapshot_download),
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub.constants", constants_module)
+
+    model_store.download_model("org/model", models_dir=tmp_path)
+
+    assert captured["env_disable_xet"] == "1"
+    assert captured["constants_disable_xet"] is True
+    assert os.environ["HF_HUB_DISABLE_XET"] == "0"
+    assert constants_module.HF_HUB_DISABLE_XET is False
+
+
 def test_download_pinned_bundle_rejects_missing_revision(monkeypatch, tmp_path: Path) -> None:
     fake_bundle = model_store.PinnedSnapshotBundle(
         repo_id=model_store.DEFAULT_GGUF_MODEL_ID,
@@ -396,14 +453,14 @@ def test_setup_default_runtime_assets_downloads_and_materializes_without_hf_by_d
     monkeypatch.setattr(
         model_store,
         "download_model",
-        lambda model_id, models_dir=None, force=False: pytest.fail(
+        lambda model_id, models_dir=None, force=False, cancel_callback=None: pytest.fail(
             "download_model should not run without `with_hf_fallback=True`"
         ),
     )
     monkeypatch.setattr(
         model_store,
         "download_gguf_runtime_assets",
-        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False: (
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False, cancel_callback=None: (
             gguf_dir,
             gguf_model_path,
             gguf_mmproj_path,
@@ -469,11 +526,12 @@ def test_setup_default_runtime_assets_optionally_downloads_hf_fallback(
     )
     calls: dict[str, object] = {}
 
-    def fake_download_model(model_id, models_dir=None, force=False):
+    def fake_download_model(model_id, models_dir=None, force=False, cancel_callback=None):
         calls["download_model"] = {
             "model_id": model_id,
             "models_dir": models_dir,
             "force": force,
+            "cancel_callback": cancel_callback,
         }
         return hf_dir
 
@@ -481,7 +539,7 @@ def test_setup_default_runtime_assets_optionally_downloads_hf_fallback(
     monkeypatch.setattr(
         model_store,
         "download_gguf_runtime_assets",
-        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False: (
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False, cancel_callback=None: (
             gguf_dir,
             gguf_model_path,
             gguf_mmproj_path,
@@ -503,6 +561,7 @@ def test_setup_default_runtime_assets_optionally_downloads_hf_fallback(
         "model_id": model_store.DEFAULT_MODEL_ID,
         "models_dir": tmp_path,
         "force": True,
+        "cancel_callback": None,
     }
 
 
@@ -522,14 +581,14 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
     monkeypatch.setattr(
         model_store,
         "download_model",
-        lambda model_id, models_dir=None, force=False: pytest.fail(
+        lambda model_id, models_dir=None, force=False, cancel_callback=None: pytest.fail(
             "download_model should not run without `with_hf_fallback=True`"
         ),
     )
     monkeypatch.setattr(
         model_store,
         "download_gguf_runtime_assets",
-        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False: (
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False, cancel_callback=None: (
             gguf_dir,
             gguf_model_path,
             gguf_mmproj_path,
@@ -540,11 +599,12 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
     def fake_download_qwen_corrector_assets(
         *,
         model_id=model_store.DEFAULT_QWEN_CORRECTOR_MODEL_ID,
-        model_filename=model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
-        mmproj_filename=model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
-        models_dir=None,
-        force=False,
-    ):
+            model_filename=model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME,
+            mmproj_filename=model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
+            models_dir=None,
+            force=False,
+            cancel_callback=None,
+        ):
         qwen_calls.update(
             {
                 "model_id": model_id,
@@ -552,6 +612,7 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
                 "mmproj_filename": mmproj_filename,
                 "models_dir": models_dir,
                 "force": force,
+                "cancel_callback": cancel_callback,
             }
         )
         return qwen_dir, qwen_model_path, qwen_mmproj_path
@@ -577,6 +638,7 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
         "mmproj_filename": model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME,
         "models_dir": tmp_path,
         "force": True,
+        "cancel_callback": None,
     }
 
 

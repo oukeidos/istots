@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.4] - 2026-04-21
+- Fixed a packaged Windows setup crash that could occur during model downloads.
+
 ## [0.4.3] - 2026-04-21
 - Started automated Windows GitHub release builds for the packaged GUI, portable zip, and installer.
 - Added a Windows desktop packaging and installer path so the GUI can be distributed more cleanly on supported systems.
