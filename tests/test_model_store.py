@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from istots.derived_assets import resolve_derived_mmproj_output_path
 from istots import model_store
 
 
@@ -75,6 +76,7 @@ def test_download_default_gguf_runtime_assets_use_pinned_bundle(monkeypatch, tmp
     assert mmproj_path == (target / model_store.DEFAULT_GGUF_MMPROJ_FILENAME).resolve()
     assert captured["repo_id"] == model_store.DEFAULT_GGUF_MODEL_ID
     assert captured["revision"] == "gguf-revision"
+    assert "local_dir_use_symlinks" not in captured
     assert captured["allow_patterns"] == [
         model_store.DEFAULT_GGUF_FILENAME,
         model_store.DEFAULT_GGUF_MMPROJ_FILENAME,
@@ -385,7 +387,11 @@ def test_setup_default_runtime_assets_downloads_and_materializes_without_hf_by_d
     gguf_dir = tmp_path / "gguf_model"
     gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
     gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
-    derived_path = gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf"
+    derived_path = resolve_derived_mmproj_output_path(
+        base_mmproj=gguf_mmproj_path,
+        models_dir=tmp_path,
+        min_pixels=32768,
+    )
 
     monkeypatch.setattr(
         model_store,
@@ -420,6 +426,7 @@ def test_setup_default_runtime_assets_downloads_and_materializes_without_hf_by_d
         calls["min_pixels"] = min_pixels
         calls["gguf_source_mode"] = gguf_source_mode
         calls["force"] = force
+        calls["output_path"] = output_path
         return derived_path
 
     monkeypatch.setattr(
@@ -443,6 +450,7 @@ def test_setup_default_runtime_assets_downloads_and_materializes_without_hf_by_d
         "min_pixels": 32768,
         "gguf_source_mode": "auto",
         "force": True,
+        "output_path": derived_path,
     }
 
 
@@ -454,7 +462,11 @@ def test_setup_default_runtime_assets_optionally_downloads_hf_fallback(
     gguf_dir = tmp_path / "gguf_model"
     gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
     gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
-    derived_path = gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf"
+    derived_path = resolve_derived_mmproj_output_path(
+        base_mmproj=gguf_mmproj_path,
+        models_dir=tmp_path,
+        min_pixels=32768,
+    )
     calls: dict[str, object] = {}
 
     def fake_download_model(model_id, models_dir=None, force=False):
@@ -498,7 +510,11 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
     gguf_dir = tmp_path / "gguf_model"
     gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
     gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
-    derived_path = gguf_dir / "PaddleOCR-VL-1.5-mmproj.minpix32768.gguf"
+    derived_path = resolve_derived_mmproj_output_path(
+        base_mmproj=gguf_mmproj_path,
+        models_dir=tmp_path,
+        min_pixels=32768,
+    )
     qwen_dir = tmp_path / "qwen_model"
     qwen_model_path = qwen_dir / model_store.DEFAULT_QWEN_CORRECTOR_MODEL_FILENAME
     qwen_mmproj_path = qwen_dir / model_store.DEFAULT_QWEN_CORRECTOR_MMPROJ_FILENAME

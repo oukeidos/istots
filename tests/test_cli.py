@@ -150,8 +150,6 @@ def test_run_setup_downloads_primary_runtime_assets_by_default(monkeypatch, tmp_
             str(tmp_path),
             "--gguf-source-mode",
             "installed",
-            "--min-pixels",
-            "32768",
             "--quiet",
         ]
     )
@@ -164,6 +162,20 @@ def test_run_setup_downloads_primary_runtime_assets_by_default(monkeypatch, tmp_
     assert captured["models_dir"] == tmp_path
     assert captured["gguf_source_mode"] == "installed"
     assert captured["min_pixels"] == 32768
+
+
+def test_run_setup_no_longer_accepts_min_pixels_override(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.run(
+            [
+                "setup",
+                "--min-pixels",
+                "32768",
+                "--quiet",
+            ]
+        )
+
+    assert excinfo.value.code == 2
 
 
 def test_run_setup_can_enable_hf_fallback_download(monkeypatch, tmp_path: Path) -> None:
@@ -2198,13 +2210,14 @@ def test_run_convert_rejects_qwen_mmproj_offload_override_without_qwen_local(tmp
 
 
 def test_run_auth_status_prints_source_summary(monkeypatch, capsys) -> None:
+    env_path = Path("/tmp/test.env")
     monkeypatch.setattr(
         "istots.gemini_auth.get_gemini_auth_status",
         lambda: SimpleNamespace(
             keyring_backend="test.backend",
             keyring_configured=True,
             env_file_configured=True,
-            env_file_path=Path("/tmp/test.env"),
+            env_file_path=env_path,
             env_file_contains_key=False,
             process_env_configured=False,
             process_env_name=None,
@@ -2217,7 +2230,7 @@ def test_run_auth_status_prints_source_summary(monkeypatch, capsys) -> None:
     assert rc == 0
     captured = capsys.readouterr()
     assert "keyring: configured (test.backend)" in captured.out
-    assert ".env path: configured (/tmp/test.env)" in captured.out
+    assert f".env path: configured ({env_path})" in captured.out
     assert "shell env: missing" in captured.out
     assert "effective source: keyring" in captured.out
 

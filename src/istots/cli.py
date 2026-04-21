@@ -841,12 +841,6 @@ def _add_setup_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--min-pixels",
-        type=int,
-        default=32768,
-        help="clip.vision.image_min_pixels value for the derived llama.cpp mmproj (default: 32768)",
-    )
-    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress progress logs",
@@ -1181,7 +1175,6 @@ def run_setup(args: argparse.Namespace) -> int:
                 support_dir=args.support_dir,
                 gguf_py_base_url=args.gguf_py_base_url,
                 gguf_source_mode=args.gguf_source_mode,
-                min_pixels=args.min_pixels,
             )
         )
     except SetupArgumentError as exc:

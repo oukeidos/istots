@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.2] - 2026-04-21
+- Made the Windows desktop app much easier to set up by guiding users through downloading the needed local runtime, checking required system components, and confirming that setup finished successfully.
+- Simplified setup behavior across the app and command line so supporting model files are prepared more consistently, while removing an advanced tuning option that most users should not need to manage directly.
+- Improved reliability when starting, stopping, and recovering the local OCR runtime on Windows, and added focused regression coverage to keep the new setup and readiness flow stable.
+
 ## [0.4.1] - 2026-04-20
 - Added a bundled desktop app icon so the GUI is easier to recognize in packaged builds.
 

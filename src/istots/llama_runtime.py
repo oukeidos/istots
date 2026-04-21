@@ -18,7 +18,7 @@ from typing import Any
 
 from PIL import Image
 
-from istots.llama_mmproj import default_materialized_mmproj_path
+from istots.derived_assets import resolve_derived_mmproj_output_path
 from istots.llama_sampling import (
     PADDLEOCR_LLAMA_OCR_EXPLICIT_DEFAULTS,
     apply_openai_sampling_recipe,
@@ -39,6 +39,7 @@ DEFAULT_LLAMA_SERVER_MANAGER_LOCK_OWNER_FILENAME = "owner.json"
 DEFAULT_LLAMA_SERVER_MANAGER_STATE_FILENAME = "state.json"
 DEFAULT_LLAMA_SERVER_MANAGER_LOCK_POLL_SEC = 0.1
 DEFAULT_LLAMA_SERVER_MANAGER_LOCK_STALE_GRACE_SEC = 5.0
+DEFAULT_LLAMA_SERVER_PROCESS_IDENTITY_TOLERANCE_SEC = 5.0
 
 _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS: dict[int, Any] = {}
 
@@ -137,6 +138,8 @@ class LlamaServerManagerState:
     connect_host: str
     port: int
     role: str
+    process_started_at: float | None = None
+    process_executable_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,13 @@ class LlamaServerManagerLockContention:
     state_port: int | None = None
     state_age_sec: float | None = None
     state_matches_owner: bool | None = None
+
+
+@dataclass(frozen=True)
+class LlamaServerProcessIdentity:
+    pid: int
+    started_at: float | None = None
+    executable_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -422,6 +432,7 @@ def _cleanup_stale_llama_server_manager_lock(paths: LlamaServerManagerPaths) -> 
     if owner is not None:
         if _is_pid_alive(owner.pid):
             return False
+        _cleanup_llama_server_manager_state_process(expected_instance_id=owner.instance_id)
         _clear_llama_server_manager_state(instance_id=owner.instance_id)
         _remove_llama_server_manager_lock_dir(paths)
         return True
@@ -545,6 +556,16 @@ def _load_llama_server_manager_state() -> LlamaServerManagerState | None:
         connect_host=str(payload.get("connect_host", derive_llama_server_connect_host(bind_host))),
         port=int(payload["port"]),
         role=str(payload["role"]),
+        process_started_at=(
+            float(payload["process_started_at"])
+            if payload.get("process_started_at") is not None
+            else None
+        ),
+        process_executable_path=(
+            str(payload["process_executable_path"])
+            if payload.get("process_executable_path") is not None
+            else None
+        ),
     )
 
 
@@ -553,6 +574,7 @@ def _write_llama_server_manager_state(
     *,
     pid: int,
     instance_id: str,
+    process_identity: LlamaServerProcessIdentity | None = None,
 ) -> None:
     path = llama_server_manager_state_path()
     payload = {
@@ -566,6 +588,8 @@ def _write_llama_server_manager_state(
         "connect_host": spec.connect_host,
         "port": spec.port,
         "role": spec.role.value,
+        "process_started_at": process_identity.started_at if process_identity is not None else None,
+        "process_executable_path": process_identity.executable_path if process_identity is not None else None,
     }
     _atomic_write_json(path, payload)
 
@@ -593,13 +617,291 @@ def _clear_llama_server_manager_state(
 
 
 def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        # Some platforms raise a generic OSError instead of a more specific
+        # ProcessLookupError/PermissionError when probing a stale PID.
+        return False
     return True
+
+
+def _normalize_process_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+        return os.path.normcase(str(resolved))
+    except (OSError, RuntimeError, ValueError):
+        return os.path.normcase(os.path.normpath(path))
+
+
+def _read_linux_process_started_at(pid: int) -> float | None:
+    stat_path = Path(f"/proc/{pid}/stat")
+    proc_stat_path = Path("/proc/stat")
+    try:
+        stat_text = stat_path.read_text(encoding="utf-8")
+        proc_stat_text = proc_stat_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    close_index = stat_text.rfind(")")
+    if close_index < 0:
+        return None
+    remainder = stat_text[close_index + 1 :].strip().split()
+    if len(remainder) <= 19:
+        return None
+    try:
+        start_ticks = int(remainder[19])
+        clock_ticks = os.sysconf("SC_CLK_TCK")
+    except (TypeError, ValueError, OSError, AttributeError):
+        return None
+    boot_time: int | None = None
+    for line in proc_stat_text.splitlines():
+        if line.startswith("btime "):
+            try:
+                boot_time = int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+            break
+    if boot_time is None:
+        return None
+    return float(boot_time) + (float(start_ticks) / float(clock_ticks))
+
+
+def _load_llama_server_process_identity_windows(pid: int) -> LlamaServerProcessIdentity | None:
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    get_process_times = kernel32.GetProcessTimes
+    get_process_times.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    get_process_times.restype = wintypes.BOOL
+
+    query_full_process_image_name = kernel32.QueryFullProcessImageNameW
+    query_full_process_image_name.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    query_full_process_image_name.restype = wintypes.BOOL
+
+    handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        started_at: float | None = None
+        executable_path: str | None = None
+
+        creation_time = wintypes.FILETIME()
+        exit_time = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if get_process_times(
+            handle,
+            ctypes.byref(creation_time),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            filetime = (creation_time.dwHighDateTime << 32) | creation_time.dwLowDateTime
+            started_at = (filetime / 10_000_000.0) - 11_644_473_600.0
+
+        buffer_length = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(buffer_length.value)
+        if query_full_process_image_name(
+            handle,
+            0,
+            buffer,
+            ctypes.byref(buffer_length),
+        ):
+            executable_path = buffer.value
+
+        if started_at is None and executable_path is None:
+            return None
+        return LlamaServerProcessIdentity(
+            pid=pid,
+            started_at=started_at,
+            executable_path=executable_path,
+        )
+    finally:
+        close_handle(handle)
+
+
+def _load_llama_server_process_identity_posix(pid: int) -> LlamaServerProcessIdentity | None:
+    executable_path: str | None = None
+    started_at: float | None = None
+
+    proc_exe = Path(f"/proc/{pid}/exe")
+    if proc_exe.exists():
+        try:
+            executable_path = os.readlink(proc_exe)
+        except OSError:
+            executable_path = None
+        started_at = _read_linux_process_started_at(pid)
+    else:
+        try:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "lstart=", "-o", "comm="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            line = completed.stdout.strip()
+            if line:
+                start_text = line[:24]
+                command_text = line[24:].strip()
+                try:
+                    started_struct = time.strptime(start_text.strip(), "%a %b %d %H:%M:%S %Y")
+                except ValueError:
+                    started_at = None
+                else:
+                    started_at = float(time.mktime(started_struct))
+                executable_path = command_text or None
+
+    if started_at is None and executable_path is None:
+        return None
+    return LlamaServerProcessIdentity(
+        pid=pid,
+        started_at=started_at,
+        executable_path=executable_path,
+    )
+
+
+def _load_llama_server_process_identity(pid: int) -> LlamaServerProcessIdentity | None:
+    if pid <= 0 or not _is_pid_alive(pid):
+        return None
+    if os.name == "nt":
+        return _load_llama_server_process_identity_windows(pid)
+    return _load_llama_server_process_identity_posix(pid)
+
+
+def _state_matches_llama_server_process_identity(
+    state: LlamaServerManagerState,
+    identity: LlamaServerProcessIdentity | None,
+) -> bool:
+    if identity is None or identity.pid != state.pid:
+        return False
+
+    matched = False
+    expected_started_at = state.process_started_at
+    if expected_started_at is None and state.created_at > 0:
+        expected_started_at = state.created_at
+
+    if expected_started_at is not None and identity.started_at is not None:
+        matched = True
+        tolerance = (
+            1e-3
+            if state.process_started_at is not None
+            else DEFAULT_LLAMA_SERVER_PROCESS_IDENTITY_TOLERANCE_SEC
+        )
+        if abs(identity.started_at - expected_started_at) > tolerance:
+            return False
+
+    expected_executable = state.process_executable_path or state.binary_path
+    current_executable = identity.executable_path
+    if expected_executable and current_executable:
+        matched = True
+        if _normalize_process_path(expected_executable) != _normalize_process_path(current_executable):
+            return False
+
+    return matched
+
+
+def _terminate_llama_server_pid(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if not _is_pid_alive(pid):
+        return False
+
+    def _wait_for_exit(timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if not _is_pid_alive(pid):
+                return True
+            time.sleep(0.05)
+        return not _is_pid_alive(pid)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+    if _wait_for_exit(5.0):
+        return True
+
+    if os.name != "nt":
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            return False
+        return _wait_for_exit(1.0)
+
+    return not _is_pid_alive(pid)
+
+
+def _cleanup_llama_server_manager_state_process(
+    *,
+    expected_instance_id: str | None = None,
+) -> bool:
+    state = _load_llama_server_manager_state()
+    if state is None:
+        return False
+    if expected_instance_id is not None and state.instance_id != expected_instance_id:
+        return False
+    identity = _load_llama_server_process_identity(state.pid)
+    if not _state_matches_llama_server_process_identity(state, identity):
+        return False
+    terminated = _terminate_llama_server_pid(state.pid)
+    _ACTIVE_LLAMA_SERVER_MANAGER_LOCKS.pop(state.pid, None)
+    return terminated
+
+
+def cleanup_managed_llama_server_for_current_process() -> bool:
+    paths = llama_server_manager_paths()
+    owner = _load_llama_server_manager_lock_owner(paths)
+    if owner is None or owner.pid != os.getpid():
+        return False
+    terminated = _cleanup_llama_server_manager_state_process(
+        expected_instance_id=owner.instance_id,
+    )
+    _clear_llama_server_manager_state(instance_id=owner.instance_id)
+    _release_llama_server_manager_lock(
+        LlamaServerManagerLock(paths=paths, owner=owner),
+    )
+    return terminated
 
 
 def _cleanup_stale_llama_server_manager_state() -> None:
@@ -616,7 +918,11 @@ def resolve_llama_server_role_assets(
     gguf_dir = resolve_local_model_path(DEFAULT_GGUF_MODEL_ID, models_dir=models_dir)
     model_path = (gguf_dir / DEFAULT_GGUF_FILENAME).resolve()
     base_mmproj_path = (gguf_dir / DEFAULT_GGUF_MMPROJ_FILENAME).resolve()
-    fast_mmproj_path = default_materialized_mmproj_path(base_mmproj_path, min_pixels).resolve()
+    fast_mmproj_path = resolve_derived_mmproj_output_path(
+        base_mmproj=base_mmproj_path,
+        models_dir=models_dir,
+        min_pixels=min_pixels,
+    )
 
     if normalized_role is LlamaServerRole.OCR:
         return LlamaServerRoleAssets(
@@ -827,6 +1133,14 @@ def _start_llama_server_with_timeout_budget(
             timeout_sec=ready_timeout_sec,
             process=process,
         )
+        process_identity = _load_llama_server_process_identity(process.pid)
+        if process_identity is not None:
+            _write_llama_server_manager_state(
+                spec,
+                pid=process.pid,
+                instance_id=manager_lock.owner.instance_id,
+                process_identity=process_identity,
+            )
         return process
     except Exception:
         if "process" in locals():
@@ -996,6 +1310,19 @@ def run_llama_server_launch_spec_doctor(
         issues.append(
             LlamaServerDoctorIssue(
                 code="manager_lock_timeout",
+                message=str(exc),
+            )
+        )
+        return LlamaServerDoctorReport(
+            role=spec.role,
+            profile=spec.profile,
+            launch_spec=spec,
+            issues=tuple(issues),
+        )
+    except Exception as exc:
+        issues.append(
+            LlamaServerDoctorIssue(
+                code="startup_failed",
                 message=str(exc),
             )
         )

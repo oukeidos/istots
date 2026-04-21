@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import shutil
 from pathlib import Path
 
@@ -13,6 +14,32 @@ def default_materialized_mmproj_path(base_mmproj: Path, min_pixels: int = DEFAUL
     suffix = base_mmproj.suffix
     stem = base_mmproj.name[: -len(suffix)] if suffix else base_mmproj.name
     return base_mmproj.with_name(f"{stem}.minpix{min_pixels}{suffix}")
+
+
+def _close_gguf_reader(reader: object | None) -> None:
+    if reader is None:
+        return
+    data = getattr(reader, "data", None)
+    fields = getattr(reader, "fields", None)
+    tensors = getattr(reader, "tensors", None)
+    if hasattr(fields, "clear"):
+        fields.clear()
+    if hasattr(tensors, "clear"):
+        tensors.clear()
+    gc.collect()
+    if data is None:
+        return
+    try:
+        data.flush()
+    except Exception:
+        pass
+    mmap_handle = getattr(data, "_mmap", None)
+    if mmap_handle is None:
+        return
+    try:
+        mmap_handle.close()
+    except Exception:
+        pass
 
 
 def materialize_mmproj(
@@ -57,17 +84,21 @@ def materialize_mmproj(
     shutil.copy2(base_mmproj, temp_output)
 
     reader = gguf.GGUFReader(str(temp_output), "r+")
-    field = reader.get_field(MMPROJ_MIN_PIXELS_KEY)
-    if field is None:
-        raise RuntimeError(f"metadata field missing: {MMPROJ_MIN_PIXELS_KEY}")
-    handler = reader.gguf_scalar_to_np.get(field.types[0]) if field.types else None
-    if handler is None:
-        raise RuntimeError(
-            f"unsupported GGUF field type for {MMPROJ_MIN_PIXELS_KEY}: {field.types}"
-        )
-    field.parts[field.data[0]][0] = handler(min_pixels)
-    reader.data.flush()
-    del reader
+    try:
+        field = reader.get_field(MMPROJ_MIN_PIXELS_KEY)
+        if field is None:
+            raise RuntimeError(f"metadata field missing: {MMPROJ_MIN_PIXELS_KEY}")
+        handler = reader.gguf_scalar_to_np.get(field.types[0]) if field.types else None
+        if handler is None:
+            raise RuntimeError(
+                f"unsupported GGUF field type for {MMPROJ_MIN_PIXELS_KEY}: {field.types}"
+            )
+        field.parts[field.data[0]][0] = handler(min_pixels)
+        reader.data.flush()
+    finally:
+        field = None
+        handler = None
+        _close_gguf_reader(reader)
 
     written_value = read_mmproj_min_pixels(temp_output, gguf_module=gguf)
     if written_value != min_pixels:
@@ -98,7 +129,11 @@ def read_mmproj_min_pixels(
         )
 
     reader = gguf.GGUFReader(str(path), "r")
-    field = reader.get_field(MMPROJ_MIN_PIXELS_KEY)
-    if field is None:
-        raise RuntimeError(f"metadata field missing: {MMPROJ_MIN_PIXELS_KEY}")
-    return int(field.parts[field.data[0]][0])
+    try:
+        field = reader.get_field(MMPROJ_MIN_PIXELS_KEY)
+        if field is None:
+            raise RuntimeError(f"metadata field missing: {MMPROJ_MIN_PIXELS_KEY}")
+        return int(field.parts[field.data[0]][0])
+    finally:
+        field = None
+        _close_gguf_reader(reader)

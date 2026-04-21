@@ -38,9 +38,16 @@ def test_materialize_mmproj_uses_known_good_gguf(monkeypatch, tmp_path: Path) ->
         types=["fake_uint32"],
     )
 
+    class FakeMmap:
+        def close(self) -> None:
+            calls["closed"] = calls.get("closed", 0) + 1
+
     class FakeMemMap:
+        def __init__(self) -> None:
+            self._mmap = FakeMmap()
+
         def flush(self) -> None:
-            calls["flushed"] = True
+            calls["flushed"] = calls.get("flushed", 0) + 1
 
     class FakeReader:
         gguf_scalar_to_np = {"fake_uint32": np.uint32}
@@ -72,4 +79,5 @@ def test_materialize_mmproj_uses_known_good_gguf(monkeypatch, tmp_path: Path) ->
     assert output.read_bytes() == b"base-bytes"
     assert int(field.parts[0][0]) == 32768
     assert calls["keys"] == [llama_mmproj.MMPROJ_MIN_PIXELS_KEY, llama_mmproj.MMPROJ_MIN_PIXELS_KEY]
-    assert calls["flushed"] is True
+    assert calls["flushed"] >= 1
+    assert calls["closed"] == 2

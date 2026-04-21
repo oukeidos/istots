@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -14,17 +15,26 @@ from istots.app.convert import (
     execute_convert_plan,
     plan_convert_request,
 )
-from istots.app.setup import SetupResult, execute_setup_request
+from istots.app.setup import SetupProgressEvent, SetupResult, execute_setup_request
+from istots.gui.bootstrap_windows import MANUAL_RUNTIME_VARIANTS, record_managed_runtime_validation
 from istots.gui.core import (
     GuiPrimaryAction,
     GuiRuntimeStatus,
     GuiScreenState,
     build_fast_convert_request,
-    build_setup_request,
+    build_setup_request_for_variant,
     derive_primary_action,
+    derive_setup_action,
+    format_check_summary,
+    format_runtime_facts,
+    format_setup_summary,
     probe_runtime_status,
     run_gui_doctor_check,
     suggest_output_srt_path,
+)
+from istots.runtime_prerequisites import (
+    format_missing_managed_runtime_prerequisites,
+    missing_managed_runtime_prerequisites,
 )
 from istots.resources import iter_gui_icon_png_payloads
 
@@ -73,7 +83,6 @@ class GuiThemeSpec:
     progress_chunk: str
     checkbox_text: str
     selection_background: str
-    font_stack: str
     base_font_size: int
     title_font_size: int
     primary_font_size: int
@@ -124,7 +133,6 @@ _GUI_THEMES: dict[GuiThemeId, GuiThemeSpec] = {
         progress_chunk="#d6782b",
         checkbox_text="#2f2621",
         selection_background="#d6782b",
-        font_stack='"Aptos", "Segoe UI", "SF Pro Display", "Noto Sans KR", "Malgun Gothic"',
         base_font_size=16,
         title_font_size=16,
         primary_font_size=18,
@@ -173,7 +181,6 @@ _GUI_THEMES: dict[GuiThemeId, GuiThemeSpec] = {
         progress_chunk="qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d28257, stop:1 #bf6045)",
         checkbox_text="#243038",
         selection_background="#ca7148",
-        font_stack='"Aptos", "Segoe UI", "SF Pro Display", "Noto Sans KR", "Malgun Gothic"',
         base_font_size=15,
         title_font_size=18,
         primary_font_size=20,
@@ -222,7 +229,6 @@ _GUI_THEMES: dict[GuiThemeId, GuiThemeSpec] = {
         progress_chunk="#a64027",
         checkbox_text="#241c19",
         selection_background="#b14a2c",
-        font_stack='"Aptos", "Segoe UI", "Noto Sans KR", "Malgun Gothic"',
         base_font_size=16,
         title_font_size=22,
         primary_font_size=22,
@@ -273,6 +279,13 @@ class _RunFeedback:
     visible: bool = False
 
 
+@dataclass(frozen=True)
+class _CheckFeedback:
+    state: str = "idle"
+    summary: str = "Not tested"
+    detail: str = ""
+
+
 def _ensure_qt() -> None:
     if _QT_IMPORT_ERROR is None:
         return
@@ -290,6 +303,144 @@ def _status_shape_name(state: str) -> str:
         "ok": "circle-check",
         "fail": "square-x",
     }.get(state, "ring")
+
+
+def _default_check_summary(state: str) -> str:
+    return {
+        "idle": "Not tested",
+        "busy": "Testing",
+        "ok": "Passed",
+        "fail": "Failed",
+    }.get(state, "Not tested")
+
+
+def _message_box_standard_pixmap(style, icon, size):
+    if QtWidgets is None:
+        return None
+    icon_map = {
+        QtWidgets.QMessageBox.Icon.Information: QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation,
+        QtWidgets.QMessageBox.Icon.Warning: QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning,
+        QtWidgets.QMessageBox.Icon.Critical: QtWidgets.QStyle.StandardPixmap.SP_MessageBoxCritical,
+        QtWidgets.QMessageBox.Icon.Question: QtWidgets.QStyle.StandardPixmap.SP_MessageBoxQuestion,
+    }
+    standard_pixmap = icon_map.get(icon)
+    if standard_pixmap is None:
+        return None
+    return style.standardIcon(standard_pixmap).pixmap(size, size)
+
+
+def _wrap_message_box_text(text: str, *, font, max_width_px: int) -> str:
+    if QtGui is None or not text:
+        return text
+
+    metrics = QtGui.QFontMetrics(font)
+
+    def _split_long_token(token: str) -> list[str]:
+        if not token:
+            return [token]
+        chunks: list[str] = []
+        current = ""
+        for character in token:
+            candidate = current + character
+            if current and metrics.horizontalAdvance(candidate) > max_width_px:
+                chunks.append(current)
+                current = character
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return chunks
+
+    wrapped_lines: list[str] = []
+    for paragraph in text.splitlines():
+        if not paragraph:
+            wrapped_lines.append("")
+            continue
+        current_line = ""
+        for token in paragraph.split(" "):
+            token_parts = _split_long_token(token)
+            for part in token_parts:
+                candidate = part if not current_line else f"{current_line} {part}"
+                if metrics.horizontalAdvance(candidate) <= max_width_px:
+                    current_line = candidate
+                else:
+                    if current_line:
+                        wrapped_lines.append(current_line)
+                    current_line = part
+        if current_line:
+            wrapped_lines.append(current_line)
+    return "\n".join(wrapped_lines)
+
+
+def _message_box_max_width(widget, *, detailed: bool = False) -> int:
+    if QtWidgets is None:
+        return 640 if detailed else 520
+    screen = None
+    if widget is not None:
+        handle = widget.windowHandle()
+        if handle is not None:
+            screen = handle.screen()
+        if screen is None:
+            screen = widget.screen()
+    if screen is None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            screen = app.primaryScreen()
+    available_width = screen.availableGeometry().width() if screen is not None else 920
+    if detailed:
+        return max(360, min(720, available_width - 120))
+    return max(300, min(620, available_width - 140))
+
+
+def _apply_message_box_button_widths(box) -> None:
+    if QtWidgets is None or QtGui is None:
+        return
+    metrics = QtGui.QFontMetrics(box.font())
+    for button in box.findChildren(QtWidgets.QPushButton):
+        text = button.text().replace("&", "").strip()
+        if not text:
+            continue
+        min_width = max(112, metrics.horizontalAdvance(text) + 52)
+        button.setMinimumWidth(min_width)
+        button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+
+def _split_message_box_content(
+    message: str,
+    *,
+    font,
+    max_width_px: int,
+) -> tuple[str, str, str]:
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return ("", "", "")
+    primary_text = _wrap_message_box_text(lines[0], font=font, max_width_px=max_width_px)
+    if len(lines) == 1:
+        return (primary_text, "", "")
+
+    informative_source = "\n".join(lines[1:])
+    informative_wrapped = _wrap_message_box_text(
+        informative_source,
+        font=font,
+        max_width_px=max_width_px,
+    )
+    if len(informative_wrapped.splitlines()) <= 5 and len(message) <= 320:
+        return (primary_text, informative_wrapped, "")
+
+    preview_source = "\n".join(lines[1:3])
+    informative_preview = _wrap_message_box_text(
+        preview_source,
+        font=font,
+        max_width_px=max_width_px,
+    )
+    return (
+        primary_text,
+        informative_preview,
+        message,
+    )
 
 
 def _build_gui_icon():
@@ -568,6 +719,42 @@ if QtWidgets is not None:  # pragma: no branch
                 self.text(),
             )
 
+    class _ElidedLabel(QtWidgets.QLabel):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._full_text = ""
+            self.setWordWrap(False)
+            self.setMinimumWidth(0)
+            self.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            self.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        def set_full_text(self, text: str, *, tooltip: str = "") -> None:
+            self._full_text = text
+            self.setToolTip(tooltip)
+            self._apply_elision()
+
+        def full_text(self) -> str:
+            return self._full_text
+
+        def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+            super().resizeEvent(event)
+            self._apply_elision()
+
+        def _apply_elision(self) -> None:
+            available_width = self.contentsRect().width()
+            if available_width <= 0:
+                super().setText(self._full_text)
+                return
+            text = self.fontMetrics().elidedText(
+                self._full_text,
+                QtCore.Qt.TextElideMode.ElideRight,
+                available_width,
+            )
+            super().setText(text)
+
     class TastingWindow(QtWidgets.QMainWindow):
         def __init__(self, *, theme_id: str | None = None, preview_fixture: bool = False) -> None:
             super().__init__()
@@ -586,10 +773,10 @@ if QtWidgets is not None:  # pragma: no branch
                 self._runtime_status = probe_runtime_status()
             self._screen_state = GuiScreenState(runtime_status=self._runtime_status)
             self._last_convert_result: ConvertResult | None = None
-            self._check_state = "idle"
-            self._check_detail = ""
+            self._check_feedback = _CheckFeedback()
             self._run_feedback = _RunFeedback()
             self._active_task_title = ""
+            self._closing_anyway = False
             self._convert_progress_estimator: ConvertProgressEstimator | None = None
             self._progress_timer = QtCore.QTimer(self)
             self._progress_timer.setInterval(250)
@@ -617,6 +804,34 @@ if QtWidgets is not None:  # pragma: no branch
                 app.setWindowIcon(icon)
             self.setWindowIcon(icon)
 
+        def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+            if self._thread is not None:
+                title = self._active_task_title or "Task"
+                answer = self._show_message_box(
+                    icon=QtWidgets.QMessageBox.Icon.Warning,
+                    title="Close App?",
+                    message=(
+                        f"{title} is still running.\n\n"
+                        "Do you want to close now?"
+                    ),
+                    buttons=(
+                        QtWidgets.QMessageBox.StandardButton.Close
+                        | QtWidgets.QMessageBox.StandardButton.Cancel
+                    ),
+                    default_button=QtWidgets.QMessageBox.StandardButton.Cancel,
+                    button_text_overrides={
+                        QtWidgets.QMessageBox.StandardButton.Cancel: "Stay Open",
+                        QtWidgets.QMessageBox.StandardButton.Close: "Close Now",
+                    },
+                )
+                if answer != QtWidgets.QMessageBox.StandardButton.Close:
+                    event.ignore()
+                    return
+                self._force_close_active_task_for_exit()
+                event.accept()
+                return
+            super().closeEvent(event)
+
         def _configure_palette(self) -> None:
             theme = self._theme
             self.setStyleSheet(
@@ -628,7 +843,6 @@ if QtWidgets is not None:  # pragma: no branch
                     background: transparent;
                     color: {theme.text_color};
                     font-size: {theme.base_font_size}px;
-                    font-family: {theme.font_stack};
                 }}
                 QWidget#AppRoot {{
                     background: {theme.app_background};
@@ -648,17 +862,20 @@ if QtWidgets is not None:  # pragma: no branch
                     border: 1px solid {theme.card_border};
                     border-radius: {theme.card_radius}px;
                 }}
-                QLabel#StatusDetail, QLabel#CheckDetail, QLabel#ProgressTime {{
-                    color: {theme.muted_text};
+                QFrame#SetupLane, QFrame#TestLane {{
+                    background: {theme.input_background};
+                    border: 1px solid {theme.card_border};
+                    border-radius: {theme.input_radius}px;
                 }}
-                QLabel#ReadyLabel {{
-                    font-size: {theme.title_font_size}px;
-                    font-weight: 700;
+                QLabel#LaneTitle, QLabel#ProgressTime {{
                     color: {theme.heading_color};
                 }}
-                QWidget#CheckStatusSlot {{
-                    min-width: 92px;
-                    max-width: 92px;
+                QLabel#LaneTitle {{
+                    font-size: {theme.base_font_size}px;
+                    font-weight: 700;
+                }}
+                QLabel#SetupSummary, QLabel#TestSummary {{
+                    color: {theme.muted_text};
                 }}
                 QFrame#StatusDivider {{
                     min-height: 1px;
@@ -675,6 +892,21 @@ if QtWidgets is not None:  # pragma: no branch
                 }}
                 QLineEdit:focus {{
                     border: 1px solid {theme.input_focus};
+                }}
+                QComboBox {{
+                    background: {theme.input_background};
+                    border: 1px solid {theme.input_border};
+                    border-radius: {theme.input_radius}px;
+                    padding: 10px 14px;
+                    min-width: 138px;
+                    selection-background-color: {theme.selection_background};
+                }}
+                QComboBox:focus {{
+                    border: 1px solid {theme.input_focus};
+                }}
+                QComboBox::drop-down {{
+                    border: 0;
+                    width: 26px;
                 }}
                 QPushButton {{
                     border: 0;
@@ -738,6 +970,29 @@ if QtWidgets is not None:  # pragma: no branch
                     border-radius: {theme.progress_height // 2}px;
                     background: #b94a2f;
                 }}
+                QMenu {{
+                    background: {theme.card_background};
+                    color: {theme.text_color};
+                    border: 1px solid {theme.card_border};
+                    padding: 6px;
+                }}
+                QMenu::item {{
+                    padding: 8px 16px;
+                    border-radius: 8px;
+                    background: transparent;
+                }}
+                QMenu::item:selected {{
+                    background: {theme.secondary_button_hover};
+                    color: {theme.heading_color};
+                }}
+                QMenu::item:disabled {{
+                    color: {theme.muted_text};
+                }}
+                QMenu::separator {{
+                    height: 1px;
+                    margin: 4px 8px;
+                    background: {theme.divider};
+                }}
                 """
             )
 
@@ -761,38 +1016,51 @@ if QtWidgets is not None:  # pragma: no branch
             self.status_card.setSizePolicy(status_policy)
             self._status_layout = QtWidgets.QVBoxLayout(self.status_card)
             self._set_layout_margins(self._status_layout, theme.status_padding)
-            self._status_layout.setSpacing(theme.card_spacing)
+            self._status_layout.setSpacing(max(8, theme.card_spacing - 4))
 
-            ready_row = QtWidgets.QHBoxLayout()
-            ready_row.setSpacing(10)
+            self.setup_lane = QtWidgets.QFrame(objectName="SetupLane")
+            setup_lane_layout = QtWidgets.QHBoxLayout(self.setup_lane)
+            self._set_layout_margins(setup_lane_layout, (14, 12, 14, 12))
+            setup_lane_layout.setSpacing(10)
             self.ready_dot = _StatusGlyph("setup")
-            self.ready_label = QtWidgets.QLabel(objectName="ReadyLabel")
-            self.status_detail = QtWidgets.QLabel(objectName="StatusDetail")
-            self.status_detail.setWordWrap(True)
-            ready_row.addWidget(self.ready_dot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-            ready_row.addWidget(self.ready_label, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-            ready_row.addStretch(1)
+            self.setup_label = QtWidgets.QLabel("Setup", objectName="LaneTitle")
+            self.setup_summary = _ElidedLabel(objectName="SetupSummary")
+            setup_lane_layout.addWidget(self.ready_dot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            setup_lane_layout.addWidget(self.setup_label, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            setup_lane_layout.addWidget(self.setup_summary, 1, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
             divider = QtWidgets.QFrame(objectName="StatusDivider")
             divider.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
 
-            check_row = QtWidgets.QHBoxLayout()
-            check_row.setSpacing(12)
-
-            check_slot = QtWidgets.QWidget(objectName="CheckStatusSlot")
-            check_slot.setFixedWidth(92)
-            check_slot_layout = QtWidgets.QHBoxLayout(check_slot)
-            check_slot_layout.setContentsMargins(0, 0, 0, 0)
-            check_slot_layout.setSpacing(10)
-            self.check_dot = _StatusGlyph("idle")
-            self.check_detail = QtWidgets.QLabel(objectName="CheckDetail")
-            self.check_detail.setFixedWidth(66)
-            self.check_detail.setAlignment(
-                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+            self.setup_button = QtWidgets.QPushButton()
+            self.setup_button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
             )
-            check_slot_layout.addWidget(self.check_dot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-            check_slot_layout.addWidget(self.check_detail, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            self.setup_button.clicked.connect(self._handle_setup_action)
+            self.runtime_variant_combo = QtWidgets.QComboBox()
+            self.runtime_variant_combo.setToolTip("Setup runtime target")
+            self.runtime_variant_combo.setAccessibleName("Runtime target")
+            self.runtime_variant_combo.addItem("Auto", "auto")
+            for variant_id in MANUAL_RUNTIME_VARIANTS:
+                self.runtime_variant_combo.addItem(variant_id, variant_id)
+            self.runtime_variant_combo.currentIndexChanged.connect(self._on_runtime_variant_changed)
+            self.runtime_variant_combo.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            if os.name != "nt":
+                self.runtime_variant_combo.hide()
+            setup_lane_layout.addWidget(self.runtime_variant_combo, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            setup_lane_layout.addWidget(self.setup_button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
+            self.test_lane = QtWidgets.QFrame(objectName="TestLane")
+            test_lane_layout = QtWidgets.QHBoxLayout(self.test_lane)
+            self._set_layout_margins(test_lane_layout, (14, 12, 14, 12))
+            test_lane_layout.setSpacing(10)
+            self.check_dot = _StatusGlyph("idle")
+            self.test_label = QtWidgets.QLabel("Test", objectName="LaneTitle")
+            self.test_summary = _ElidedLabel(objectName="TestSummary")
             self.refresh_button = QtWidgets.QPushButton("Test")
             self.refresh_button.setSizePolicy(
                 QtWidgets.QSizePolicy.Policy.Fixed,
@@ -800,14 +1068,14 @@ if QtWidgets is not None:  # pragma: no branch
             )
             self.refresh_button.setFixedWidth(self.refresh_button.sizeHint().width())
             self.refresh_button.clicked.connect(self._start_runtime_check)
-            check_row.addWidget(check_slot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-            check_row.addWidget(self.refresh_button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-            check_row.addStretch(1)
+            test_lane_layout.addWidget(self.check_dot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            test_lane_layout.addWidget(self.test_label, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            test_lane_layout.addWidget(self.test_summary, 1, QtCore.Qt.AlignmentFlag.AlignVCenter)
+            test_lane_layout.addWidget(self.refresh_button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
 
-            self._status_layout.addLayout(ready_row)
-            self._status_layout.addWidget(self.status_detail)
+            self._status_layout.addWidget(self.setup_lane)
             self._status_layout.addWidget(divider)
-            self._status_layout.addLayout(check_row)
+            self._status_layout.addWidget(self.test_lane)
             self._outer_layout.addWidget(self.status_card)
 
             self.fields_card = QtWidgets.QFrame(objectName="FieldCard")
@@ -875,6 +1143,10 @@ if QtWidgets is not None:  # pragma: no branch
             self.primary_button = QtWidgets.QPushButton(objectName="PrimaryButton")
             self.primary_button.setObjectName("PrimaryButton")
             self.primary_button.setMinimumHeight(max(56, self.primary_button.sizeHint().height()))
+            self.primary_button.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
             self.primary_button.clicked.connect(self._handle_primary_action)
             self.progress = QtWidgets.QProgressBar()
             self.progress.setTextVisible(False)
@@ -898,7 +1170,7 @@ if QtWidgets is not None:  # pragma: no branch
                 + theme.progress_height
                 + progress_detail_height
                 + progress_time_height
-                + (theme.action_spacing * 3)
+                + (theme.action_spacing * 2)
                 + theme.action_padding[1]
                 + theme.action_padding[3]
             )
@@ -962,8 +1234,7 @@ if QtWidgets is not None:  # pragma: no branch
                 output_srt=Path("episode_07 (2).srt"),
                 enable_furigana_mask=True,
             )
-            self._check_state = "ok"
-            self._check_detail = "OK"
+            self._check_feedback = _CheckFeedback(state="ok", summary="Passed", detail="Runtime test passed.")
             self._set_run_feedback(
                 state="running",
                 detail="OCR 322/518 62%",
@@ -1001,6 +1272,14 @@ if QtWidgets is not None:  # pragma: no branch
             self._run_feedback = _RunFeedback()
             self._apply_run_feedback()
 
+        def _clear_setup_progress(self) -> None:
+            self.progress.hide()
+            self.progress_detail.clear()
+            self.progress_detail.hide()
+            self.progress_time.clear()
+            self.progress_time.hide()
+            self._set_progress_state("running")
+
         def _apply_run_feedback(self) -> None:
             feedback = self._run_feedback
             if not feedback.visible:
@@ -1030,6 +1309,13 @@ if QtWidgets is not None:  # pragma: no branch
                 enable_furigana_mask=self._screen_state.enable_furigana_mask,
             )
             self._refresh_ui()
+
+        def _selected_runtime_variant(self) -> str:
+            value = self.runtime_variant_combo.currentData()
+            return str(value) if value else "auto"
+
+        def _on_runtime_variant_changed(self) -> None:
+            self._apply_runtime_facts(self._runtime_status)
 
         def _start_runtime_check(self) -> None:
             self._set_check_feedback("busy", "")
@@ -1091,21 +1377,102 @@ if QtWidgets is not None:  # pragma: no branch
             )
             self._refresh_ui()
 
+        def _handle_setup_action(self) -> None:
+            action = derive_setup_action(self._screen_state)
+            if not action.enabled:
+                return
+            install_prerequisites = self._confirm_setup_prerequisites()
+            if install_prerequisites is None:
+                return
+            self._start_task(
+                title="Setup",
+                fn=lambda emit, install_prerequisites=install_prerequisites: self._run_setup_task(
+                    emit,
+                    install_prerequisites=install_prerequisites,
+                ),
+                on_success=self._on_setup_finished,
+                on_progress=self._on_setup_progress_event,
+            )
+
+        def _confirm_setup_prerequisites(self) -> bool | None:
+            if os.name != "nt":
+                return False
+            missing = missing_managed_runtime_prerequisites()
+            if not missing:
+                return False
+            answer = self._show_message_box(
+                icon=QtWidgets.QMessageBox.Icon.Warning,
+                title="One More Step",
+                message=(
+                    "Windows needs Microsoft Visual C++ (x64) for this runtime.\n\n"
+                    + format_missing_managed_runtime_prerequisites(missing)
+                ),
+                buttons=QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.Cancel,
+                default_button=QtWidgets.QMessageBox.StandardButton.Yes,
+                button_text_overrides={
+                    QtWidgets.QMessageBox.StandardButton.Yes: "Install Now",
+                    QtWidgets.QMessageBox.StandardButton.Cancel: "Not Now",
+                },
+            )
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return None
+            return True
+
+        def _run_setup_task(self, emit, *, install_prerequisites: bool = False) -> SetupResult:
+            request = build_setup_request_for_variant(
+                runtime_variant=self._selected_runtime_variant(),
+                install_prerequisites=install_prerequisites,
+            )
+            result = execute_setup_request(
+                request,
+                progress_callback=emit,
+                emit_completion_event=False,
+            )
+            emit(
+                SetupProgressEvent(
+                    phase="runtime_check",
+                    headline="Validate Setup",
+                    detail="Running runtime test",
+                    fraction=0.97,
+                )
+            )
+            status = run_gui_doctor_check(models_dir=request.models_dir)
+            if not status.ready:
+                if status.runtime_source == "managed":
+                    record_managed_runtime_validation(
+                        ok=False,
+                        detail=status.detail,
+                        binary_path=status.runtime_binary_path,
+                    )
+                raise RuntimeError(status.detail)
+            if status.runtime_source == "managed":
+                record_managed_runtime_validation(
+                    ok=True,
+                    detail=status.detail,
+                    binary_path=status.runtime_binary_path,
+                )
+            emit(
+                SetupProgressEvent(
+                    phase="complete",
+                    headline="Setup Complete",
+                    detail="Runtime test passed",
+                    fraction=1.0,
+                )
+            )
+            return result
+
         def _handle_primary_action(self) -> None:
             action = derive_primary_action(self._screen_state)
             if not action.enabled:
                 return
-            if action.kind == "setup":
-                self._start_task(
-                    title="Setup",
-                    fn=lambda: execute_setup_request(build_setup_request()),
-                    on_success=self._on_setup_finished,
-                )
-                return
             try:
                 plan = self._prepare_convert_plan()
             except (ConvertArgumentError, ConvertPreparationError, RuntimeError) as exc:
-                QtWidgets.QMessageBox.critical(self, "Run", str(exc))
+                self._show_message_box(
+                    icon=QtWidgets.QMessageBox.Icon.Critical,
+                    title="Run",
+                    message=str(exc),
+                )
                 return
             if not self._confirm_overwrite(plan.existing_output_artifacts):
                 return
@@ -1128,6 +1495,7 @@ if QtWidgets is not None:  # pragma: no branch
                 input_sup=self._screen_state.input_sup,
                 output_srt=self._screen_state.output_srt,
                 enable_furigana_mask=self._screen_state.enable_furigana_mask,
+                runtime_status=self._runtime_status,
             )
             return plan_convert_request(request)
 
@@ -1136,16 +1504,20 @@ if QtWidgets is not None:  # pragma: no branch
                 return True
 
             if len(existing_paths) == 1:
-                prompt = f"Overwrite?\n{existing_paths[0].name}"
+                prompt = f"This file already exists.\n\n{existing_paths[0].name}"
             else:
-                prompt = "Overwrite?\n" + "\n".join(path.name for path in existing_paths)
+                prompt = "These files already exist.\n\n" + "\n".join(path.name for path in existing_paths)
 
-            answer = QtWidgets.QMessageBox.question(
-                self,
-                "Overwrite",
-                prompt,
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                QtWidgets.QMessageBox.StandardButton.No,
+            answer = self._show_message_box(
+                icon=QtWidgets.QMessageBox.Icon.Warning,
+                title="Replace File?",
+                message=prompt,
+                buttons=QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                default_button=QtWidgets.QMessageBox.StandardButton.No,
+                button_text_overrides={
+                    QtWidgets.QMessageBox.StandardButton.Yes: "Replace",
+                    QtWidgets.QMessageBox.StandardButton.No: "Keep",
+                },
             )
             return answer == QtWidgets.QMessageBox.StandardButton.Yes
 
@@ -1169,6 +1541,15 @@ if QtWidgets is not None:  # pragma: no branch
             if title == "Run":
                 self._progress_timer.start()
                 self._refresh_convert_progress_display()
+            elif title == "Setup":
+                self._clear_run_feedback()
+                self._set_progress_state("running")
+                self.progress.show()
+                self.progress.setRange(0, 1000)
+                self.progress.setValue(0)
+                self.progress_detail.setText("Preparing setup")
+                self.progress_detail.show()
+                self.progress_time.hide()
             else:
                 self.progress.show()
                 self.progress.setRange(0, 0)
@@ -1199,6 +1580,8 @@ if QtWidgets is not None:  # pragma: no branch
 
         def _set_busy(self, busy: bool) -> None:
             self.primary_button.setDisabled(busy)
+            self.setup_button.setDisabled(busy)
+            self.runtime_variant_combo.setDisabled(busy)
             self.input_edit.setDisabled(busy)
             self.output_edit.setDisabled(busy)
             self.furigana_checkbox.setDisabled(busy)
@@ -1213,9 +1596,7 @@ if QtWidgets is not None:  # pragma: no branch
                 self._clear_convert_progress()
                 self._apply_run_feedback()
             else:
-                self.progress.hide()
-                self.progress_detail.hide()
-                self.progress_time.hide()
+                self._clear_setup_progress()
                 if self._run_feedback.visible:
                     self._apply_run_feedback()
             self._active_task_title = ""
@@ -1227,6 +1608,23 @@ if QtWidgets is not None:  # pragma: no branch
         def _on_task_failed(self, title: str, message: str) -> None:
             if title == "Check":
                 self._set_check_feedback("fail", message)
+            elif title == "Setup":
+                status = probe_runtime_status()
+                self._runtime_status = replace(
+                    status,
+                    ready=False,
+                    headline="Setup",
+                    detail=message,
+                    missing_items=status.missing_items or ("runtime-validation",),
+                )
+                self._screen_state = GuiScreenState(
+                    runtime_status=self._runtime_status,
+                    input_sup=self._screen_state.input_sup,
+                    output_srt=self._screen_state.output_srt,
+                    enable_furigana_mask=self._screen_state.enable_furigana_mask,
+                )
+                self._set_check_feedback("fail", message)
+                self._clear_setup_progress()
             elif title == "Run":
                 elapsed = ""
                 value = 0
@@ -1240,7 +1638,48 @@ if QtWidgets is not None:  # pragma: no branch
                     time_text=elapsed,
                     value=value,
                 )
-            QtWidgets.QMessageBox.critical(self, title, message)
+            if not self._closing_anyway:
+                self._show_message_box(
+                    icon=QtWidgets.QMessageBox.Icon.Critical,
+                    title=title,
+                    message=message,
+                )
+
+        def _force_close_active_task_for_exit(self) -> None:
+            self._closing_anyway = True
+            self._clear_convert_progress()
+            self._clear_setup_progress()
+            try:
+                from istots import llama_runtime
+
+                llama_runtime.cleanup_managed_llama_server_for_current_process()
+            except Exception:
+                pass
+
+            thread = self._thread
+            if thread is None:
+                return
+            thread.requestInterruption()
+            thread.quit()
+            if thread.wait(250):
+                return
+            thread.terminate()
+            thread.wait(1000)
+
+        def _on_setup_progress_event(self, event: SetupProgressEvent) -> None:
+            self._set_progress_state("running")
+            self.progress.show()
+            if event.fraction is None:
+                self.progress.setRange(0, 0)
+            else:
+                self.progress.setRange(0, 1000)
+                self.progress.setValue(max(0, min(1000, int(round(event.fraction * 1000)))))
+            detail = event.headline
+            if event.detail:
+                detail = f"{detail} {event.detail}"
+            self.progress_detail.setText(detail)
+            self.progress_detail.show()
+            self.progress_time.hide()
 
         def _on_setup_finished(self, _result: SetupResult) -> None:
             self._runtime_status = probe_runtime_status()
@@ -1256,9 +1695,26 @@ if QtWidgets is not None:  # pragma: no branch
         def _on_runtime_check_finished(self, status: GuiRuntimeStatus) -> None:
             self._runtime_status = probe_runtime_status()
             if status.ready:
+                if status.runtime_source == "managed":
+                    record_managed_runtime_validation(
+                        ok=True,
+                        detail=status.detail,
+                        binary_path=status.runtime_binary_path,
+                    )
                 self._set_check_feedback("ok", status.detail)
             else:
+                if status.runtime_source == "managed":
+                    record_managed_runtime_validation(
+                        ok=False,
+                        detail=status.detail,
+                        binary_path=status.runtime_binary_path,
+                    )
                 self._set_check_feedback("fail", status.detail)
+                self._show_message_box(
+                    icon=QtWidgets.QMessageBox.Icon.Warning,
+                    title="Test",
+                    message=status.detail,
+                )
             self._screen_state = GuiScreenState(
                 runtime_status=self._runtime_status,
                 input_sup=self._screen_state.input_sup,
@@ -1330,15 +1786,21 @@ if QtWidgets is not None:  # pragma: no branch
             dot.set_state(state)
 
         def _set_check_feedback(self, state: str, detail: str) -> None:
-            self._check_state = state
-            self._check_detail = detail
+            self._check_feedback = _CheckFeedback(
+                state=state,
+                summary=_default_check_summary(state),
+                detail=detail,
+            )
 
         def _refresh_ui(self) -> None:
             action = derive_primary_action(self._screen_state)
+            setup_action = derive_setup_action(self._screen_state)
             self._apply_runtime_status(self._runtime_status)
             self._apply_check_feedback()
             self.primary_button.setText(action.label)
             self.primary_button.setEnabled(action.enabled)
+            self.setup_button.setText(setup_action.label)
+            self.setup_button.setEnabled(setup_action.enabled)
             self.input_edit.setText("" if self._screen_state.input_sup is None else str(self._screen_state.input_sup))
             self.output_edit.setText("" if self._screen_state.output_srt is None else str(self._screen_state.output_srt))
             checkbox_blocker = QtCore.QSignalBlocker(self.furigana_checkbox)
@@ -1349,17 +1811,185 @@ if QtWidgets is not None:  # pragma: no branch
 
         def _apply_runtime_status(self, status: GuiRuntimeStatus) -> None:
             self._set_dot_state(self.ready_dot, "ready" if status.ready else "setup")
-            if status.ready:
-                self.ready_label.setText("Setup Done")
-            else:
-                self.ready_label.setText("Setup Needed")
-            self.status_detail.setText(status.detail)
-            self.status_detail.setVisible(bool(status.detail))
+            self._apply_runtime_facts(status)
             self.refresh_button.setDisabled(self._thread is not None or not status.ready)
 
+        def _apply_runtime_facts(self, status: GuiRuntimeStatus) -> None:
+            summary = format_setup_summary(
+                status=status,
+                selected_variant=self._selected_runtime_variant(),
+            )
+            facts = format_runtime_facts(
+                status=status,
+                selected_variant=self._selected_runtime_variant(),
+            )
+            tooltip_parts = [part for part in (facts, status.detail) if part]
+            tooltip = "\n\n".join(tooltip_parts)
+            self.setup_summary.set_full_text(summary, tooltip=tooltip)
+            self.setup_lane.setToolTip(tooltip)
+            self.setup_label.setToolTip(tooltip)
+
         def _apply_check_feedback(self) -> None:
-            self._set_dot_state(self.check_dot, self._check_state)
-            self.check_detail.setText(self._check_detail)
+            self._set_dot_state(self.check_dot, self._check_feedback.state)
+            summary = format_check_summary(
+                state=self._check_feedback.state,
+                detail=self._check_feedback.detail,
+            )
+            tooltip = self._check_feedback.detail or summary
+            self.test_summary.set_full_text(summary, tooltip=tooltip)
+            self.test_lane.setToolTip(tooltip)
+            self.test_label.setToolTip(tooltip)
+
+        def _show_message_box(
+            self,
+            *,
+            icon: QtWidgets.QMessageBox.Icon,
+            title: str,
+            message: str,
+            buttons: QtWidgets.QMessageBox.StandardButton = QtWidgets.QMessageBox.StandardButton.Ok,
+            default_button: QtWidgets.QMessageBox.StandardButton | None = None,
+            button_text_overrides: dict[QtWidgets.QMessageBox.StandardButton, str] | None = None,
+        ) -> QtWidgets.QMessageBox.StandardButton:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            box.setObjectName("ThemedMessageBox")
+            box.setWindowFlag(QtCore.Qt.WindowType.WindowContextHelpButtonHint, False)
+            primary_text, informative_text, detailed_text = _split_message_box_content(
+                message,
+                font=box.font(),
+                max_width_px=_message_box_max_width(self, detailed=False),
+            )
+            max_text_width = _message_box_max_width(self, detailed=bool(detailed_text))
+            box.setIcon(QtWidgets.QMessageBox.Icon.NoIcon)
+            box.setText(primary_text or _wrap_message_box_text(message, font=box.font(), max_width_px=max_text_width))
+            if informative_text:
+                box.setInformativeText(informative_text)
+            if detailed_text:
+                box.setDetailedText(detailed_text)
+            box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+            box.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+            box.setStandardButtons(buttons)
+            if button_text_overrides:
+                for button_id, text in button_text_overrides.items():
+                    button = box.button(button_id)
+                    if button is not None:
+                        button.setText(text)
+            if default_button is not None:
+                box.setDefaultButton(default_button)
+            theme = self._theme
+            box.setStyleSheet(
+                f"""
+                QMessageBox#ThemedMessageBox {{
+                    background: {theme.card_background};
+                    border: 1px solid {theme.card_border};
+                }}
+                QMessageBox#ThemedMessageBox QLabel {{
+                    background: transparent;
+                    color: {theme.text_color};
+                }}
+                QMessageBox#ThemedMessageBox QLabel#qt_msgbox_label {{
+                    min-width: 0px;
+                    max-width: {max_text_width}px;
+                    color: {theme.text_color};
+                    font-size: {theme.base_font_size}px;
+                }}
+                QMessageBox#ThemedMessageBox QLabel#qt_msgbox_informativelabel {{
+                    min-width: 0px;
+                    max-width: {max_text_width}px;
+                    color: {theme.muted_text};
+                    font-size: {theme.base_font_size}px;
+                }}
+                QMessageBox#ThemedMessageBox QLabel#qt_msgboxex_icon_label {{
+                    min-width: 0px;
+                    max-width: 0px;
+                }}
+                QMessageBox#ThemedMessageBox QPushButton {{
+                    border: 0;
+                    border-radius: {theme.button_radius}px;
+                    padding: 10px 16px;
+                    font-weight: 700;
+                    background: {theme.secondary_button_background};
+                    color: {theme.secondary_button_text};
+                    min-width: 0px;
+                }}
+                QMessageBox#ThemedMessageBox QPushButton:hover {{
+                    background: {theme.secondary_button_hover};
+                }}
+                QMessageBox#ThemedMessageBox QPushButton:default {{
+                    background: {theme.primary_background};
+                    color: {theme.primary_disabled_text};
+                }}
+                QMessageBox#ThemedMessageBox QTextEdit,
+                QMessageBox#ThemedMessageBox QPlainTextEdit {{
+                    background: {theme.input_background};
+                    color: {theme.text_color};
+                    border: 1px solid {theme.input_border};
+                    border-radius: {theme.input_radius}px;
+                    selection-background-color: {theme.selection_background};
+                }}
+                QMessageBox#ThemedMessageBox QMenu {{
+                    background: {theme.card_background};
+                    color: {theme.text_color};
+                    border: 1px solid {theme.card_border};
+                    padding: 6px;
+                }}
+                QMessageBox#ThemedMessageBox QMenu::item {{
+                    padding: 8px 16px;
+                    border-radius: 8px;
+                    background: transparent;
+                }}
+                QMessageBox#ThemedMessageBox QMenu::item:selected {{
+                    background: {theme.secondary_button_hover};
+                    color: {theme.heading_color};
+                }}
+                """
+            )
+            box.layout().setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
+            grid_layout = box.layout() if isinstance(box.layout(), QtWidgets.QGridLayout) else None
+            if grid_layout is not None:
+                grid_layout.setHorizontalSpacing(0)
+                grid_layout.setColumnMinimumWidth(0, 0)
+                grid_layout.setColumnMinimumWidth(1, 0)
+            for name in ("qt_msgbox_label", "qt_msgbox_informativelabel"):
+                label = box.findChild(QtWidgets.QLabel, name)
+                if label is None:
+                    continue
+                label.setWordWrap(True)
+                label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+                label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+                label.setMinimumWidth(min(420, max_text_width))
+                label.setMaximumWidth(max_text_width)
+                if grid_layout is not None:
+                    grid_layout.removeWidget(label)
+                    row = 0 if name == "qt_msgbox_label" else 1
+                    grid_layout.addWidget(label, row, 0, 1, 2)
+                label.adjustSize()
+            icon_label = box.findChild(QtWidgets.QLabel, "qt_msgboxex_icon_label")
+            if icon_label is not None:
+                if grid_layout is not None:
+                    grid_layout.removeWidget(icon_label)
+                icon_label.hide()
+            if grid_layout is not None:
+                grid_layout.invalidate()
+            for details_edit in box.findChildren(QtWidgets.QTextEdit):
+                details_edit.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.WidgetWidth)
+                details_edit.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+                details_edit.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                details_edit.setMinimumWidth(max_text_width)
+                details_edit.setMinimumHeight(180)
+            for details_edit in box.findChildren(QtWidgets.QPlainTextEdit):
+                details_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+                details_edit.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+                details_edit.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                details_edit.setMinimumWidth(max_text_width)
+                details_edit.setMinimumHeight(180)
+            _apply_message_box_button_widths(box)
+            box.setMinimumWidth(max_text_width + 120)
+            box.layout().activate()
+            box.adjustSize()
+            result = box.exec()
+            return QtWidgets.QMessageBox.StandardButton(int(result))
 
 
 def _compose_theme_sheet(

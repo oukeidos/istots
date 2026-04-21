@@ -14,7 +14,7 @@ This notice reflects the current repository state based on:
 
 - `pyproject.toml`
 - `uv.lock`
-- the `istots` source tree at version `0.4.0`
+- the `istots` source tree at version `0.4.2`
 
 ## First-Party Software
 
@@ -154,16 +154,20 @@ user runtime:
 
 | Component | Source | License / Terms | Notes |
 | --- | --- | --- | --- |
-| `llama-server` runtime binary | User- or host-provided binary, typically built from or obtained through the `llama.cpp` project | The license and notices for the exact upstream `llama.cpp` build you ship or install apply | Required for the primary OCR path, the fast OCR path, and the local Qwen corrector path. This repository does not vendor the binary. |
+| `llama-server` runtime binary | User-provided binary or GUI-managed install obtained from the `llama.cpp` project | The license and notices for the exact upstream `llama.cpp` build you ship, install, or download apply | Required for the primary OCR path, the fast OCR path, and the local Qwen corrector path. This repository does not vendor the binary. The Windows GUI can install a managed copy from official upstream releases. |
+| GitHub Releases API (`ggml-org/llama.cpp`) | Remote GitHub service | GitHub service terms apply | Used by the Windows GUI managed-runtime setup flow to resolve the latest official Windows runtime release metadata. |
 | Google Generative Language API (`Gemini`) | Remote Google service | Google API and model terms apply | Used only when the Gemini corrector path is enabled. No Gemini SDK or model weights are redistributed by this repository. |
 
-## Downloaded Model and Artifact Sources
+## Downloaded Runtime, Model, and Artifact Sources
 
-`istots` does not vendor the following model files in the repository. They are
-downloaded or materialized locally when the relevant setup flows are used.
+`istots` does not vendor the following runtime files, installers, model files,
+or derived artifacts in the repository. They are downloaded or materialized
+locally when the relevant setup flows are used.
 
 | Artifact | Source | License / Terms | Notes |
 | --- | --- | --- | --- |
+| Official Windows `llama.cpp` runtime archives | <https://github.com/ggml-org/llama.cpp/releases> | Review the exact upstream release terms and notices for the downloaded build | Used only by the optional Windows GUI managed-runtime setup flow. Installed locally as a managed runtime, not vendored in this repository. |
+| Microsoft Visual C++ Redistributable (x64) installer | <https://aka.ms/vs/17/release/vc_redist.x64.exe> | Microsoft license terms for the downloaded installer apply | Downloaded only when the optional Windows GUI managed-runtime setup flow is allowed to install missing Windows prerequisites. |
 | HF fallback OCR model | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5> | `apache-2.0` according to the upstream model card | Used only by the optional `--engine hf` path. |
 | Primary OCR GGUF model and base mmproj | <https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5-GGUF> | Review the upstream repository and model-card terms at the time of download | Used by the retained primary local OCR path. |
 | Derived fast OCR mmproj | Locally materialized from the official Paddle GGUF base mmproj | Inherits the applicable terms of the upstream source artifact | Created locally by `istots`; not downloaded as a separate upstream file. |
@@ -179,10 +183,12 @@ downloaded or materialized locally when the relevant setup flows are used.
   PyTorch wheels, include the applicable notices for `torch`,
   `transformers`, and any CUDA or NVIDIA runtime packages actually bundled.
 - If you distribute a package, installer, or image that bundles a
-  `llama-server` binary, you must separately include the license and notice
-  material for the exact `llama.cpp` build that you ship.
-- If you mirror or redistribute downloaded model weights or GGUF artifacts,
-  review and comply with the current upstream repository and model-card terms
+  `llama-server` binary or a GUI-managed Windows runtime archive, you must
+  separately include the license and notice material for the exact `llama.cpp`
+  build that you ship.
+- If you mirror or redistribute downloaded model weights, GGUF artifacts,
+  Windows runtime archives, or Microsoft prerequisite installers, review and
+  comply with the current upstream repository, model-card, and installer terms
   for those assets.
 - Some wheels, including `numpy`, `Pillow`, `torch`, and Qt for Python wheels,
   may contain additional upstream license files or notice material. Preserve

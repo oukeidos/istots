@@ -6,6 +6,8 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from istots.derived_assets import resolve_derived_mmproj_output_path
+
 DEFAULT_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5"
 DEFAULT_GGUF_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5-GGUF"
 DEFAULT_GGUF_FILENAME = "PaddleOCR-VL-1.5.gguf"
@@ -189,7 +191,6 @@ def _snapshot_download_to_target(
     kwargs = {
         "repo_id": repo_id,
         "local_dir": str(target),
-        "local_dir_use_symlinks": False,
         "local_files_only": False,
     }
     if revision is not None:
@@ -418,6 +419,7 @@ def setup_default_runtime_assets(
     gguf_py_base_url: str | None = None,
     gguf_source_mode: str = "auto",
     min_pixels: int = 32768,
+    derived_mmproj_output_path: Path | None = None,
 ) -> SetupArtifacts:
     from istots.llama_mmproj import materialize_mmproj
 
@@ -438,6 +440,14 @@ def setup_default_runtime_assets(
     )
     derived_mmproj_path = materialize_mmproj(
         base_mmproj=gguf_mmproj_path,
+        output_path=(
+            derived_mmproj_output_path
+            or resolve_derived_mmproj_output_path(
+                base_mmproj=gguf_mmproj_path,
+                models_dir=models_dir,
+                min_pixels=min_pixels,
+            )
+        ),
         min_pixels=min_pixels,
         support_dir=support_dir,
         gguf_py_base_url=gguf_py_base_url,
