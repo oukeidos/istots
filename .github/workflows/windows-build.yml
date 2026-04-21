@@ -1,0 +1,123 @@
+name: windows-build
+
+on:
+  push:
+    branches:
+      - main
+      - codex/windows-actions
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          architecture: "x64"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          python-version: "3.11"
+
+      - name: Sync project dependencies
+        shell: pwsh
+        run: uv sync --frozen --extra gui
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if ($null -eq $iscc) {
+            choco install innosetup --no-progress -y
+          }
+
+          $candidatePaths = @()
+          if ($env:ProgramFiles_x86) {
+            $candidatePaths += Join-Path $env:ProgramFiles_x86 'Inno Setup 6'
+          } elseif (${env:ProgramFiles(x86)}) {
+            $candidatePaths += Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6'
+          }
+          if ($env:ProgramFiles) {
+            $candidatePaths += Join-Path $env:ProgramFiles 'Inno Setup 6'
+          }
+
+          foreach ($path in $candidatePaths) {
+            if (Test-Path $path) {
+              Add-Content -Path $env:GITHUB_PATH -Value $path
+            }
+          }
+
+          Get-Command ISCC.exe
+
+      - name: Run focused Windows build tests
+        shell: pwsh
+        run: uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py
+
+      - name: Build Windows GUI bundle
+        shell: pwsh
+        run: uv run python scripts/build_windows_gui.py
+
+      - name: Build portable Windows bundle archive
+        shell: pwsh
+        run: uv run python scripts/build_windows_portable_zip.py
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: uv run python scripts/build_windows_installer.py
+
+      - name: Upload portable bundle artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64-portable
+          path: dist/windows-release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64-installer
+          path: packaging/inno/Output/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $portable = Get-Item 'dist/windows-release/*.zip'
+          $installer = Get-Item 'packaging/inno/Output/*.exe'
+          $assets = @($portable.FullName, $installer.FullName)
+
+          & gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $tag @assets --clobber
+            exit $LASTEXITCODE
+          }
+
+          & gh release create $tag @assets --verify-tag --title "IStoTS $tag" --generate-notes

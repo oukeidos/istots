@@ -7,16 +7,21 @@ import pytest
 from istots.windows_build import (
     PACKAGED_DOCUMENT_NAMES,
     build_windows_gui_command,
+    build_windows_portable_archive,
     build_windows_installer_command,
     detect_inno_setup_compiler,
+    expected_windows_portable_archive_path,
     expected_windows_installer_output_path,
     inno_setup_compiler_candidates,
     packaged_document_paths,
     project_version,
     stage_windows_gui_bundle_assets,
     verify_windows_gui_bundle,
+    verify_windows_portable_inputs,
     verify_windows_installer_inputs,
     windows_gui_build_layout,
+    windows_portable_build_layout,
+    windows_portable_output_base_filename,
     windows_installer_build_layout,
     windows_installer_output_base_filename,
     WINDOWS_INSTALLER_APP_GUID,
@@ -80,6 +85,16 @@ def test_windows_installer_build_layout_uses_expected_paths() -> None:
     assert layout.output_base_filename == "IStoTS-0.4.3-windows-x64-setup"
 
 
+def test_windows_portable_build_layout_uses_expected_paths() -> None:
+    project_root = _project_root()
+
+    layout = windows_portable_build_layout(project_root)
+
+    assert layout.gui_bundle_layout == windows_gui_build_layout(project_root)
+    assert layout.output_dir == project_root / "dist" / "windows-release"
+    assert layout.output_base_filename == "IStoTS-0.4.3-windows-x64-portable"
+
+
 def test_inno_setup_script_preserves_desktop_shortcut_choice_and_defaults_checked() -> None:
     script_text = windows_installer_build_layout(_project_root()).script_path.read_text(encoding="utf-8")
 
@@ -127,6 +142,14 @@ def test_expected_windows_installer_output_path_uses_fixed_filename() -> None:
 
     assert expected_windows_installer_output_path(layout) == (
         _project_root() / "packaging" / "inno" / "Output" / "IStoTS-0.4.3-windows-x64-setup.exe"
+    )
+
+
+def test_expected_windows_portable_archive_path_uses_fixed_filename() -> None:
+    layout = windows_portable_build_layout(_project_root())
+
+    assert expected_windows_portable_archive_path(layout) == (
+        _project_root() / "dist" / "windows-release" / "IStoTS-0.4.3-windows-x64-portable.zip"
     )
 
 
@@ -187,8 +210,40 @@ def test_stage_windows_gui_bundle_assets_copies_documents_and_icon(tmp_path: Pat
         assert (layout.docs_dir / name).read_text(encoding="utf-8") == name
 
 
+def test_build_windows_portable_archive_zips_the_bundle(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / "pyproject.toml").write_text('[project]\nversion = "0.4.3"\n', encoding="utf-8")
+    gui_layout = windows_gui_build_layout(project_root)
+    portable_layout = windows_portable_build_layout(project_root)
+
+    gui_layout.bundle_root.mkdir(parents=True, exist_ok=True)
+    gui_layout.docs_dir.mkdir(parents=True, exist_ok=True)
+    gui_layout.executable_path.write_text("exe", encoding="utf-8")
+    gui_layout.bundle_app_icon_path.write_text("ico", encoding="utf-8")
+    for name in PACKAGED_DOCUMENT_NAMES:
+        (gui_layout.docs_dir / name).write_text(name, encoding="utf-8")
+
+    output_path = build_windows_portable_archive(portable_layout)
+
+    assert output_path == expected_windows_portable_archive_path(portable_layout)
+    assert output_path.exists()
+
+
+def test_verify_windows_portable_inputs_requires_bundle(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.4.3"\n', encoding="utf-8")
+    layout = windows_portable_build_layout(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Windows GUI bundle verification failed"):
+        verify_windows_portable_inputs(layout)
+
+
 def test_windows_installer_output_base_filename_uses_fixed_contract() -> None:
     assert windows_installer_output_base_filename(version="1.2.3") == "IStoTS-1.2.3-windows-x64-setup"
+
+
+def test_windows_portable_output_base_filename_uses_fixed_contract() -> None:
+    assert windows_portable_output_base_filename(version="1.2.3") == "IStoTS-1.2.3-windows-x64-portable"
 
 
 def test_inno_setup_compiler_candidates_respect_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,3 +267,33 @@ def test_detect_inno_setup_compiler_returns_none_when_no_candidate_exists(
     monkeypatch.setattr("istots.windows_build.shutil.which", lambda _binary: None)
 
     assert detect_inno_setup_compiler() is None
+
+
+def test_windows_build_workflow_uses_supported_contract() -> None:
+    workflow_path = _project_root() / ".github" / "workflows" / "windows-build.yml"
+
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+
+    assert "runs-on: windows-latest" in workflow_text
+    assert "actions/checkout@v6" in workflow_text
+    assert "actions/setup-python@v6" in workflow_text
+    assert "astral-sh/setup-uv@v8" in workflow_text
+    assert "actions/upload-artifact@v7" in workflow_text
+    assert "uv sync --frozen --extra gui" in workflow_text
+    assert "uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py" in workflow_text
+    assert "uv run python scripts/build_windows_gui.py" in workflow_text
+    assert "uv run python scripts/build_windows_portable_zip.py" in workflow_text
+    assert "uv run python scripts/build_windows_installer.py" in workflow_text
+    assert "gh release create" in workflow_text
+    assert "gh release upload" in workflow_text
+
+
+def test_windows_build_workflow_triggers_cover_ci_and_release() -> None:
+    workflow_path = _project_root() / ".github" / "workflows" / "windows-build.yml"
+
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow_text
+    assert "pull_request:" in workflow_text
+    assert "codex/windows-actions" in workflow_text
+    assert '- "v*"' in workflow_text

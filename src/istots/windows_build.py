@@ -14,6 +14,7 @@ WINDOWS_INSTALLER_APP_ID = "{{" + WINDOWS_INSTALLER_APP_GUID + "}"
 WINDOWS_GUI_DIST_DIRNAME = "windows-gui"
 WINDOWS_GUI_WORK_RELATIVE_PATH = Path("build") / "pyinstaller" / WINDOWS_GUI_DIST_DIRNAME
 WINDOWS_GUI_DIST_RELATIVE_PATH = Path("dist") / WINDOWS_GUI_DIST_DIRNAME
+WINDOWS_RELEASE_RELATIVE_PATH = Path("dist") / "windows-release"
 WINDOWS_GUI_SPEC_RELATIVE_PATH = Path("packaging") / "pyinstaller" / "istots_gui.spec"
 WINDOWS_INNO_RELATIVE_PATH = Path("packaging") / "inno"
 WINDOWS_INNO_SCRIPT_RELATIVE_PATH = WINDOWS_INNO_RELATIVE_PATH / "istots_gui.iss"
@@ -53,6 +54,14 @@ class WindowsInstallerBuildLayout:
     project_root: Path
     gui_bundle_layout: WindowsGuiBuildLayout
     script_path: Path
+    output_dir: Path
+    output_base_filename: str
+
+
+@dataclass(frozen=True)
+class WindowsPortableBuildLayout:
+    project_root: Path
+    gui_bundle_layout: WindowsGuiBuildLayout
     output_dir: Path
     output_base_filename: str
 
@@ -100,6 +109,10 @@ def windows_installer_output_base_filename(*, version: str) -> str:
     return f"{WINDOWS_INSTALLER_APP_NAME}-{version}-windows-x64-setup"
 
 
+def windows_portable_output_base_filename(*, version: str) -> str:
+    return f"{WINDOWS_INSTALLER_APP_NAME}-{version}-windows-x64-portable"
+
+
 def windows_installer_build_layout(project_root: Path) -> WindowsInstallerBuildLayout:
     root = project_root.expanduser().resolve()
     version = project_version(root)
@@ -109,6 +122,17 @@ def windows_installer_build_layout(project_root: Path) -> WindowsInstallerBuildL
         script_path=(root / WINDOWS_INNO_SCRIPT_RELATIVE_PATH).resolve(),
         output_dir=(root / WINDOWS_INNO_OUTPUT_RELATIVE_PATH).resolve(),
         output_base_filename=windows_installer_output_base_filename(version=version),
+    )
+
+
+def windows_portable_build_layout(project_root: Path) -> WindowsPortableBuildLayout:
+    root = project_root.expanduser().resolve()
+    version = project_version(root)
+    return WindowsPortableBuildLayout(
+        project_root=root,
+        gui_bundle_layout=windows_gui_build_layout(root),
+        output_dir=(root / WINDOWS_RELEASE_RELATIVE_PATH).resolve(),
+        output_base_filename=windows_portable_output_base_filename(version=version),
     )
 
 
@@ -150,10 +174,18 @@ def expected_windows_installer_output_path(layout: WindowsInstallerBuildLayout) 
     return (layout.output_dir / f"{layout.output_base_filename}.exe").resolve()
 
 
+def expected_windows_portable_archive_path(layout: WindowsPortableBuildLayout) -> Path:
+    return (layout.output_dir / f"{layout.output_base_filename}.zip").resolve()
+
+
 def verify_windows_installer_inputs(layout: WindowsInstallerBuildLayout) -> None:
     verify_windows_gui_bundle(layout.gui_bundle_layout)
     if not layout.script_path.exists():
         raise RuntimeError(f"Windows installer script is missing: {layout.script_path}")
+
+
+def verify_windows_portable_inputs(layout: WindowsPortableBuildLayout) -> None:
+    verify_windows_gui_bundle(layout.gui_bundle_layout)
 
 
 def inno_setup_compiler_candidates() -> tuple[Path, ...]:
@@ -212,3 +244,19 @@ def stage_windows_gui_bundle_assets(layout: WindowsGuiBuildLayout) -> None:
     shutil.copy2(layout.app_icon_source_path, layout.bundle_app_icon_path)
     for source_path in packaged_document_paths(layout.project_root):
         shutil.copy2(source_path, layout.docs_dir / source_path.name)
+
+
+def build_windows_portable_archive(layout: WindowsPortableBuildLayout) -> Path:
+    verify_windows_portable_inputs(layout)
+    layout.output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = expected_windows_portable_archive_path(layout)
+    if output_path.exists():
+        output_path.unlink()
+    archive_base = str(output_path.with_suffix(""))
+    created_archive = shutil.make_archive(
+        archive_base,
+        "zip",
+        root_dir=layout.gui_bundle_layout.dist_root,
+        base_dir=layout.gui_bundle_layout.bundle_root.name,
+    )
+    return Path(created_archive).resolve()
