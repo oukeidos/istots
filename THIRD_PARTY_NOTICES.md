@@ -14,7 +14,7 @@ This notice reflects the current repository state based on:
 
 - `pyproject.toml`
 - `uv.lock`
-- the `istots` source tree at version `0.4.3`
+- the `istots` source tree at version `0.4.4`
 
 ## First-Party Software
 

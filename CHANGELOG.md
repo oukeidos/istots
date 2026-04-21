@@ -1,11 +1,13 @@
 # Changelog
 
+## [0.4.4] - 2026-04-21
+- Fixed a packaged Windows setup crash that could occur during model downloads.
+
 ## [0.4.3] - 2026-04-21
 - Started automated Windows GitHub release builds for the packaged GUI, portable zip, and installer.
 - Added a Windows desktop packaging and installer path so the GUI can be distributed more cleanly on supported systems.
 - Improved packaged-app setup and runtime behavior so environment preparation, checks, OCR work, and recovery are more reliable during everyday use.
 - Improved packaged GUI feedback by showing the app version and making long setup steps look active instead of stalled.
-- Improved packaged Windows setup stability during model downloads.
 
 ## [0.4.2] - 2026-04-21
 - Made the Windows desktop app much easier to set up by guiding users through downloading the needed local runtime, checking required system components, and confirming that setup finished successfully.
