@@ -10,6 +10,8 @@ def test_gui_main_calls_freeze_support_before_launch(monkeypatch) -> None:
     seen: list[str] = []
 
     monkeypatch.setattr(gui_main, "ensure_standard_streams", lambda: seen.append("stdio"))
+    monkeypatch.setattr(gui_main, "install_faulthandler_trace", lambda: seen.append("faulthandler"))
+    monkeypatch.setattr(gui_main, "append_runtime_diagnostic_event", lambda *args, **kwargs: seen.append(args[0]))
     monkeypatch.setattr(gui_main.multiprocessing, "freeze_support", lambda: seen.append("freeze"))
     monkeypatch.setattr(
         gui_main.llama_runtime,
@@ -19,12 +21,24 @@ def test_gui_main_calls_freeze_support_before_launch(monkeypatch) -> None:
     monkeypatch.setattr(gui_main, "launch_gui", lambda theme_id: seen.append(theme_id) or 0)
 
     assert gui_main.main(["--theme", "poster"]) == 0
-    assert seen == ["stdio", "freeze", "cleanup", "poster"]
+    assert seen == [
+        "stdio",
+        "faulthandler",
+        "freeze",
+        "gui_main_start",
+        "gui_runtime_cleanup_start",
+        "cleanup",
+        "gui_launch_start",
+        "poster",
+        "gui_launch_exit",
+    ]
 
 
 def test_gui_main_recovers_when_stderr_is_missing(monkeypatch) -> None:
     monkeypatch.setattr(sys, "stderr", None)
     monkeypatch.setattr(sys, "__stderr__", None, raising=False)
+    monkeypatch.setattr(gui_main, "install_faulthandler_trace", lambda: None)
+    monkeypatch.setattr(gui_main, "append_runtime_diagnostic_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(gui_main.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(
         gui_main.llama_runtime,
@@ -56,6 +70,8 @@ def test_gui_main_skips_runtime_cleanup_for_preview_render(monkeypatch, tmp_path
     seen: list[str] = []
 
     monkeypatch.setattr(gui_main, "ensure_standard_streams", lambda: None)
+    monkeypatch.setattr(gui_main, "install_faulthandler_trace", lambda: None)
+    monkeypatch.setattr(gui_main, "append_runtime_diagnostic_event", lambda *args, **kwargs: seen.append(args[0]))
     monkeypatch.setattr(gui_main.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(
         gui_main.llama_runtime,
@@ -69,4 +85,9 @@ def test_gui_main_skips_runtime_cleanup_for_preview_render(monkeypatch, tmp_path
     )
 
     assert gui_main.main(["--render-theme-previews", str(tmp_path)]) == 0
-    assert seen == [str(tmp_path)]
+    assert seen == [
+        "gui_main_start",
+        "gui_preview_render_start",
+        str(tmp_path),
+        "gui_preview_render_complete",
+    ]

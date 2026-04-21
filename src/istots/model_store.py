@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from istots.derived_assets import resolve_derived_mmproj_output_path
+from istots.runtime_diagnostics import append_runtime_diagnostic_event
 
 DEFAULT_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5"
 DEFAULT_GGUF_MODEL_ID = "PaddlePaddle/PaddleOCR-VL-1.5-GGUF"
@@ -281,8 +282,16 @@ def _download_url_to_path(
         url,
         headers={"User-Agent": "istots-setup"},
     )
+    append_runtime_diagnostic_event(
+        "direct_download_start",
+        url=url,
+        target=target,
+    )
+    bytes_written = 0
+    expected_bytes = 0
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
+            expected_bytes = int(response.headers.get("Content-Length") or 0)
             with temp_target.open("wb") as handle:
                 while True:
                     _invoke_cancel_callback(cancel_callback)
@@ -290,8 +299,27 @@ def _download_url_to_path(
                     if not chunk:
                         break
                     handle.write(chunk)
+                    bytes_written += len(chunk)
         _invoke_cancel_callback(cancel_callback)
         temp_target.replace(target)
+        append_runtime_diagnostic_event(
+            "direct_download_complete",
+            url=url,
+            target=target,
+            bytes_written=bytes_written,
+            expected_bytes=expected_bytes,
+        )
+    except Exception as exc:
+        append_runtime_diagnostic_event(
+            "direct_download_error",
+            url=url,
+            target=target,
+            bytes_written=bytes_written,
+            expected_bytes=expected_bytes,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
     finally:
         if temp_target.exists():
             temp_target.unlink()
@@ -357,6 +385,13 @@ def _download_pinned_bundle(
         raise RuntimeError(f"pinned setup bundle is missing a revision for {bundle.repo_id}")
 
     target = resolve_setup_download_path(model_id=bundle.repo_id, models_dir=models_dir)
+    append_runtime_diagnostic_event(
+        "pinned_bundle_prepare",
+        repo_id=bundle.repo_id,
+        revision=revision,
+        target=target,
+        force=force,
+    )
     if force and target.exists():
         _replace_invalid_pinned_bundle_target(target, bundle)
     elif target.exists():
@@ -371,11 +406,25 @@ def _download_pinned_bundle(
                 revision=revision,
                 verification="pinned",
             )
+            append_runtime_diagnostic_event(
+                "pinned_bundle_reuse",
+                repo_id=bundle.repo_id,
+                revision=revision,
+                target=target,
+            )
             return target.resolve(), resolved_paths
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage_dir = Path(tempfile.mkdtemp(prefix=f".{target.name}.download-", dir=str(target.parent))).resolve()
     try:
+        append_runtime_diagnostic_event(
+            "pinned_bundle_download_start",
+            repo_id=bundle.repo_id,
+            revision=revision,
+            target=target,
+            stage_dir=stage_dir,
+            file_count=len(bundle.file_hashes),
+        )
         _download_pinned_bundle_files(
             bundle=bundle,
             target=stage_dir,
@@ -396,7 +445,25 @@ def _download_pinned_bundle(
             relative_path: (target / relative_path).resolve()
             for relative_path in resolved_stage_paths
         }
+        append_runtime_diagnostic_event(
+            "pinned_bundle_download_complete",
+            repo_id=bundle.repo_id,
+            revision=revision,
+            target=target,
+            resolved_paths=resolved_paths,
+        )
         return target.resolve(), resolved_paths
+    except Exception as exc:
+        append_runtime_diagnostic_event(
+            "pinned_bundle_download_error",
+            repo_id=bundle.repo_id,
+            revision=revision,
+            target=target,
+            stage_dir=stage_dir,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
     finally:
         if stage_dir.exists():
             shutil.rmtree(stage_dir)
@@ -597,66 +664,140 @@ def setup_default_runtime_assets(
     if not with_hf_fallback and not is_default_pinned_hf_model(hf_model_id):
         raise RuntimeError("Custom HF fallback model ids require `with_hf_fallback=True`.")
 
-    hf_model_dir: Path | None = None
-    if with_hf_fallback:
+    append_runtime_diagnostic_event(
+        "setup_assets_begin",
+        hf_model_id=hf_model_id,
+        gguf_model_id=gguf_model_id,
+        with_hf_fallback=with_hf_fallback,
+        with_qwen_corrector=with_qwen_corrector,
+        models_dir=models_dir,
+        force=force,
+        min_pixels=min_pixels,
+    )
+    try:
+        hf_model_dir: Path | None = None
+        if with_hf_fallback:
+            _invoke_cancel_callback(cancel_callback)
+            append_runtime_diagnostic_event(
+                "setup_assets_hf_start",
+                hf_model_id=hf_model_id,
+            )
+            hf_model_dir = download_model(
+                model_id=hf_model_id,
+                models_dir=models_dir,
+                force=force,
+                cancel_callback=cancel_callback,
+            )
+            append_runtime_diagnostic_event(
+                "setup_assets_hf_complete",
+                hf_model_dir=hf_model_dir,
+            )
         _invoke_cancel_callback(cancel_callback)
-        hf_model_dir = download_model(
-            model_id=hf_model_id,
+        append_runtime_diagnostic_event(
+            "setup_assets_gguf_start",
+            gguf_model_id=gguf_model_id,
+        )
+        gguf_model_dir, gguf_model_path, gguf_mmproj_path = download_gguf_runtime_assets(
+            model_id=gguf_model_id,
             models_dir=models_dir,
             force=force,
             cancel_callback=cancel_callback,
         )
-    _invoke_cancel_callback(cancel_callback)
-    gguf_model_dir, gguf_model_path, gguf_mmproj_path = download_gguf_runtime_assets(
-        model_id=gguf_model_id,
-        models_dir=models_dir,
-        force=force,
-        cancel_callback=cancel_callback,
-    )
-    _invoke_cancel_callback(cancel_callback)
-    derived_mmproj_path = materialize_mmproj(
-        base_mmproj=gguf_mmproj_path,
-        output_path=(
+        append_runtime_diagnostic_event(
+            "setup_assets_gguf_complete",
+            gguf_model_dir=gguf_model_dir,
+            gguf_model_path=gguf_model_path,
+            gguf_mmproj_path=gguf_mmproj_path,
+        )
+        _invoke_cancel_callback(cancel_callback)
+        derived_output_path = (
             derived_mmproj_output_path
             or resolve_derived_mmproj_output_path(
                 base_mmproj=gguf_mmproj_path,
                 models_dir=models_dir,
                 min_pixels=min_pixels,
             )
-        ),
-        min_pixels=min_pixels,
-        support_dir=support_dir,
-        gguf_py_base_url=gguf_py_base_url,
-        gguf_source_mode=gguf_source_mode,
-        force=force,
-    )
-    qwen_corrector_dir: Path | None = None
-    qwen_corrector_model_path: Path | None = None
-    qwen_corrector_mmproj_path: Path | None = None
-    if with_qwen_corrector:
-        _invoke_cancel_callback(cancel_callback)
-        (
-            qwen_corrector_dir,
-            qwen_corrector_model_path,
-            qwen_corrector_mmproj_path,
-        ) = download_qwen_corrector_assets(
-            model_id=qwen_corrector_model_id,
-            model_filename=qwen_corrector_model_filename,
-            mmproj_filename=qwen_corrector_mmproj_filename,
-            models_dir=models_dir,
-            force=force,
-            cancel_callback=cancel_callback,
         )
-    return SetupArtifacts(
-        hf_model_dir=hf_model_dir,
-        gguf_model_dir=gguf_model_dir,
-        gguf_model_path=gguf_model_path,
-        gguf_mmproj_path=gguf_mmproj_path,
-        gguf_mmproj_minpix32768_path=derived_mmproj_path,
-        qwen_corrector_dir=qwen_corrector_dir,
-        qwen_corrector_model_path=qwen_corrector_model_path,
-        qwen_corrector_mmproj_path=qwen_corrector_mmproj_path,
-    )
+        append_runtime_diagnostic_event(
+            "setup_assets_mmproj_start",
+            base_mmproj=gguf_mmproj_path,
+            output_path=derived_output_path,
+            gguf_source_mode=gguf_source_mode,
+            min_pixels=min_pixels,
+        )
+        derived_mmproj_path = materialize_mmproj(
+            base_mmproj=gguf_mmproj_path,
+            output_path=derived_output_path,
+            min_pixels=min_pixels,
+            support_dir=support_dir,
+            gguf_py_base_url=gguf_py_base_url,
+            gguf_source_mode=gguf_source_mode,
+            force=force,
+        )
+        append_runtime_diagnostic_event(
+            "setup_assets_mmproj_complete",
+            derived_mmproj_path=derived_mmproj_path,
+        )
+        qwen_corrector_dir: Path | None = None
+        qwen_corrector_model_path: Path | None = None
+        qwen_corrector_mmproj_path: Path | None = None
+        if with_qwen_corrector:
+            _invoke_cancel_callback(cancel_callback)
+            append_runtime_diagnostic_event(
+                "setup_assets_qwen_start",
+                qwen_corrector_model_id=qwen_corrector_model_id,
+                qwen_corrector_model_filename=qwen_corrector_model_filename,
+                qwen_corrector_mmproj_filename=qwen_corrector_mmproj_filename,
+            )
+            (
+                qwen_corrector_dir,
+                qwen_corrector_model_path,
+                qwen_corrector_mmproj_path,
+            ) = download_qwen_corrector_assets(
+                model_id=qwen_corrector_model_id,
+                model_filename=qwen_corrector_model_filename,
+                mmproj_filename=qwen_corrector_mmproj_filename,
+                models_dir=models_dir,
+                force=force,
+                cancel_callback=cancel_callback,
+            )
+            append_runtime_diagnostic_event(
+                "setup_assets_qwen_complete",
+                qwen_corrector_dir=qwen_corrector_dir,
+                qwen_corrector_model_path=qwen_corrector_model_path,
+                qwen_corrector_mmproj_path=qwen_corrector_mmproj_path,
+            )
+        artifacts = SetupArtifacts(
+            hf_model_dir=hf_model_dir,
+            gguf_model_dir=gguf_model_dir,
+            gguf_model_path=gguf_model_path,
+            gguf_mmproj_path=gguf_mmproj_path,
+            gguf_mmproj_minpix32768_path=derived_mmproj_path,
+            qwen_corrector_dir=qwen_corrector_dir,
+            qwen_corrector_model_path=qwen_corrector_model_path,
+            qwen_corrector_mmproj_path=qwen_corrector_mmproj_path,
+        )
+        append_runtime_diagnostic_event(
+            "setup_assets_complete",
+            artifacts={
+                "hf_model_dir": artifacts.hf_model_dir,
+                "gguf_model_dir": artifacts.gguf_model_dir,
+                "gguf_model_path": artifacts.gguf_model_path,
+                "gguf_mmproj_path": artifacts.gguf_mmproj_path,
+                "gguf_mmproj_minpix32768_path": artifacts.gguf_mmproj_minpix32768_path,
+                "qwen_corrector_dir": artifacts.qwen_corrector_dir,
+                "qwen_corrector_model_path": artifacts.qwen_corrector_model_path,
+                "qwen_corrector_mmproj_path": artifacts.qwen_corrector_mmproj_path,
+            },
+        )
+        return artifacts
+    except Exception as exc:
+        append_runtime_diagnostic_event(
+            "setup_assets_error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
 
 
 def _invoke_cancel_callback(cancel_callback: Callable[[], None] | None) -> None:

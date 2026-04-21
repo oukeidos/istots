@@ -103,6 +103,61 @@ def test_execute_setup_request_bootstraps_managed_runtime_and_emits_progress(
     assert [event.phase for event in progress_events][-2:] == ["model_setup", "complete"]
 
 
+def test_execute_setup_request_records_diagnostic_events(monkeypatch, tmp_path: Path) -> None:
+    artifacts = SimpleNamespace(
+        hf_model_dir=None,
+        gguf_model_dir=tmp_path / "gguf_model",
+        gguf_model_path=tmp_path / "gguf_model" / "custom.gguf",
+        gguf_mmproj_path=tmp_path / "gguf_model" / "custom-mmproj.gguf",
+        gguf_mmproj_minpix32768_path=tmp_path / "derived" / "custom-mmproj.minpix32768.gguf",
+        qwen_corrector_dir=None,
+        qwen_corrector_model_path=None,
+        qwen_corrector_mmproj_path=None,
+    )
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        "istots.app.setup.append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+    monkeypatch.setattr(
+        "istots.app.setup.model_store.setup_default_runtime_assets",
+        lambda **kwargs: artifacts,
+    )
+
+    result = execute_setup_request(SetupRequest(models_dir=tmp_path / "models"))
+
+    assert result.artifacts is artifacts
+    assert seen == [
+        "setup_request_start",
+        "setup_model_assets_start",
+        "setup_model_assets_complete",
+        "setup_request_complete",
+    ]
+
+
+def test_execute_setup_request_records_diagnostic_error(monkeypatch, tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        "istots.app.setup.append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+    monkeypatch.setattr(
+        "istots.app.setup.model_store.setup_default_runtime_assets",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(Exception, match="boom"):
+        execute_setup_request(SetupRequest(models_dir=tmp_path / "models"))
+
+    assert seen == [
+        "setup_request_start",
+        "setup_model_assets_start",
+        "setup_request_error",
+    ]
+
+
 def test_execute_setup_request_can_skip_completion_event(monkeypatch, tmp_path: Path) -> None:
     artifacts = SimpleNamespace(
         hf_model_dir=None,

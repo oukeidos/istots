@@ -680,3 +680,88 @@ def test_setup_default_runtime_assets_optionally_downloads_qwen_corrector(monkey
 def test_setup_default_runtime_assets_rejects_custom_hf_model_without_opt_in() -> None:
     with pytest.raises(RuntimeError, match="require `with_hf_fallback=True`"):
         model_store.setup_default_runtime_assets(hf_model_id="org/model")
+
+
+def test_download_url_to_path_records_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    class _Response:
+        headers = {"Content-Length": "4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            if hasattr(self, "_done"):
+                return b""
+            self._done = True
+            return b"data"
+
+    monkeypatch.setattr(
+        model_store.urllib.request,
+        "urlopen",
+        lambda request, timeout=300: _Response(),
+    )
+    monkeypatch.setattr(
+        model_store,
+        "append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+
+    target = tmp_path / "payload.bin"
+    model_store._download_url_to_path(
+        url="https://example.invalid/payload.bin",
+        target=target,
+    )
+
+    assert target.read_bytes() == b"data"
+    assert seen == [
+        "direct_download_start",
+        "direct_download_complete",
+    ]
+
+
+def test_setup_default_runtime_assets_records_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    gguf_dir = tmp_path / "gguf_model"
+    gguf_model_path = gguf_dir / model_store.DEFAULT_GGUF_FILENAME
+    gguf_mmproj_path = gguf_dir / model_store.DEFAULT_GGUF_MMPROJ_FILENAME
+    derived_path = resolve_derived_mmproj_output_path(
+        base_mmproj=gguf_mmproj_path,
+        models_dir=tmp_path,
+        min_pixels=32768,
+    )
+    seen: list[str] = []
+
+    monkeypatch.setattr(
+        model_store,
+        "append_runtime_diagnostic_event",
+        lambda event, **kwargs: seen.append(event),
+    )
+    monkeypatch.setattr(
+        model_store,
+        "download_gguf_runtime_assets",
+        lambda model_id=model_store.DEFAULT_GGUF_MODEL_ID, models_dir=None, force=False, cancel_callback=None: (
+            gguf_dir,
+            gguf_model_path,
+            gguf_mmproj_path,
+        ),
+    )
+    monkeypatch.setattr(
+        "istots.llama_mmproj.materialize_mmproj",
+        lambda **kwargs: derived_path,
+    )
+
+    artifacts = model_store.setup_default_runtime_assets(models_dir=tmp_path)
+
+    assert artifacts.gguf_mmproj_minpix32768_path == derived_path
+    assert seen == [
+        "setup_assets_begin",
+        "setup_assets_gguf_start",
+        "setup_assets_gguf_complete",
+        "setup_assets_mmproj_start",
+        "setup_assets_mmproj_complete",
+        "setup_assets_complete",
+    ]
