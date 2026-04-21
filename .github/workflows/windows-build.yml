@@ -73,7 +73,9 @@ jobs:
 
       - name: Run focused Windows build tests
         shell: pwsh
-        run: uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          uv run pytest --basetemp build/pytest-temp tests/test_windows_build.py
 
       - name: Build Windows GUI bundle
         shell: pwsh
