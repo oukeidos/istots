@@ -7,6 +7,7 @@ import pytest
 
 from istots.app.convert import (
     ConvertArgumentError,
+    ConvertPreparationError,
     ConvertProgressEstimator,
     ConvertProgressEvent,
     ConvertRequest,
@@ -121,6 +122,51 @@ def test_plan_convert_request_resolves_default_qwen_corrector_assets(monkeypatch
     assert plan.corrector_config is not None
     assert plan.corrector_config.local_model_path == model_path
     assert plan.corrector_config.local_mmproj_path == mmproj_path
+
+
+def test_plan_convert_request_preflights_malformed_gemini_auth_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr("istots.gemini_auth.get_stored_gemini_api_key", lambda: (None, None))
+
+    with pytest.raises(ConvertPreparationError) as excinfo:
+        plan_convert_request(
+            ConvertRequest(
+                input_sup=input_sup,
+                output_srt=output_srt,
+                corrector="gemini",
+            )
+        )
+
+    message = str(excinfo.value)
+    assert "invalid Gemini auth config" in message
+    assert str(config_path) in message
+    assert "Expecting property name enclosed in double quotes" not in message
+
+
+def test_plan_convert_request_preflights_missing_gemini_api_key(monkeypatch, tmp_path: Path) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    monkeypatch.setattr("istots.gemini_auth.get_stored_gemini_api_key", lambda: (None, None))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    with pytest.raises(ConvertPreparationError, match="missing Gemini API key"):
+        plan_convert_request(
+            ConvertRequest(
+                input_sup=input_sup,
+                output_srt=output_srt,
+                corrector="gemini",
+            )
+        )
 
 
 def test_plan_convert_request_rejects_duplicate_paths(tmp_path: Path) -> None:

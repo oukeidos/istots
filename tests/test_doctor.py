@@ -153,3 +153,66 @@ def test_run_workflow_smoke_check_keeps_temp_artifacts_on_failure(monkeypatch, t
     assert output_dir.is_dir()
     assert (output_dir / "doctor.srt").read_text(encoding="utf-8") == "partial\n"
     assert (output_dir / "doctor.detector.jsonl").read_text(encoding="utf-8") == "[]\n"
+
+
+def test_run_gemini_auth_doctor_reports_invalid_auth_config(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "bad-auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+
+    result = doctor.run_gemini_auth_doctor()
+
+    assert result.ok is False
+    assert len(result.checks) == 1
+    check = result.checks[0]
+    assert check.name == "auth:gemini"
+    assert check.issues[0].code == "invalid_config"
+    assert "invalid Gemini auth config" in check.issues[0].message
+    assert str(config_path) in check.issues[0].message
+    assert "Expecting property name enclosed in double quotes" not in check.issues[0].message
+    assert dict(check.details) == {"config_path": str(config_path)}
+
+
+def test_run_workflow_doctor_skips_smoke_when_gemini_auth_check_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    smoke_called = False
+
+    def fake_run_gemini_auth_doctor(*, api_key_env: str = "GEMINI_API_KEY"):
+        return doctor.DoctorSuiteResult(
+            category="auth",
+            target="gemini",
+            checks=(
+                doctor.DoctorCheckResult(
+                    name="auth:gemini",
+                    ok=False,
+                    issues=(
+                        llama_runtime.LlamaServerDoctorIssue(
+                            code="invalid_config",
+                            message="invalid Gemini auth config at /tmp/auth.json. Fix or remove the file, then rerun.",
+                        ),
+                    ),
+                    details=(("config_path", "/tmp/auth.json"),),
+                ),
+            ),
+        )
+
+    def fake_run_workflow_smoke_check(**kwargs):
+        nonlocal smoke_called
+        smoke_called = True
+        return doctor.DoctorCheckResult(name="workflow:smoke", ok=True)
+
+    monkeypatch.setattr(doctor, "run_gemini_auth_doctor", fake_run_gemini_auth_doctor)
+    monkeypatch.setattr(doctor, "_run_workflow_smoke_check", fake_run_workflow_smoke_check)
+
+    result = doctor.run_workflow_doctor(
+        workflow="corrector-gemini",
+        input_sup=input_sup,
+    )
+
+    assert smoke_called is False
+    assert [check.name for check in result.checks] == ["workflow:input-sup", "auth:gemini"]
+    assert result.checks[1].ok is False

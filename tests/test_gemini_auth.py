@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from istots import gemini_auth
+from istots.gemini_auth import GeminiAuthConfigError
 
 
 class _FakeKeyringBackend:
@@ -112,3 +113,32 @@ def test_set_gemini_api_key_raises_without_usable_keyring(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="usable keyring backend is not available"):
         gemini_auth.set_gemini_api_key("secret-key")
+
+
+def test_get_configured_gemini_env_file_rejects_malformed_auth_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+
+    with pytest.raises(GeminiAuthConfigError) as excinfo:
+        gemini_auth.get_configured_gemini_env_file()
+
+    message = str(excinfo.value)
+    assert "invalid Gemini auth config" in message
+    assert str(config_path) in message
+    assert "Expecting property name enclosed in double quotes" not in message
+
+
+def test_get_configured_gemini_env_file_rejects_non_object_auth_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("[]", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+
+    with pytest.raises(GeminiAuthConfigError, match="invalid Gemini auth config"):
+        gemini_auth.get_configured_gemini_env_file()

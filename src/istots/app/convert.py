@@ -8,6 +8,7 @@ from typing import Callable
 
 from istots import model_store, pipeline
 from istots.corrector import CorrectorConfig, CorrectorMode
+from istots.gemini_auth import GeminiAuthError, require_gemini_api_key
 from istots.ocr import PaddleOCRVLRuntimeOverrides, Qwen35RuntimeOverrides
 
 _DEFAULT_RUNTIME_STARTUP_TIMEOUT_SEC = 120.0
@@ -735,6 +736,11 @@ def _build_corrector_config(
         mode = CorrectorMode(request.corrector)
     except ValueError as exc:
         raise ConvertArgumentError(f"unsupported corrector mode: {request.corrector!r}") from exc
+    if mode is CorrectorMode.GEMINI:
+        try:
+            require_gemini_api_key(request.corrector_api_key_env)
+        except GeminiAuthError as exc:
+            raise ConvertPreparationError(str(exc)) from exc
 
     return CorrectorConfig(
         mode=mode,

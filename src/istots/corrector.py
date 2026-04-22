@@ -21,7 +21,7 @@ from pathlib import Path
 from PIL import Image
 
 from istots.atomic_writer import atomic_write_json, atomic_write_jsonl
-from istots.gemini_auth import resolve_gemini_api_key
+from istots.gemini_auth import GeminiAuthError, require_gemini_api_key
 from istots.ocr.types import Qwen35RuntimeOverrides
 from istots.ocr.hf_backend import normalize_ocr_text
 
@@ -172,13 +172,10 @@ def request_gemini_correction(
     verbose: bool = False,
     abort_event: threading.Event | None = None,
 ) -> tuple[str, str, str]:
-    api_key, _ = resolve_gemini_api_key(config.api_key_env)
-    if not api_key:
-        raise GeminiConfigurationError(
-            "missing Gemini API key. "
-            f"Run `istots auth gemini set`, configure `istots auth gemini env-file set PATH`, "
-            f"or export {config.api_key_env}."
-        )
+    try:
+        api_key, _ = require_gemini_api_key(config.api_key_env)
+    except GeminiAuthError as exc:
+        raise GeminiConfigurationError(str(exc)) from exc
 
     prompt, prompt_style = corrector_prompt_for_shape(config, shape)
     payload = _request_gemini_one(

@@ -3,6 +3,7 @@
 ## [0.4.6] - 2026-04-23
 - Prevents Windows setup from reusing broken leftover files and verifies downloaded runtime files before use.
 - Uses the output path entered by the user in the desktop app instead of falling back to the last suggested save path.
+- Clarifies broken Gemini credential settings in command-line checks and Gemini-assisted runs, and stops workflow checks before starting work that is already blocked.
 
 ## [0.4.5] - 2026-04-22
 - Fixed Windows packaged setup failures caused by inconsistent bundled HTTPS runtime libraries in GitHub-built artifacts.

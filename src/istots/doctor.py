@@ -12,7 +12,7 @@ from istots.corrector import (
     CorrectorMode,
     STRICT_OCR_V1_PROMPT,
 )
-from istots.gemini_auth import GeminiAuthStatus, get_gemini_auth_status
+from istots.gemini_auth import GeminiAuthConfigError, GeminiAuthStatus, get_gemini_auth_status
 from istots.llama_runtime import (
     DEFAULT_LLAMA_SERVER_HOST,
     DEFAULT_LLAMA_SERVER_STARTUP_TIMEOUT_SEC,
@@ -214,7 +214,21 @@ def run_gemini_auth_doctor(
     *,
     api_key_env: str = "GEMINI_API_KEY",
 ) -> DoctorSuiteResult:
-    status = get_gemini_auth_status(api_key_env)
+    try:
+        status = get_gemini_auth_status(api_key_env)
+    except GeminiAuthConfigError as exc:
+        check = DoctorCheckResult(
+            name="auth:gemini",
+            ok=False,
+            issues=(
+                LlamaServerDoctorIssue(
+                    code="invalid_config",
+                    message=str(exc),
+                ),
+            ),
+            details=(("config_path", str(exc.path)),),
+        )
+        return DoctorSuiteResult(category="auth", target="gemini", checks=(check,))
     issues: list[LlamaServerDoctorIssue] = []
     if status.effective_source is None:
         issues.append(
@@ -327,7 +341,7 @@ def run_workflow_doctor(
             auth_suite = run_gemini_auth_doctor(api_key_env=api_key_env)
             checks.extend(auth_suite.checks)
 
-        if not any(check.name == "workflow:smoke" and not check.ok for check in checks):
+        if all(check.ok for check in checks):
             checks.append(
                 _run_workflow_smoke_check(
                     input_sup=input_sup,

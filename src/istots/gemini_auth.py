@@ -13,6 +13,21 @@ GEMINI_KEYRING_SERVICE = "istots"
 GEMINI_KEYRING_USERNAME = "gemini-api-key"
 
 
+class GeminiAuthError(RuntimeError):
+    pass
+
+
+class GeminiAuthConfigError(GeminiAuthError):
+    def __init__(self, *, path: Path, summary: str) -> None:
+        self.path = path
+        self.summary = summary
+        super().__init__(f"{summary} at {path}. Fix or remove the file, then rerun.")
+
+
+class GeminiCredentialsMissingError(GeminiAuthError):
+    pass
+
+
 @dataclass(frozen=True)
 class GeminiAuthStatus:
     keyring_backend: str | None
@@ -34,11 +49,25 @@ def gemini_auth_config_path() -> Path:
     return DEFAULT_GEMINI_AUTH_CONFIG_PATH
 
 
+def _invalid_auth_config(path: Path, *, summary: str) -> GeminiAuthConfigError:
+    return GeminiAuthConfigError(path=path, summary=summary)
+
+
 def _load_auth_config() -> dict[str, str]:
     path = gemini_auth_config_path()
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        raise _invalid_auth_config(path, summary="invalid Gemini auth config") from exc
+    except OSError as exc:
+        raise _invalid_auth_config(path, summary="unable to read Gemini auth config") from exc
+    if not isinstance(payload, dict):
+        raise _invalid_auth_config(path, summary="invalid Gemini auth config")
+    return payload
 
 
 def _write_auth_config(payload: dict[str, str]) -> None:
@@ -51,6 +80,11 @@ def get_configured_gemini_env_file() -> Path | None:
     raw = payload.get("gemini_env_file_path")
     if not raw:
         return None
+    if not isinstance(raw, str):
+        raise _invalid_auth_config(
+            gemini_auth_config_path(),
+            summary="invalid Gemini auth config",
+        )
     return Path(raw).expanduser()
 
 
@@ -173,6 +207,21 @@ def resolve_gemini_api_key(api_key_env: str = "GEMINI_API_KEY") -> tuple[str | N
         if candidate:
             return candidate, f"environment:{key_name}"
     return None, None
+
+
+def missing_gemini_api_key_message(api_key_env: str = "GEMINI_API_KEY") -> str:
+    return (
+        "missing Gemini API key. "
+        "Run `istots auth gemini set`, configure `istots auth gemini env-file set PATH`, "
+        f"or export {api_key_env}."
+    )
+
+
+def require_gemini_api_key(api_key_env: str = "GEMINI_API_KEY") -> tuple[str, str]:
+    api_key, source = resolve_gemini_api_key(api_key_env)
+    if not api_key:
+        raise GeminiCredentialsMissingError(missing_gemini_api_key_message(api_key_env))
+    return api_key, str(source)
 
 
 def get_gemini_auth_status(api_key_env: str = "GEMINI_API_KEY") -> GeminiAuthStatus:

@@ -1343,6 +1343,7 @@ def test_run_convert_passes_gemini_corrector_config(monkeypatch, tmp_path: Path)
     output_srt = tmp_path / "output.srt"
     cache_dir = tmp_path / "cache"
     captured: dict[str, object] = {}
+    monkeypatch.setattr("istots.app.convert.require_gemini_api_key", lambda api_key_env: ("test-key", "environment:test"))
 
     monkeypatch.setattr(
         pipeline,
@@ -1392,6 +1393,7 @@ def test_run_convert_uses_recommended_default_gemini_policy(monkeypatch, tmp_pat
     input_sup.write_bytes(b"PG")
     output_srt = tmp_path / "output.srt"
     captured: dict[str, object] = {}
+    monkeypatch.setattr("istots.app.convert.require_gemini_api_key", lambda api_key_env: ("test-key", "environment:test"))
 
     monkeypatch.setattr(
         pipeline,
@@ -2168,6 +2170,157 @@ def test_run_convert_rejects_corrector_for_hf(tmp_path: Path) -> None:
         cli.run([str(input_sup), str(output_srt), "--quiet", "--engine", "hf", "--corrector", "gemini"])
 
     assert excinfo.value.code == 2
+
+
+def test_run_convert_gemini_malformed_auth_config_reports_actionable_error(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_srt = tmp_path / "output.srt"
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr("istots.gemini_auth.get_stored_gemini_api_key", lambda: (None, None))
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    caplog.set_level(logging.ERROR)
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_srt.resolve(),
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run(
+        [
+            str(input_sup),
+            str(output_srt),
+            "--quiet",
+            "--corrector",
+            "gemini",
+        ]
+    )
+
+    assert rc == 1
+    assert called is False
+    messages = [record.message for record in caplog.records]
+    assert any("invalid Gemini auth config" in message for message in messages)
+    assert any(str(config_path) in message for message in messages)
+    assert all("Expecting property name enclosed in double quotes" not in message for message in messages)
+
+
+def test_run_smoke_gemini_malformed_auth_config_reports_actionable_error(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    output_dir = tmp_path / "smoke-out"
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr("istots.gemini_auth.get_stored_gemini_api_key", lambda: (None, None))
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    caplog.set_level(logging.ERROR)
+    called = False
+
+    def fake_convert_sup_to_srt(**kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(
+            written_count=0,
+            output_srt=output_dir / "ignored.srt",
+            device_used="cpu",
+        )
+
+    monkeypatch.setattr(pipeline, "convert_sup_to_srt", fake_convert_sup_to_srt)
+
+    rc = cli.run(
+        [
+            "smoke",
+            "--input-sup",
+            str(input_sup),
+            "--output-dir",
+            str(output_dir),
+            "--quiet",
+            "--corrector",
+            "gemini",
+        ]
+    )
+
+    assert rc == 1
+    assert called is False
+    messages = [record.message for record in caplog.records]
+    assert any("invalid Gemini auth config" in message for message in messages)
+    assert any(str(config_path) in message for message in messages)
+    assert all("Expecting property name enclosed in double quotes" not in message for message in messages)
+
+
+def test_run_doctor_auth_gemini_malformed_auth_config_returns_failed_check(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    caplog.set_level(logging.ERROR)
+
+    rc = cli.run(["doctor", "auth", "gemini", "--quiet"])
+
+    assert rc == 1
+    messages = [record.message for record in caplog.records]
+    assert any("doctor failed: check=auth:gemini [invalid_config]" in message for message in messages)
+    assert any(str(config_path) in message for message in messages)
+    assert all("Expecting property name enclosed in double quotes" not in message for message in messages)
+
+
+def test_run_doctor_workflow_gemini_invalid_auth_skips_smoke(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    input_sup = tmp_path / "input.sup"
+    input_sup.write_bytes(b"PG")
+    config_path = tmp_path / "auth.json"
+    config_path.write_text("{bad json", encoding="utf-8")
+    monkeypatch.setenv("ISTOTS_AUTH_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(cli, "configure_logging", lambda verbose: None)
+    caplog.set_level(logging.ERROR)
+    smoke_called = False
+
+    def fake_run_workflow_smoke_check(**kwargs):
+        nonlocal smoke_called
+        smoke_called = True
+        return SimpleNamespace(name="workflow:smoke", ok=True, issues=(), details=())
+
+    monkeypatch.setattr("istots.doctor._run_workflow_smoke_check", fake_run_workflow_smoke_check)
+
+    rc = cli.run(
+        [
+            "doctor",
+            "workflow",
+            "corrector-gemini",
+            "--input-sup",
+            str(input_sup),
+            "--quiet",
+        ]
+    )
+
+    assert rc == 1
+    assert smoke_called is False
+    messages = [record.message for record in caplog.records]
+    assert any("doctor failed: check=auth:gemini [invalid_config]" in message for message in messages)
 
 
 def test_run_convert_rejects_qwen_local_without_paths(tmp_path: Path) -> None:
