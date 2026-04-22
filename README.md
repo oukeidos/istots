@@ -77,6 +77,66 @@ After the app is ready:
 The current Windows app is meant for easy setup and quick single-file
 conversion. If you want the full feature set, use the CLI from source.
 
+### Known Issues / Troubleshooting
+
+#### `Set Up` fails while preparing `llama.cpp`
+
+During `Set Up`, IStoTS downloads a separate Windows `llama.cpp` runtime and
+starts it once to confirm that it works. On some systems, Windows security
+features such as `Microsoft Defender Antivirus`, `Microsoft Defender
+SmartScreen`, or `Smart App Control` can delay, quarantine, or block a newly
+downloaded executable while it is being checked. When that happens, `Set Up`
+can fail near the end even though the download itself finished.
+
+There is no guaranteed in-app fix while Windows is still screening that file.
+The most practical options are:
+
+1. Click `Set Up` again. A retry is meaningful: IStoTS uses a fresh temporary
+   download directory for the runtime, and if an installed runtime fails
+   validation it removes that runtime directory before downloading and
+   extracting a new copy.
+2. If Windows Security shows that the runtime was blocked or quarantined, open
+   `Windows Security` > `Protection history`, review the event, and only if
+   you trust the file and source allow it, then run `Set Up` again. In blocked
+   or quarantined cases, Windows may require a new download after you allow
+   the file.
+3. If retries keep failing, uninstall IStoTS, choose `Yes` when the
+   uninstaller asks whether to remove downloaded managed runtime and model
+   assets under `%LOCALAPPDATA%\istots\managed\`, then install the latest
+   release again and rerun `Set Up`.
+
+#### Windows blocks install, launch, or uninstall
+
+Windows can also stop the installer, the app, or the uninstaller before it
+runs. The most common Windows features involved are `Microsoft Defender
+SmartScreen`, `Smart App Control` on Windows 11, and `Microsoft Defender
+Antivirus`.
+
+If removal or launch is blocked, try the least invasive fixes first:
+
+1. Close IStoTS before trying to uninstall or relaunch it again.
+2. If Windows Security quarantined part of the app, check `Windows Security` >
+   `Protection history` and resolve that event before trying again.
+3. If `Controlled folder access` shows `App is blocked` while IStoTS is trying
+   to write files, allow the blocked app through `Windows Security` > `Virus &
+   threat protection` > `Ransomware protection` > `Allow an app through
+   Controlled folder access`.
+4. If uninstall is stuck on Windows 11, first go to `Settings` > `Apps` >
+   `Installed apps`, try the built-in uninstall path there, and follow any
+   Windows troubleshooting steps that are offered automatically. On Windows
+   10, Microsoft's `Program Install and Uninstall` troubleshooter is the
+   documented fallback for blocked removal.
+5. On Windows 11, if `Smart App Control` is the feature doing the blocking,
+   Microsoft does not provide a per-app allow rule. In that case the built-in
+   workaround is to turn `Smart App Control` off, complete the install or
+   uninstall, and then turn it back on if it is still available on that
+   device.
+6. As a last resort, if you fully trust the release file and only need to
+   remove the app, you can temporarily turn off `Microsoft Defender
+   Antivirus` real-time protection or add a narrow exclusion. Microsoft
+   documents exclusions as safer than turning off the entire antivirus
+   feature. Turn protection back on immediately after the uninstall.
+
 ## CLI From Source
 
 If you want the full feature set, use the CLI from source. The CLI exposes the
