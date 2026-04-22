@@ -778,6 +778,8 @@ if QtWidgets is not None:  # pragma: no branch
             else:
                 self._runtime_status = probe_runtime_status()
             self._screen_state = GuiScreenState(runtime_status=self._runtime_status)
+            self._output_srt_text = ""
+            self._output_srt_user_override = False
             self._last_convert_result: ConvertResult | None = None
             self._check_feedback = _CheckFeedback()
             self._run_feedback = _RunFeedback()
@@ -1124,6 +1126,7 @@ if QtWidgets is not None:  # pragma: no branch
             output_row.setSpacing(12)
             self.output_edit = QtWidgets.QLineEdit()
             self.output_edit.setPlaceholderText("output.srt")
+            self.output_edit.textEdited.connect(self._sync_output_text_state)
             self.output_edit.setFixedHeight(line_edit_height)
             self.output_browse = QtWidgets.QPushButton()
             self.output_browse.setObjectName("IconButton")
@@ -1247,6 +1250,8 @@ if QtWidgets is not None:  # pragma: no branch
                 output_srt=Path("test.srt"),
                 enable_furigana_mask=True,
             )
+            self._output_srt_text = "test.srt"
+            self._output_srt_user_override = False
             self._check_feedback = _CheckFeedback(state="ok", summary="Passed", detail="Runtime test passed.")
             self._set_run_feedback(
                 state="running",
@@ -1354,6 +1359,19 @@ if QtWidgets is not None:  # pragma: no branch
             )
             self._refresh_ui()
 
+        def _sync_output_text_state(self, text: str) -> None:
+            if self._active_task_title != "Run":
+                self._clear_run_feedback()
+            self._output_srt_text = text
+            self._output_srt_user_override = True
+            self._screen_state = GuiScreenState(
+                runtime_status=self._runtime_status,
+                input_sup=self._screen_state.input_sup,
+                output_srt=None if text == "" else Path(text),
+                enable_furigana_mask=self.furigana_checkbox.isChecked(),
+            )
+            self._refresh_ui()
+
         def _choose_input_sup(self) -> None:
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
                 self,
@@ -1365,7 +1383,11 @@ if QtWidgets is not None:  # pragma: no branch
                 return
             self._clear_run_feedback()
             input_path = Path(path).expanduser().resolve()
-            output_path = suggest_output_srt_path(input_path)
+            if self._output_srt_user_override:
+                output_path = self._screen_state.output_srt
+            else:
+                output_path = suggest_output_srt_path(input_path)
+                self._output_srt_text = str(output_path)
             self._screen_state = GuiScreenState(
                 runtime_status=self._runtime_status,
                 input_sup=input_path,
@@ -1387,10 +1409,13 @@ if QtWidgets is not None:  # pragma: no branch
             if not path:
                 return
             self._clear_run_feedback()
+            output_path = Path(path).expanduser().resolve()
+            self._output_srt_text = str(output_path)
+            self._output_srt_user_override = True
             self._screen_state = GuiScreenState(
                 runtime_status=self._runtime_status,
                 input_sup=self._screen_state.input_sup,
-                output_srt=Path(path).expanduser().resolve(),
+                output_srt=output_path,
                 enable_furigana_mask=self.furigana_checkbox.isChecked(),
             )
             self._refresh_ui()
@@ -1826,6 +1851,7 @@ if QtWidgets is not None:  # pragma: no branch
                 output_srt=result.output_srt,
                 enable_furigana_mask=self._screen_state.enable_furigana_mask,
             )
+            self._output_srt_text = str(result.output_srt)
             self._refresh_ui()
 
         def _on_convert_progress_event(self, event: ConvertProgressEvent) -> None:
@@ -1914,8 +1940,11 @@ if QtWidgets is not None:  # pragma: no branch
             self.primary_button.setEnabled(action.enabled)
             self.setup_button.setText(setup_action.label)
             self.setup_button.setEnabled(setup_action.enabled)
-            self.input_edit.setText("" if self._screen_state.input_sup is None else str(self._screen_state.input_sup))
-            self.output_edit.setText("" if self._screen_state.output_srt is None else str(self._screen_state.output_srt))
+            desired_input_text = "" if self._screen_state.input_sup is None else str(self._screen_state.input_sup)
+            if self.input_edit.text() != desired_input_text:
+                self.input_edit.setText(desired_input_text)
+            if self.output_edit.text() != self._output_srt_text:
+                self.output_edit.setText(self._output_srt_text)
             checkbox_blocker = QtCore.QSignalBlocker(self.furigana_checkbox)
             try:
                 self.furigana_checkbox.setChecked(self._screen_state.enable_furigana_mask)

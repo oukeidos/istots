@@ -171,6 +171,123 @@ def test_tasting_window_keeps_run_and_setup_as_separate_actions() -> None:
         window.close()
 
 
+def test_tasting_window_uses_typed_output_path_for_run(monkeypatch, tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    typed_output = (tmp_path / "typed-output.srt").resolve()
+    seen_requests: list[object] = []
+    fake_plan = SimpleNamespace(
+        existing_output_artifacts=(),
+        input_sup=Path("test.sup"),
+        enable_furigana_mask=True,
+        ocr_mode="fast",
+    )
+
+    try:
+        monkeypatch.setattr(
+            "istots.gui.qt_app.plan_convert_request",
+            lambda request: seen_requests.append(request) or fake_plan,
+        )
+        monkeypatch.setattr(window, "_begin_convert_progress", lambda plan: None)
+        monkeypatch.setattr(
+            window,
+            "_start_task",
+            lambda *, title, fn, on_success, on_progress=None, cancel_event=None: None,
+        )
+
+        window._sync_output_text_state(str(typed_output))
+        window._handle_primary_action()
+
+        assert seen_requests
+        assert seen_requests[0].output_srt == typed_output
+    finally:
+        window.close()
+
+
+def test_tasting_window_clearing_output_text_disables_run() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    try:
+        assert window.primary_button.isEnabled() is True
+
+        window._sync_output_text_state("")
+
+        assert window.output_edit.text() == ""
+        assert window._screen_state.output_srt is None
+        assert window.primary_button.isEnabled() is False
+    finally:
+        window.close()
+
+
+def test_tasting_window_preserves_typed_output_when_input_changes(monkeypatch, tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    typed_output = tmp_path / "manual-output.srt"
+    chosen_input = tmp_path / "next-input.sup"
+
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *args, **kwargs: (str(chosen_input), "SUP subtitles (*.sup)"),
+        )
+
+        window._sync_output_text_state(str(typed_output))
+        window._choose_input_sup()
+
+        assert window._screen_state.input_sup == chosen_input.resolve()
+        assert window._screen_state.output_srt == typed_output
+        assert window.output_edit.text() == str(typed_output)
+    finally:
+        window.close()
+
+
+def test_tasting_window_updates_suggested_output_until_user_override(monkeypatch, tmp_path: Path) -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6 import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = TastingWindow(theme_id="warm", preview_fixture=True)
+    window.show()
+    app.processEvents()
+
+    chosen_input = tmp_path / "fresh-input.sup"
+    expected_output = chosen_input.with_suffix(".srt")
+
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *args, **kwargs: (str(chosen_input), "SUP subtitles (*.sup)"),
+        )
+
+        window._choose_input_sup()
+
+        assert window._screen_state.input_sup == chosen_input.resolve()
+        assert window._screen_state.output_srt == expected_output.resolve()
+        assert window.output_edit.text() == str(expected_output.resolve())
+    finally:
+        window.close()
+
+
 def test_tasting_window_relies_on_system_font_family_by_default() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6 import QtWidgets
