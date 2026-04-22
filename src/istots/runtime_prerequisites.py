@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -155,6 +156,14 @@ def _install_windows_vc_redist_x64(
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
+    _report_progress(
+        progress_callback,
+        phase="prereq_validate",
+        headline="Validate Prerequisite",
+        detail="Checking Microsoft signature",
+        fraction=0.08,
+    )
+    _verify_windows_vc_redist_signature(installer_path, cancel_event=cancel_event)
 
     _report_progress(
         progress_callback,
@@ -197,51 +206,184 @@ def _download_file(
     progress_callback: Callable[[str, str, str, float | None], None] | None,
     cancel_event: threading.Event | None = None,
 ) -> None:
-    if target_path.exists() and target_path.stat().st_size > 0:
-        _report_progress(
-            progress_callback,
-            phase="prereq_download",
-            headline="Download Prerequisite",
-            detail=f"Reusing {target_path.name}",
-            fraction=0.08,
-        )
-        return
+    temp_path = target_path.with_name(f"{target_path.name}.part")
+    if temp_path.exists():
+        temp_path.unlink()
+    if target_path.exists():
+        target_path.unlink()
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "istots-gui-bootstrap"},
     )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        total_bytes = int(response.headers.get("Content-Length") or 0)
-        downloaded_bytes = 0
-        with target_path.open("wb") as handle:
-            while True:
-                _raise_if_prerequisite_cancelled(cancel_event, stage="prerequisite download")
-                chunk = response.read(1024 * 128)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                downloaded_bytes += len(chunk)
-                fraction = None
-                detail = target_path.name
-                if total_bytes > 0:
-                    fraction = 0.04 + (min(downloaded_bytes / total_bytes, 1.0) * 0.04)
-                    detail = (
-                        f"{target_path.name} "
-                        f"{downloaded_bytes / (1024 * 1024):.1f}/{total_bytes / (1024 * 1024):.1f} MB"
+    total_bytes = 0
+    downloaded_bytes = 0
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            total_bytes = int(response.headers.get("Content-Length") or 0)
+            with temp_path.open("wb") as handle:
+                while True:
+                    _raise_if_prerequisite_cancelled(cancel_event, stage="prerequisite download")
+                    chunk = response.read(1024 * 128)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    fraction = None
+                    detail = target_path.name
+                    if total_bytes > 0:
+                        fraction = 0.04 + (min(downloaded_bytes / total_bytes, 1.0) * 0.04)
+                        detail = (
+                            f"{target_path.name} "
+                            f"{downloaded_bytes / (1024 * 1024):.1f}/{total_bytes / (1024 * 1024):.1f} MB"
+                        )
+                    _report_progress(
+                        progress_callback,
+                        phase="prereq_download",
+                        headline="Download Prerequisite",
+                        detail=detail,
+                        fraction=fraction,
                     )
-                _report_progress(
-                    progress_callback,
-                    phase="prereq_download",
-                    headline="Download Prerequisite",
-                    detail=detail,
-                    fraction=fraction,
-                )
+        _raise_if_prerequisite_cancelled(cancel_event, stage="prerequisite download")
+        if total_bytes > 0 and downloaded_bytes != total_bytes:
+            raise RuntimeError(
+                "runtime prerequisite download incomplete for "
+                f"{target_path.name}: expected {total_bytes} bytes, got {downloaded_bytes}"
+            )
+        temp_path.replace(target_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+
+def _verify_windows_vc_redist_signature(
+    installer_path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    signature = _read_windows_authenticode_signature_info(installer_path, cancel_event=cancel_event)
+    status = signature["status"].strip()
+    status_message = signature["status_message"].strip()
+    subject = signature["subject"].strip()
+    if status.lower() != "valid":
+        detail = status_message or "signature status was not valid"
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification failed.\n"
+            f"File: {installer_path}\n"
+            f"Status: {status or 'missing'}\n"
+            f"Detail: {detail}"
+        )
+    if "microsoft" not in subject.lower():
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification failed.\n"
+            f"File: {installer_path}\n"
+            f"Signer: {subject or 'missing'}\n"
+            "Detail: expected a Microsoft signer."
+        )
+
+
+def _read_windows_authenticode_signature_info(
+    installer_path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, str]:
+    if os.name != "nt":
+        raise RuntimeError("Windows Authenticode signature verification is available only on Windows.")
+    normalized_path = installer_path.expanduser().resolve()
+    literal_path = str(normalized_path).replace("'", "''")
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$sig = Get-AuthenticodeSignature -LiteralPath '{literal_path}'; "
+        "[pscustomobject]@{"
+        "Status = [string]$sig.Status; "
+        "StatusMessage = [string]$sig.StatusMessage; "
+        "Subject = if ($null -ne $sig.SignerCertificate) { [string]$sig.SignerCertificate.Subject } else { '' }"
+        "} | ConvertTo-Json -Compress"
+    )
+    try:
+        with sanitized_external_subprocess_runtime() as sanitized_env:
+            process = subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=sanitized_env,
+                **hidden_windows_subprocess_kwargs(),
+            )
+            completed = _wait_for_prerequisite_signature_check(process, cancel_event=cancel_event)
+    except OSError as exc:
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification could not start."
+        ) from exc
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification failed.\n"
+            f"File: {normalized_path}\n"
+            f"stdout: {(completed.stdout or '').strip()[-400:]}\n"
+            f"stderr: {(completed.stderr or '').strip()[-400:]}"
+        )
+    raw_output = (completed.stdout or "").strip()
+    if not raw_output:
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification returned no data.\n"
+            f"File: {normalized_path}"
+        )
+    try:
+        payload = json.loads(raw_output)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification returned unreadable data.\n"
+            f"File: {normalized_path}\n"
+            f"Output: {raw_output[-400:]}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            "Microsoft Visual C++ Redistributable (x64) signature verification returned an unexpected payload.\n"
+            f"File: {normalized_path}\n"
+            f"Output: {raw_output[-400:]}"
+        )
+    return {
+        "status": str(payload.get("Status", "") or ""),
+        "status_message": str(payload.get("StatusMessage", "") or ""),
+        "subject": str(payload.get("Subject", "") or ""),
+    }
 
 
 def _wait_for_prerequisite_installer(
     process: subprocess.Popen[str],
     *,
     cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    return _wait_for_prerequisite_process(
+        process,
+        cancel_event=cancel_event,
+        cancellation_message="runtime prerequisite installation cancelled",
+    )
+
+
+def _wait_for_prerequisite_signature_check(
+    process: subprocess.Popen[str],
+    *,
+    cancel_event: threading.Event | None,
+) -> subprocess.CompletedProcess[str]:
+    return _wait_for_prerequisite_process(
+        process,
+        cancel_event=cancel_event,
+        cancellation_message="runtime prerequisite signature verification cancelled",
+    )
+
+
+def _wait_for_prerequisite_process(
+    process: subprocess.Popen[str],
+    *,
+    cancel_event: threading.Event | None,
+    cancellation_message: str,
 ) -> subprocess.CompletedProcess[str]:
     while True:
         returncode = process.poll()
@@ -255,7 +397,7 @@ def _wait_for_prerequisite_installer(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-            raise RuntimeError("runtime prerequisite installation cancelled")
+            raise RuntimeError(cancellation_message)
         time.sleep(0.25)
 
 

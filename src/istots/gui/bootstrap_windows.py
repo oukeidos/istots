@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -77,6 +78,7 @@ class LlamaCppReleaseAsset:
     name: str
     download_url: str
     size_bytes: int
+    sha256_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +263,7 @@ def fetch_latest_llama_cpp_release(
             name=str(item["name"]),
             download_url=str(item["browser_download_url"]),
             size_bytes=int(item.get("size") or 0),
+            sha256_digest=_parse_release_asset_sha256_digest(item.get("digest")),
         )
         for item in payload.get("assets", ())
         if isinstance(item, dict)
@@ -319,7 +322,17 @@ def select_release_assets(
             )
         companions.append(companion)
 
-    return (primary_asset, *companions)
+    selected_assets = (primary_asset, *companions)
+    missing_digest_assets = tuple(
+        asset.name for asset in selected_assets if not _has_release_asset_sha256_digest(asset)
+    )
+    if missing_digest_assets:
+        asset_names = ", ".join(missing_digest_assets)
+        raise RuntimeError(
+            f"release {catalog.tag_name} does not expose a verified SHA-256 digest for: {asset_names}"
+        )
+
+    return selected_assets
 
 
 def install_managed_llama_cpp_runtime(
@@ -705,6 +718,7 @@ def _download_release_assets(
         )
         downloaded_bytes = 0
         reported_total = 0
+        digest = hashlib.sha256()
         try:
             with urllib.request.urlopen(request, timeout=300) as response:
                 reported_total = int(response.headers.get("Content-Length") or asset.size_bytes or 0)
@@ -715,6 +729,7 @@ def _download_release_assets(
                         if not chunk:
                             break
                         handle.write(chunk)
+                        digest.update(chunk)
                         downloaded_bytes += len(chunk)
                         if total_bytes > 0:
                             ratio = min(1.0, (completed_bytes + downloaded_bytes) / total_bytes)
@@ -727,6 +742,15 @@ def _download_release_assets(
                         if reported_total > 0:
                             detail = f"{asset.name} {_format_megabytes(downloaded_bytes)}/{_format_megabytes(reported_total)}"
                         _report_progress(progress_callback, "runtime_download", "Download Runtime", detail, fraction)
+            expected_digest = _required_release_asset_sha256_digest(asset)
+            actual_digest = digest.hexdigest()
+            if actual_digest != expected_digest:
+                raise RuntimeError(
+                    "downloaded llama.cpp runtime asset failed SHA-256 verification.\n"
+                    f"Asset: {asset.name}\n"
+                    f"Expected: {expected_digest}\n"
+                    f"Actual: {actual_digest}"
+                )
             completed_bytes += downloaded_bytes
             archives.append(target_path)
             append_runtime_diagnostic_event(
@@ -735,6 +759,7 @@ def _download_release_assets(
                 target_path=target_path,
                 downloaded_bytes=downloaded_bytes,
                 reported_total=reported_total,
+                sha256=actual_digest,
             )
         except Exception as exc:
             append_runtime_diagnostic_event(
@@ -748,6 +773,32 @@ def _download_release_assets(
             )
             raise
     return tuple(archives)
+
+
+def _parse_release_asset_sha256_digest(raw_digest: object) -> str | None:
+    if raw_digest is None:
+        return None
+    digest_text = str(raw_digest).strip()
+    if not digest_text:
+        return None
+    prefix = "sha256:"
+    if not digest_text.lower().startswith(prefix):
+        return None
+    normalized = digest_text[len(prefix) :].strip().lower()
+    if len(normalized) != 64 or not all(character in "0123456789abcdef" for character in normalized):
+        return None
+    return normalized
+
+
+def _has_release_asset_sha256_digest(asset: LlamaCppReleaseAsset) -> bool:
+    return bool(asset.sha256_digest and len(asset.sha256_digest) == 64)
+
+
+def _required_release_asset_sha256_digest(asset: LlamaCppReleaseAsset) -> str:
+    digest = asset.sha256_digest or ""
+    if len(digest) != 64:
+        raise RuntimeError(f"release asset {asset.name} is missing a verified SHA-256 digest")
+    return digest
 
 
 def _extract_release_archives(

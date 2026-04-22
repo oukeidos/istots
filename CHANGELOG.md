@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.6] - 2026-04-23
+- Prevents Windows setup from reusing broken leftover files and verifies downloaded runtime files before use.
+
 ## [0.4.5] - 2026-04-22
 - Fixed Windows packaged setup failures caused by inconsistent bundled HTTPS runtime libraries in GitHub-built artifacts.
 

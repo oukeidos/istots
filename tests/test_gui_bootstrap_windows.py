@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,11 +33,13 @@ def test_resolve_runtime_variant_skips_missing_auto_assets(monkeypatch) -> None:
                 name="llama-b8855-bin-win-vulkan-x64.zip",
                 download_url="https://example.invalid/vulkan.zip",
                 size_bytes=1,
+                sha256_digest="0" * 64,
             ),
             bootstrap_windows.LlamaCppReleaseAsset(
                 name="llama-b8855-bin-win-cpu-x64.zip",
                 download_url="https://example.invalid/cpu.zip",
                 size_bytes=1,
+                sha256_digest="1" * 64,
             ),
         ),
     )
@@ -57,6 +60,7 @@ def test_resolve_runtime_variant_accepts_manual_arm64_cpu_asset() -> None:
                 name="llama-b8855-bin-win-cpu-arm64.zip",
                 download_url="https://example.invalid/cpu-arm64.zip",
                 size_bytes=1,
+                sha256_digest="2" * 64,
             ),
         ),
     )
@@ -319,6 +323,7 @@ def test_install_managed_runtime_does_not_reuse_existing_state_for_different_req
                 name="llama-b8855-bin-win-cpu-x64.zip",
                 download_url="https://example.invalid/cpu.zip",
                 size_bytes=1,
+                sha256_digest="3" * 64,
             ),
         ),
     )
@@ -384,3 +389,114 @@ def test_record_managed_runtime_validation_updates_state(monkeypatch, tmp_path: 
     assert writes
     assert writes[0].last_validation_ok is False
     assert writes[0].last_validation_detail == "runtime test failed"
+
+
+def test_fetch_latest_llama_cpp_release_parses_asset_sha256_digest() -> None:
+    catalog = bootstrap_windows.fetch_latest_llama_cpp_release(
+        fetch_bytes=lambda url: (
+            b'{"tag_name":"b9001","assets":[{"name":"llama-b9001-bin-win-cpu-x64.zip",'
+            b'"browser_download_url":"https://example.invalid/cpu.zip","size":7,'
+            b'"digest":"sha256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"}]}'
+        ),
+    )
+
+    assert catalog.tag_name == "b9001"
+    assert catalog.assets[0].sha256_digest == "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+
+
+def test_select_release_assets_requires_sha256_digest_for_selected_asset() -> None:
+    catalog = bootstrap_windows.LlamaCppReleaseCatalog(
+        tag_name="b9002",
+        assets=(
+            bootstrap_windows.LlamaCppReleaseAsset(
+                name="llama-b9002-bin-win-cpu-x64.zip",
+                download_url="https://example.invalid/cpu.zip",
+                size_bytes=1,
+                sha256_digest=None,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="does not expose a verified SHA-256 digest"):
+        bootstrap_windows.select_release_assets(catalog, "x64/cpu")
+
+
+def test_download_release_assets_rejects_sha256_mismatch(tmp_path: Path, monkeypatch) -> None:
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    asset = bootstrap_windows.LlamaCppReleaseAsset(
+        name="llama-b9003-bin-win-cpu-x64.zip",
+        download_url="https://example.invalid/cpu.zip",
+        size_bytes=7,
+        sha256_digest="0" * 64,
+    )
+
+    class _Response:
+        headers = {"Content-Length": "7"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            if hasattr(self, "_done"):
+                return b""
+            self._done = True
+            return b"payload"
+
+    monkeypatch.setattr(
+        bootstrap_windows.urllib.request,
+        "urlopen",
+        lambda request, timeout=300: _Response(),
+    )
+
+    with pytest.raises(RuntimeError, match="failed SHA-256 verification"):
+        bootstrap_windows._download_release_assets(
+            assets=(asset,),
+            stage_dir=stage_dir,
+            progress_callback=None,
+        )
+
+
+def test_download_release_assets_accepts_matching_sha256(tmp_path: Path, monkeypatch) -> None:
+    payload = b"payload"
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    asset = bootstrap_windows.LlamaCppReleaseAsset(
+        name="llama-b9004-bin-win-cpu-x64.zip",
+        download_url="https://example.invalid/cpu.zip",
+        size_bytes=len(payload),
+        sha256_digest=hashlib.sha256(payload).hexdigest(),
+    )
+
+    class _Response:
+        headers = {"Content-Length": str(len(payload))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int) -> bytes:
+            if hasattr(self, "_done"):
+                return b""
+            self._done = True
+            return payload
+
+    monkeypatch.setattr(
+        bootstrap_windows.urllib.request,
+        "urlopen",
+        lambda request, timeout=300: _Response(),
+    )
+
+    archives = bootstrap_windows._download_release_assets(
+        assets=(asset,),
+        stage_dir=stage_dir,
+        progress_callback=None,
+    )
+
+    assert archives == ((stage_dir / asset.name).resolve(),)
+    assert archives[0].read_bytes() == payload
