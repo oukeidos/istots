@@ -15,6 +15,7 @@ __pycache__/
 .coverage
 htmlcov/
 build/
+build/windows_runtime_allowlist_automation/
 dist/
 *.egg-info/
 packaging/inno/Output/

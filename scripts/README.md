@@ -2,6 +2,46 @@
 
 Local helper scripts for debugging and inspection live in this directory.
 
+## Update Windows Runtime Allowlist
+
+The Windows managed-runtime allowlist updater is a standalone maintenance tool.
+It scans recent upstream `llama.cpp` releases on a Windows host, records local
+validation results in a gitignored artifact directory, and can then apply the
+top passing candidates into the committed allowlist source file.
+
+Full usage notes live in:
+
+- `scripts/update_windows_runtime_allowlist.README.md`
+
+Scan recent releases and stop early once the configured per-family target is
+met:
+
+```bash
+uv run python scripts/update_windows_runtime_allowlist.py scan
+```
+
+Apply the top pending passing tags into
+`src/istots/gui/windows_runtime_allowlist.py`:
+
+```bash
+uv run python scripts/update_windows_runtime_allowlist.py apply
+```
+
+Useful knobs:
+
+- `--target x64/cpu=3`: how many new passing tags to collect or apply per
+  family for that run
+- `--attempt-budget x64/vulkan=6`: max local validation attempts per family in
+  a scan run
+- `--lookback-days 120`: how far back a scan may look when the last run was a
+  long time ago
+- `--release-limit 40`: hard cap on how many recent upstream tags one scan
+  inspects
+
+By default the tool writes its persistent ledger and latest summaries under
+`build/windows_runtime_allowlist_automation/`. Those artifacts are local-only
+and gitignored.
+
 ## Export Furigana Debug Images
 
 To inspect the masking results frame by frame:
