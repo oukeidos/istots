@@ -107,6 +107,16 @@ class ManagedRuntimeCandidate:
 
 
 @dataclass(frozen=True)
+class ManagedRuntimeCandidateFailure:
+    candidate: ManagedRuntimeCandidate
+    candidate_index: int
+    candidate_count: int
+    outcome: str
+    summary: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class ManagedLlamaCppRuntimeState:
     release_tag: str
     variant_id: str
@@ -635,17 +645,104 @@ def _managed_runtime_candidate_label(candidate: ManagedRuntimeCandidate) -> str:
     return f"{candidate.release_tag} {candidate.variant_id}"
 
 
+def _managed_runtime_candidate_attempt_label(
+    *,
+    candidate: ManagedRuntimeCandidate,
+    candidate_index: int,
+    candidate_count: int,
+) -> str:
+    return f"{candidate_index}/{candidate_count} {_managed_runtime_candidate_label(candidate)}"
+
+
+def _collapse_managed_runtime_failure_detail(detail: str) -> str:
+    return " ".join(line.strip() for line in detail.splitlines() if line.strip())
+
+
+def _summarize_managed_runtime_candidate_failure(
+    *,
+    outcome: str,
+    detail: str,
+) -> str:
+    prefix = {
+        "release_lookup_failed": "release lookup failed",
+        "asset_selection_failed": "approved assets unavailable",
+        "download_failed": "download failed",
+        "extract_failed": "runtime package invalid",
+        "probe_failed": "startup probe failed",
+    }.get(outcome, outcome.replace("_", " "))
+    compact_detail = _collapse_managed_runtime_failure_detail(detail)
+    if outcome == "probe_failed":
+        exit_match = re.search(r"exit=(\d+)", compact_detail)
+        if exit_match is not None:
+            return f"{prefix} (exit {exit_match.group(1)})"
+        startup_prefix = "managed llama.cpp runtime failed startup validation."
+        if compact_detail.startswith(startup_prefix):
+            compact_detail = compact_detail[len(startup_prefix) :].strip()
+    if not compact_detail:
+        return prefix
+    if len(compact_detail) > 120:
+        compact_detail = compact_detail[:117].rstrip() + "..."
+    if compact_detail.lower().startswith(prefix):
+        return compact_detail
+    return f"{prefix}: {compact_detail}"
+
+
+def _build_managed_runtime_candidate_failure(
+    *,
+    candidate: ManagedRuntimeCandidate,
+    candidate_index: int,
+    candidate_count: int,
+    outcome: str,
+    detail: str,
+) -> ManagedRuntimeCandidateFailure:
+    return ManagedRuntimeCandidateFailure(
+        candidate=candidate,
+        candidate_index=candidate_index,
+        candidate_count=candidate_count,
+        outcome=outcome,
+        summary=_summarize_managed_runtime_candidate_failure(outcome=outcome, detail=detail),
+        detail=detail,
+    )
+
+
 def _format_managed_runtime_candidate_failures(
     *,
     requested_variant: str,
-    failure_lines: list[str],
+    failures: list[ManagedRuntimeCandidateFailure],
 ) -> str:
-    detail_lines = "\n".join(failure_lines)
-    return (
-        "managed llama.cpp runtime installation failed after trying approved candidates.\n"
-        f"Requested variant: {requested_variant}\n"
-        f"Tried candidates:\n{detail_lines}"
+    lines = [
+        "Setup could not install an approved llama.cpp runtime.",
+        f"Requested target: {requested_variant}",
+        f"Approved candidates tried: {len(failures)}",
+    ]
+    if not failures:
+        lines.append("No approved candidates were available for this request.")
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "",
+            "Summary:",
+            *[
+                f"- {_managed_runtime_candidate_attempt_label(candidate=failure.candidate, candidate_index=failure.candidate_index, candidate_count=failure.candidate_count)} | {failure.summary}"
+                for failure in failures
+            ],
+            "",
+            "Full details:",
+        ]
     )
+    for failure in failures:
+        lines.append(
+            f"- {_managed_runtime_candidate_attempt_label(candidate=failure.candidate, candidate_index=failure.candidate_index, candidate_count=failure.candidate_count)}"
+        )
+        lines.append(f"  Outcome: {failure.outcome}")
+        lines.append(f"  Summary: {failure.summary}")
+        if failure.detail:
+            for detail_line in failure.detail.splitlines():
+                stripped = detail_line.strip()
+                if stripped:
+                    lines.append(f"  {stripped}")
+    return "\n".join(lines)
 
 
 def _candidate_progress_fraction(candidate_index: int, candidate_count: int) -> float:
@@ -880,7 +977,7 @@ def install_managed_llama_cpp_runtime(
                 for candidate in candidates
             ],
         )
-        failure_lines: list[str] = []
+        failures: list[ManagedRuntimeCandidateFailure] = []
         for index, candidate in enumerate(candidates, start=1):
             _raise_if_bootstrap_cancelled(cancel_event, stage="runtime candidate selection")
             _report_progress(
@@ -909,6 +1006,13 @@ def install_managed_llama_cpp_runtime(
                 )
             except ManagedRuntimeCandidateError as exc:
                 detail = str(exc).strip() or exc.outcome
+                failure = _build_managed_runtime_candidate_failure(
+                    candidate=candidate,
+                    candidate_index=index,
+                    candidate_count=len(candidates),
+                    outcome=exc.outcome,
+                    detail=detail,
+                )
                 record_managed_runtime_attempt(
                     release_tag=candidate.release_tag,
                     variant_id=candidate.variant_id,
@@ -924,7 +1028,14 @@ def install_managed_llama_cpp_runtime(
                     outcome=exc.outcome,
                     detail=detail,
                 )
-                failure_lines.append(f"- {_managed_runtime_candidate_label(candidate)}: {detail}")
+                failures.append(failure)
+                _report_progress(
+                    progress_callback,
+                    "runtime_resolve",
+                    "Resolve Runtime",
+                    f"{_managed_runtime_candidate_attempt_label(candidate=candidate, candidate_index=index, candidate_count=len(candidates))} failed: {failure.summary}",
+                    _candidate_progress_fraction(index, len(candidates)),
+                )
                 continue
             record_managed_runtime_attempt(
                 release_tag=state.release_tag,
@@ -938,7 +1049,7 @@ def install_managed_llama_cpp_runtime(
         raise RuntimeError(
             _format_managed_runtime_candidate_failures(
                 requested_variant=requested_variant,
-                failure_lines=failure_lines,
+                failures=failures,
             )
         )
     except Exception as exc:

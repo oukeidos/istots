@@ -447,6 +447,30 @@ def _split_message_box_content(
     )
 
 
+def _collapse_inline_status_text(text: str) -> str:
+    return " ".join(part.strip() for part in text.splitlines() if part.strip())
+
+
+def _format_setup_progress_label_text(
+    event: SetupProgressEvent,
+    *,
+    max_chars: int = 120,
+) -> tuple[str, str]:
+    full_text = " ".join(
+        part
+        for part in (
+            _collapse_inline_status_text(event.headline),
+            _collapse_inline_status_text(event.detail),
+        )
+        if part
+    )
+    if not full_text:
+        return ("", "")
+    if len(full_text) <= max_chars:
+        return (full_text, full_text)
+    return (full_text[: max_chars - 3].rstrip() + "...", full_text)
+
+
 def _build_gui_icon():
     if QtGui is None:
         return None
@@ -1296,6 +1320,7 @@ if QtWidgets is not None:  # pragma: no branch
             self._setup_progress_last_event_at = None
             self.progress.hide()
             self.progress_detail.clear()
+            self.progress_detail.setToolTip("")
             self.progress_detail.hide()
             self.progress_time.clear()
             self.progress_time.hide()
@@ -1633,6 +1658,7 @@ if QtWidgets is not None:  # pragma: no branch
                 self.progress.setRange(0, 1000)
                 self.progress.setValue(0)
                 self.progress_detail.setText("Preparing setup")
+                self.progress_detail.setToolTip("")
                 self.progress_detail.show()
                 self._begin_setup_progress()
             else:
@@ -1783,11 +1809,10 @@ if QtWidgets is not None:  # pragma: no branch
             else:
                 self.progress.setRange(0, 1000)
                 self.progress.setValue(max(0, min(1000, int(round(event.fraction * 1000)))))
-            detail = event.headline
-            if event.detail:
-                detail = f"{detail} {event.detail}"
+            detail, full_detail = _format_setup_progress_label_text(event)
             self.progress_detail.setText(detail)
-            self.progress_detail.show()
+            self.progress_detail.setToolTip("" if not full_detail or full_detail == detail else full_detail)
+            self.progress_detail.setVisible(bool(detail))
             self._refresh_setup_progress_display()
 
         def _on_setup_finished(self, _result: SetupResult) -> None:

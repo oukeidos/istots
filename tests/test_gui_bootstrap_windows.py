@@ -301,12 +301,16 @@ def test_install_managed_runtime_does_not_reprobe_same_candidate_after_failed_ex
         lambda **kwargs: attempts.append((kwargs["release_tag"], kwargs["variant_id"], kwargs["outcome"])),
     )
 
-    with pytest.raises(RuntimeError, match="failed after trying approved candidates"):
+    with pytest.raises(RuntimeError) as exc_info:
         bootstrap_windows.install_managed_llama_cpp_runtime(
             requested_variant="x64/vulkan",
             fetch_bytes=lambda url: b"",
         )
 
+    message = str(exc_info.value)
+    assert "Setup could not install an approved llama.cpp runtime." in message
+    assert "Requested target: x64/vulkan" in message
+    assert "- 1/1 b8855 x64/vulkan | startup probe failed: broken runtime" in message
     assert validations == [binary]
     assert variant_dir in removals
     assert attempts == [("b8855", "x64/vulkan", "probe_failed")]

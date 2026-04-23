@@ -14,6 +14,7 @@ from istots.gui.core import GuiRuntimeStatus
 from istots.gui.qt_app import (
     TastingWindow,
     _apply_application_metadata,
+    _format_setup_progress_label_text,
     _status_shape_name,
     _wrap_message_box_text,
     list_gui_theme_ids,
@@ -130,6 +131,25 @@ def test_progress_time_marks_remaining_as_estimated() -> None:
         assert formatted == "00:24 / est. 00:15 left"
     finally:
         window.close()
+
+
+def test_format_setup_progress_label_text_keeps_single_line_preview() -> None:
+    preview, full_text = _format_setup_progress_label_text(
+        SetupProgressEvent(
+            phase="runtime_resolve",
+            headline="Resolve Runtime",
+            detail=(
+                "Trying approved runtime 2/4: b8892 x64/vulkan\n"
+                "This keeps the label on one line while preserving the full text for the tooltip."
+            ),
+            fraction=0.4,
+        ),
+        max_chars=72,
+    )
+
+    assert "\n" not in preview
+    assert preview.endswith("...")
+    assert "Resolve Runtime Trying approved runtime 2/4: b8892 x64/vulkan" in full_text
 
 
 def test_tasting_window_uses_packaged_gui_icon() -> None:
