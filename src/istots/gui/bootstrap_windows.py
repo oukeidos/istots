@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, replace
@@ -17,6 +18,13 @@ from pathlib import Path
 from typing import Callable
 
 from istots.frozen_subprocess import sanitized_external_subprocess_runtime
+from istots.gui.windows_runtime_allowlist import (
+    AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT,
+    AUTO_MANAGED_RUNTIME_FAMILY_ORDER,
+    MANUAL_MANAGED_RUNTIME_CANDIDATE_LIMIT,
+    MANUAL_MANAGED_RUNTIME_VARIANTS,
+    allowlisted_runtime_tags_for_variant,
+)
 from istots.llama_mmproj import default_materialized_mmproj_path
 from istots.runtime_diagnostics import append_runtime_diagnostic_event
 from istots.runtime_prerequisites import (
@@ -27,21 +35,15 @@ from istots.runtime_prerequisites import (
 from istots.windows_subprocess import hidden_windows_subprocess_kwargs
 
 LLAMA_CPP_LATEST_RELEASE_API_URL = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+LLAMA_CPP_RELEASE_BY_TAG_API_URL_TEMPLATE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{tag}"
 GUI_MANAGED_ROOT_ENV = "ISTOTS_GUI_MANAGED_ROOT"
 GUI_RUNTIME_STATE_FILENAME = "llama_cpp_runtime.json"
+GUI_RUNTIME_ATTEMPT_HISTORY_FILENAME = "llama_cpp_runtime_attempt_history.json"
 MANAGED_RUNTIME_SOURCE = "managed"
 EXTERNAL_RUNTIME_SOURCE = "external"
 OVERRIDE_RUNTIME_SOURCE = "override"
 MISSING_RUNTIME_SOURCE = "missing"
-MANUAL_RUNTIME_VARIANTS = (
-    "x64/cpu",
-    "arm64/cpu",
-    "x64/cuda12",
-    "x64/cuda13",
-    "x64/vulkan",
-    "x64/sycl",
-    "x64/hip",
-)
+MANUAL_RUNTIME_VARIANTS = MANUAL_MANAGED_RUNTIME_VARIANTS
 AUTO_RUNTIME_VARIANT_FALLBACK = "x64/cpu"
 
 _VARIANT_PRIMARY_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -71,6 +73,7 @@ class GuiManagedPaths:
     derived_mmproj_dir: Path
     state_dir: Path
     runtime_state_path: Path
+    runtime_attempt_history_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,22 @@ class LlamaCppReleaseAsset:
 class LlamaCppReleaseCatalog:
     tag_name: str
     assets: tuple[LlamaCppReleaseAsset, ...]
+
+
+@dataclass(frozen=True)
+class ManagedRuntimeAttemptRecord:
+    release_tag: str
+    variant_id: str
+    attempt_count: int = 0
+    last_attempted_at: float = 0.0
+    last_outcome: str = ""
+    last_detail: str = ""
+
+
+@dataclass(frozen=True)
+class ManagedRuntimeCandidate:
+    release_tag: str
+    variant_id: str
 
 
 @dataclass(frozen=True)
@@ -133,6 +152,7 @@ def gui_managed_paths() -> GuiManagedPaths:
         derived_mmproj_dir=root / "derived" / "mmproj",
         state_dir=state_dir,
         runtime_state_path=state_dir / GUI_RUNTIME_STATE_FILENAME,
+        runtime_attempt_history_path=state_dir / GUI_RUNTIME_ATTEMPT_HISTORY_FILENAME,
     )
 
 
@@ -168,6 +188,13 @@ def managed_fast_mmproj_path(
         return None
     filename = default_materialized_mmproj_path(base_mmproj, min_pixels).name
     return (gui_managed_derived_mmproj_dir() / base_mmproj.parent.name / filename).resolve()
+
+
+def _managed_runtime_attempt_history_path(paths: GuiManagedPaths) -> Path:
+    configured_path = paths.runtime_attempt_history_path
+    if configured_path is not None:
+        return configured_path
+    return paths.state_dir / GUI_RUNTIME_ATTEMPT_HISTORY_FILENAME
 
 
 def load_managed_runtime_state() -> ManagedLlamaCppRuntimeState | None:
@@ -220,6 +247,91 @@ def write_managed_runtime_state(state: ManagedLlamaCppRuntimeState) -> None:
     paths.runtime_state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def load_managed_runtime_attempt_history() -> dict[tuple[str, str], ManagedRuntimeAttemptRecord]:
+    paths = gui_managed_paths()
+    path = _managed_runtime_attempt_history_path(paths)
+    try:
+        if not path.exists():
+            return {}
+    except OSError:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    entries = payload.get("entries", ())
+    if not isinstance(entries, list):
+        return {}
+
+    history: dict[tuple[str, str], ManagedRuntimeAttemptRecord] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        try:
+            record = ManagedRuntimeAttemptRecord(
+                release_tag=str(item["release_tag"]),
+                variant_id=str(item["variant_id"]),
+                attempt_count=max(0, int(item.get("attempt_count", 0))),
+                last_attempted_at=float(item.get("last_attempted_at", 0.0)),
+                last_outcome=str(item.get("last_outcome", "")),
+                last_detail=str(item.get("last_detail", "")),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        history[(record.variant_id, record.release_tag)] = record
+    return history
+
+
+def write_managed_runtime_attempt_history(
+    history: dict[tuple[str, str], ManagedRuntimeAttemptRecord],
+) -> None:
+    paths = gui_managed_paths()
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "entries": [
+            {
+                "release_tag": record.release_tag,
+                "variant_id": record.variant_id,
+                "attempt_count": record.attempt_count,
+                "last_attempted_at": record.last_attempted_at,
+                "last_outcome": record.last_outcome,
+                "last_detail": record.last_detail,
+            }
+            for record in sorted(
+                history.values(),
+                key=lambda item: (item.variant_id, item.release_tag),
+            )
+        ],
+    }
+    _managed_runtime_attempt_history_path(paths).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def record_managed_runtime_attempt(
+    *,
+    release_tag: str,
+    variant_id: str,
+    outcome: str,
+    detail: str,
+) -> ManagedRuntimeAttemptRecord:
+    history = load_managed_runtime_attempt_history()
+    key = (variant_id, release_tag)
+    current = history.get(key)
+    record = ManagedRuntimeAttemptRecord(
+        release_tag=release_tag,
+        variant_id=variant_id,
+        attempt_count=(current.attempt_count if current is not None else 0) + 1,
+        last_attempted_at=time.time(),
+        last_outcome=outcome,
+        last_detail=detail,
+    )
+    history[key] = record
+    write_managed_runtime_attempt_history(history)
+    return record
+
+
 def record_managed_runtime_validation(
     *,
     ok: bool,
@@ -244,19 +356,24 @@ def record_managed_runtime_validation(
 def auto_runtime_variant_candidates() -> tuple[str, ...]:
     candidates: list[str] = []
     if _can_load_system_library("nvcuda.dll"):
-        candidates.extend(("x64/cuda13", "x64/cuda12"))
+        candidates.append("x64/cuda12")
     if _can_load_system_library("vulkan-1.dll"):
         candidates.append("x64/vulkan")
     candidates.append(AUTO_RUNTIME_VARIANT_FALLBACK)
-    return tuple(dict.fromkeys(candidates))
+    return tuple(
+        dict.fromkeys(
+            candidate
+            for candidate in candidates
+            if allowlisted_runtime_tags_for_variant(candidate)
+        )
+    )
 
 
-def fetch_latest_llama_cpp_release(
+def _parse_release_catalog_payload(
+    raw_payload: bytes,
     *,
-    fetch_bytes: Callable[[str], bytes] | None = None,
+    source_label: str,
 ) -> LlamaCppReleaseCatalog:
-    downloader = fetch_bytes or _fetch_url_bytes
-    raw_payload = downloader(LLAMA_CPP_LATEST_RELEASE_API_URL)
     payload = json.loads(raw_payload.decode("utf-8"))
     assets = tuple(
         LlamaCppReleaseAsset(
@@ -272,10 +389,183 @@ def fetch_latest_llama_cpp_release(
     )
     tag_name = str(payload.get("tag_name") or "").strip()
     if not tag_name:
-        raise RuntimeError("latest llama.cpp release metadata did not include a tag name")
+        raise RuntimeError(f"{source_label} metadata did not include a tag name")
     if not assets:
-        raise RuntimeError(f"latest llama.cpp release {tag_name} did not expose downloadable assets")
+        raise RuntimeError(f"{source_label} {tag_name} did not expose downloadable assets")
     return LlamaCppReleaseCatalog(tag_name=tag_name, assets=assets)
+
+
+def fetch_latest_llama_cpp_release(
+    *,
+    fetch_bytes: Callable[[str], bytes] | None = None,
+) -> LlamaCppReleaseCatalog:
+    downloader = fetch_bytes or _fetch_url_bytes
+    return _parse_release_catalog_payload(
+        downloader(LLAMA_CPP_LATEST_RELEASE_API_URL),
+        source_label="latest llama.cpp release",
+    )
+
+
+def fetch_llama_cpp_release_by_tag(
+    tag_name: str,
+    *,
+    fetch_bytes: Callable[[str], bytes] | None = None,
+) -> LlamaCppReleaseCatalog:
+    normalized_tag = tag_name.strip()
+    if not normalized_tag:
+        raise RuntimeError("llama.cpp release tag must not be empty")
+    downloader = fetch_bytes or _fetch_url_bytes
+    api_url = LLAMA_CPP_RELEASE_BY_TAG_API_URL_TEMPLATE.format(
+        tag=urllib.parse.quote(normalized_tag, safe=""),
+    )
+    return _parse_release_catalog_payload(
+        downloader(api_url),
+        source_label="allowlisted llama.cpp release",
+    )
+
+
+def _normalize_requested_runtime_variant(requested_variant: str) -> str:
+    normalized = requested_variant.strip().lower()
+    if not normalized:
+        return "auto"
+    if normalized == "auto":
+        return normalized
+    if normalized not in MANUAL_RUNTIME_VARIANTS:
+        supported = ", ".join(MANUAL_RUNTIME_VARIANTS)
+        raise RuntimeError(
+            f"unsupported managed llama.cpp runtime variant: {requested_variant}. "
+            f"Supported variants: auto, {supported}"
+        )
+    return normalized
+
+
+def _ranked_allowlist_tags_for_variant(
+    variant_id: str,
+    *,
+    attempt_history: dict[tuple[str, str], ManagedRuntimeAttemptRecord],
+) -> tuple[str, ...]:
+    tags = allowlisted_runtime_tags_for_variant(variant_id)
+    ranked = list(enumerate(tags))
+    ranked.sort(
+        key=lambda item: (
+            0 if attempt_history.get((variant_id, item[1])) is None else 1,
+            (
+                attempt_history[(variant_id, item[1])].attempt_count
+                if (variant_id, item[1]) in attempt_history
+                else 0
+            ),
+            item[0],
+        )
+    )
+    return tuple(tag for _, tag in ranked)
+
+
+def _auto_candidate_plan(
+    *,
+    variant_candidates: tuple[str, ...],
+    attempt_history: dict[tuple[str, str], ManagedRuntimeAttemptRecord],
+) -> tuple[ManagedRuntimeCandidate, ...]:
+    if not variant_candidates:
+        return ()
+
+    if variant_candidates == (AUTO_RUNTIME_VARIANT_FALLBACK,):
+        ranked_cpu_tags = _ranked_allowlist_tags_for_variant(
+            AUTO_RUNTIME_VARIANT_FALLBACK,
+            attempt_history=attempt_history,
+        )
+        return tuple(
+            ManagedRuntimeCandidate(release_tag=tag, variant_id=AUTO_RUNTIME_VARIANT_FALLBACK)
+            for tag in ranked_cpu_tags[:AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT]
+        )
+
+    cpu_variant = AUTO_RUNTIME_VARIANT_FALLBACK if AUTO_RUNTIME_VARIANT_FALLBACK in variant_candidates else None
+    non_cpu_variants = tuple(variant for variant in variant_candidates if variant != cpu_variant)
+    ranked_by_variant = {
+        variant_id: list(
+            _ranked_allowlist_tags_for_variant(
+                variant_id,
+                attempt_history=attempt_history,
+            )
+        )
+        for variant_id in variant_candidates
+    }
+
+    planned: list[ManagedRuntimeCandidate] = []
+    non_cpu_limit = AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT
+    if cpu_variant is not None and ranked_by_variant.get(cpu_variant):
+        non_cpu_limit -= 1
+
+    while len(planned) < non_cpu_limit:
+        progressed = False
+        for variant_id in non_cpu_variants:
+            tags = ranked_by_variant[variant_id]
+            if not tags:
+                continue
+            planned.append(ManagedRuntimeCandidate(release_tag=tags.pop(0), variant_id=variant_id))
+            progressed = True
+            if len(planned) >= non_cpu_limit:
+                break
+        if not progressed:
+            break
+
+    if cpu_variant is not None and ranked_by_variant.get(cpu_variant) and len(planned) < AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT:
+        planned.append(
+            ManagedRuntimeCandidate(
+                release_tag=ranked_by_variant[cpu_variant][0],
+                variant_id=cpu_variant,
+            )
+        )
+
+    while len(planned) < AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT:
+        progressed = False
+        for variant_id in variant_candidates:
+            tags = ranked_by_variant[variant_id]
+            if not tags:
+                continue
+            next_tag = tags.pop(0)
+            candidate = ManagedRuntimeCandidate(release_tag=next_tag, variant_id=variant_id)
+            if candidate in planned:
+                continue
+            planned.append(candidate)
+            progressed = True
+            if len(planned) >= AUTO_MANAGED_RUNTIME_CANDIDATE_LIMIT:
+                break
+        if not progressed:
+            break
+
+    return tuple(planned)
+
+
+def select_allowlisted_runtime_candidates(
+    *,
+    requested_variant: str,
+    attempt_history: dict[tuple[str, str], ManagedRuntimeAttemptRecord] | None = None,
+) -> tuple[ManagedRuntimeCandidate, ...]:
+    history = attempt_history or {}
+    normalized_variant = _normalize_requested_runtime_variant(requested_variant)
+    if normalized_variant != "auto":
+        ranked_tags = _ranked_allowlist_tags_for_variant(
+            normalized_variant,
+            attempt_history=history,
+        )
+        if not ranked_tags:
+            raise RuntimeError(f"managed llama.cpp allowlist is empty for variant {normalized_variant}")
+        return tuple(
+            ManagedRuntimeCandidate(release_tag=tag, variant_id=normalized_variant)
+            for tag in ranked_tags[:MANUAL_MANAGED_RUNTIME_CANDIDATE_LIMIT]
+        )
+
+    variant_candidates = tuple(
+        variant_id
+        for variant_id in AUTO_MANAGED_RUNTIME_FAMILY_ORDER
+        if variant_id in auto_runtime_variant_candidates()
+    )
+    if not variant_candidates:
+        raise RuntimeError("managed llama.cpp allowlist did not expose a supported Windows x64 runtime family")
+    return _auto_candidate_plan(
+        variant_candidates=variant_candidates,
+        attempt_history=history,
+    )
 
 
 def resolve_runtime_variant(
@@ -335,6 +625,207 @@ def select_release_assets(
     return selected_assets
 
 
+class ManagedRuntimeCandidateError(RuntimeError):
+    def __init__(self, message: str, *, outcome: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
+def _managed_runtime_candidate_label(candidate: ManagedRuntimeCandidate) -> str:
+    return f"{candidate.release_tag} {candidate.variant_id}"
+
+
+def _format_managed_runtime_candidate_failures(
+    *,
+    requested_variant: str,
+    failure_lines: list[str],
+) -> str:
+    detail_lines = "\n".join(failure_lines)
+    return (
+        "managed llama.cpp runtime installation failed after trying approved candidates.\n"
+        f"Requested variant: {requested_variant}\n"
+        f"Tried candidates:\n{detail_lines}"
+    )
+
+
+def _candidate_progress_fraction(candidate_index: int, candidate_count: int) -> float:
+    if candidate_count <= 1:
+        return 0.15
+    return 0.15 + (0.6 * (candidate_index - 1) / max(1, candidate_count - 1))
+
+
+def _install_allowlisted_runtime_candidate(
+    candidate: ManagedRuntimeCandidate,
+    *,
+    paths: GuiManagedPaths,
+    existing_state: ManagedLlamaCppRuntimeState | None,
+    force: bool,
+    progress_callback: Callable[[str, str, str, float | None], None] | None,
+    fetch_bytes: Callable[[str], bytes] | None,
+    cancel_event: threading.Event | None,
+) -> ManagedLlamaCppRuntimeState:
+    try:
+        catalog = fetch_llama_cpp_release_by_tag(candidate.release_tag, fetch_bytes=fetch_bytes)
+    except Exception as exc:
+        raise ManagedRuntimeCandidateError(str(exc), outcome="release_lookup_failed") from exc
+
+    try:
+        assets = select_release_assets(catalog, candidate.variant_id)
+    except Exception as exc:
+        raise ManagedRuntimeCandidateError(str(exc), outcome="asset_selection_failed") from exc
+
+    variant_dir = _variant_install_dir(paths.runtime_dir, catalog.tag_name, candidate.variant_id)
+    append_runtime_diagnostic_event(
+        "managed_runtime_candidate_resolved",
+        release_tag=catalog.tag_name,
+        variant_id=candidate.variant_id,
+        assets=[asset.name for asset in assets],
+        variant_dir=variant_dir,
+    )
+
+    if (
+        not force
+        and existing_state is not None
+        and existing_state.binary_path.exists()
+        and existing_state.install_dir.exists()
+        and existing_state.release_tag == catalog.tag_name
+        and existing_state.variant_id == candidate.variant_id
+    ):
+        _report_progress(
+            progress_callback,
+            "runtime_validate",
+            "Validate Runtime",
+            f"Checking approved runtime {catalog.tag_name} {candidate.variant_id}",
+            None,
+        )
+        try:
+            validate_llama_server_binary(existing_state.binary_path, cancel_event=cancel_event)
+        except RuntimeError as exc:
+            if existing_state.install_dir.exists():
+                _safe_rmtree(existing_state.install_dir, within=paths.runtime_dir)
+            raise ManagedRuntimeCandidateError(str(exc), outcome="probe_failed") from exc
+        append_runtime_diagnostic_event(
+            "managed_runtime_reuse_existing_state",
+            release_tag=existing_state.release_tag,
+            variant_id=existing_state.variant_id,
+            binary_path=existing_state.binary_path,
+        )
+        return existing_state
+
+    if not force:
+        existing_binary = _locate_llama_server_binary(variant_dir)
+        if existing_binary is not None:
+            _report_progress(
+                progress_callback,
+                "runtime_validate",
+                "Validate Runtime",
+                f"Checking installed approved runtime {catalog.tag_name} {candidate.variant_id}",
+                None,
+            )
+            try:
+                validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
+            except RuntimeError as exc:
+                if variant_dir.exists():
+                    _safe_rmtree(variant_dir, within=paths.runtime_dir)
+                raise ManagedRuntimeCandidateError(str(exc), outcome="probe_failed") from exc
+            state = ManagedLlamaCppRuntimeState(
+                release_tag=catalog.tag_name,
+                variant_id=candidate.variant_id,
+                install_dir=variant_dir,
+                binary_path=existing_binary,
+                preferred_source=MANAGED_RUNTIME_SOURCE,
+                installed_at=time.time(),
+            )
+            write_managed_runtime_state(state)
+            append_runtime_diagnostic_event(
+                "managed_runtime_reuse_variant_dir",
+                release_tag=state.release_tag,
+                variant_id=state.variant_id,
+                binary_path=state.binary_path,
+            )
+            return state
+
+    stage_dir = Path(tempfile.mkdtemp(prefix="llama-cpp-", dir=str(paths.runtime_dir))).resolve()
+    try:
+        try:
+            archives = _download_release_assets(
+                assets=assets,
+                stage_dir=stage_dir,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            raise ManagedRuntimeCandidateError(str(exc), outcome="download_failed") from exc
+        if force and variant_dir.exists():
+            _safe_rmtree(variant_dir, within=paths.runtime_dir)
+        variant_dir.mkdir(parents=True, exist_ok=True)
+        append_runtime_diagnostic_event(
+            "managed_runtime_extract_start",
+            release_tag=catalog.tag_name,
+            variant_id=candidate.variant_id,
+            variant_dir=variant_dir,
+            archives=archives,
+        )
+        try:
+            _extract_release_archives(
+                archives=archives,
+                install_dir=variant_dir,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            if variant_dir.exists():
+                _safe_rmtree(variant_dir, within=paths.runtime_dir)
+            raise ManagedRuntimeCandidateError(str(exc), outcome="extract_failed") from exc
+        append_runtime_diagnostic_event(
+            "managed_runtime_extract_complete",
+            release_tag=catalog.tag_name,
+            variant_id=candidate.variant_id,
+            variant_dir=variant_dir,
+        )
+        binary_path = _locate_llama_server_binary(variant_dir)
+        if binary_path is None:
+            if variant_dir.exists():
+                _safe_rmtree(variant_dir, within=paths.runtime_dir)
+            raise ManagedRuntimeCandidateError(
+                f"downloaded llama.cpp runtime for {catalog.tag_name} {candidate.variant_id} did not contain llama-server.exe",
+                outcome="extract_failed",
+            )
+        _report_progress(
+            progress_callback,
+            "runtime_validate",
+            "Validate Runtime",
+            f"Running startup probe for approved runtime {catalog.tag_name} {candidate.variant_id}",
+            None,
+        )
+        try:
+            validate_llama_server_binary(binary_path, cancel_event=cancel_event)
+        except RuntimeError as exc:
+            if variant_dir.exists():
+                _safe_rmtree(variant_dir, within=paths.runtime_dir)
+            raise ManagedRuntimeCandidateError(str(exc), outcome="probe_failed") from exc
+        state = ManagedLlamaCppRuntimeState(
+            release_tag=catalog.tag_name,
+            variant_id=candidate.variant_id,
+            install_dir=variant_dir,
+            binary_path=binary_path,
+            preferred_source=MANAGED_RUNTIME_SOURCE,
+            installed_at=time.time(),
+        )
+        write_managed_runtime_state(state)
+        append_runtime_diagnostic_event(
+            "managed_runtime_install_complete",
+            release_tag=state.release_tag,
+            variant_id=state.variant_id,
+            binary_path=state.binary_path,
+            install_dir=state.install_dir,
+        )
+        return state
+    finally:
+        if stage_dir.exists():
+            _safe_rmtree(stage_dir, within=paths.runtime_dir)
+
+
 def install_managed_llama_cpp_runtime(
     *,
     requested_variant: str = "auto",
@@ -365,151 +856,91 @@ def install_managed_llama_cpp_runtime(
             progress_callback=progress_callback,
         )
         existing_state = load_managed_runtime_state()
-        _report_progress(progress_callback, "runtime_resolve", "Resolve Runtime", "Querying latest llama.cpp release", 0.05)
-        _raise_if_bootstrap_cancelled(cancel_event, stage="release resolution")
-        catalog = fetch_latest_llama_cpp_release(fetch_bytes=fetch_bytes)
-        variant_id = resolve_runtime_variant(catalog, requested_variant=requested_variant)
-        assets = select_release_assets(catalog, variant_id)
-        variant_dir = _variant_install_dir(paths.runtime_dir, catalog.tag_name, variant_id)
-        append_runtime_diagnostic_event(
-            "managed_runtime_release_resolved",
-            release_tag=catalog.tag_name,
-            variant_id=variant_id,
-            assets=[asset.name for asset in assets],
-            variant_dir=variant_dir,
+        attempt_history = load_managed_runtime_attempt_history()
+        _report_progress(
+            progress_callback,
+            "runtime_resolve",
+            "Resolve Runtime",
+            "Resolving approved llama.cpp runtime candidates",
+            0.05,
         )
-
-        if (
-            not force
-            and existing_state is not None
-            and existing_state.binary_path.exists()
-            and existing_state.install_dir.exists()
-            and existing_state.release_tag == catalog.tag_name
-            and existing_state.variant_id == variant_id
-        ):
-            try:
-                validate_llama_server_binary(existing_state.binary_path, cancel_event=cancel_event)
-            except RuntimeError:
-                _report_progress(
-                    progress_callback,
-                    "runtime_validate",
-                    "Validate Runtime",
-                    "Existing managed runtime failed validation; reinstalling",
-                    0.12,
-                )
-            else:
-                append_runtime_diagnostic_event(
-                    "managed_runtime_reuse_existing_state",
-                    release_tag=existing_state.release_tag,
-                    variant_id=existing_state.variant_id,
-                    binary_path=existing_state.binary_path,
-                )
-                return existing_state
-
-        if not force:
-            existing_binary = _locate_llama_server_binary(variant_dir)
-            if existing_binary is not None:
-                try:
-                    _report_progress(
-                        progress_callback,
-                        "runtime_validate",
-                        "Validate Runtime",
-                        "Checking existing installed runtime; waiting for llama-server to respond",
-                        0.32,
-                    )
-                    validate_llama_server_binary(existing_binary, cancel_event=cancel_event)
-                except RuntimeError:
-                    _report_progress(
-                        progress_callback,
-                        "runtime_validate",
-                        "Validate Runtime",
-                        "Installed runtime failed validation; reinstalling",
-                        0.36,
-                    )
-                    if variant_dir.exists():
-                        _safe_rmtree(variant_dir, within=paths.runtime_dir)
-                else:
-                    state = ManagedLlamaCppRuntimeState(
-                        release_tag=catalog.tag_name,
-                        variant_id=variant_id,
-                        install_dir=variant_dir,
-                        binary_path=existing_binary,
-                        preferred_source=MANAGED_RUNTIME_SOURCE,
-                        installed_at=time.time(),
-                    )
-                    write_managed_runtime_state(state)
-                    append_runtime_diagnostic_event(
-                        "managed_runtime_reuse_variant_dir",
-                        release_tag=state.release_tag,
-                        variant_id=state.variant_id,
-                        binary_path=state.binary_path,
-                    )
-                    return state
-
-        stage_dir = Path(tempfile.mkdtemp(prefix="llama-cpp-", dir=str(paths.runtime_dir))).resolve()
-        try:
-            archives = _download_release_assets(
-                assets=assets,
-                stage_dir=stage_dir,
-                progress_callback=progress_callback,
-                cancel_event=cancel_event,
-            )
-            if force and variant_dir.exists():
-                _safe_rmtree(variant_dir, within=paths.runtime_dir)
-            variant_dir.mkdir(parents=True, exist_ok=True)
-            append_runtime_diagnostic_event(
-                "managed_runtime_extract_start",
-                release_tag=catalog.tag_name,
-                variant_id=variant_id,
-                variant_dir=variant_dir,
-                archives=archives,
-            )
-            _extract_release_archives(
-                archives=archives,
-                install_dir=variant_dir,
-                progress_callback=progress_callback,
-                cancel_event=cancel_event,
-            )
-            append_runtime_diagnostic_event(
-                "managed_runtime_extract_complete",
-                release_tag=catalog.tag_name,
-                variant_id=variant_id,
-                variant_dir=variant_dir,
-            )
-            binary_path = _locate_llama_server_binary(variant_dir)
-            if binary_path is None:
-                raise RuntimeError(
-                    f"downloaded llama.cpp runtime for {catalog.tag_name} {variant_id} did not contain llama-server.exe"
-                )
+        _raise_if_bootstrap_cancelled(cancel_event, stage="release resolution")
+        candidates = select_allowlisted_runtime_candidates(
+            requested_variant=requested_variant,
+            attempt_history=attempt_history,
+        )
+        append_runtime_diagnostic_event(
+            "managed_runtime_candidates_planned",
+            requested_variant=requested_variant,
+            candidates=[
+                {
+                    "release_tag": candidate.release_tag,
+                    "variant_id": candidate.variant_id,
+                }
+                for candidate in candidates
+            ],
+        )
+        failure_lines: list[str] = []
+        for index, candidate in enumerate(candidates, start=1):
+            _raise_if_bootstrap_cancelled(cancel_event, stage="runtime candidate selection")
             _report_progress(
                 progress_callback,
-                "runtime_validate",
-                "Validate Runtime",
-                "Running startup probe; waiting for llama-server to respond",
-                0.96,
+                "runtime_resolve",
+                "Resolve Runtime",
+                f"Trying approved runtime {index}/{len(candidates)}: {_managed_runtime_candidate_label(candidate)}",
+                _candidate_progress_fraction(index, len(candidates)),
             )
-            validate_llama_server_binary(binary_path, cancel_event=cancel_event)
-            state = ManagedLlamaCppRuntimeState(
-                release_tag=catalog.tag_name,
-                variant_id=variant_id,
-                install_dir=variant_dir,
-                binary_path=binary_path,
-                preferred_source=MANAGED_RUNTIME_SOURCE,
-                installed_at=time.time(),
-            )
-            write_managed_runtime_state(state)
-            _report_progress(progress_callback, "runtime_ready", "Runtime Ready", f"{catalog.tag_name} {variant_id}", 1.0)
             append_runtime_diagnostic_event(
-                "managed_runtime_install_complete",
+                "managed_runtime_candidate_start",
+                release_tag=candidate.release_tag,
+                variant_id=candidate.variant_id,
+                candidate_index=index,
+                candidate_count=len(candidates),
+            )
+            try:
+                state = _install_allowlisted_runtime_candidate(
+                    candidate,
+                    paths=paths,
+                    existing_state=existing_state,
+                    force=force,
+                    progress_callback=progress_callback,
+                    fetch_bytes=fetch_bytes,
+                    cancel_event=cancel_event,
+                )
+            except ManagedRuntimeCandidateError as exc:
+                detail = str(exc).strip() or exc.outcome
+                record_managed_runtime_attempt(
+                    release_tag=candidate.release_tag,
+                    variant_id=candidate.variant_id,
+                    outcome=exc.outcome,
+                    detail=detail,
+                )
+                append_runtime_diagnostic_event(
+                    "managed_runtime_candidate_failed",
+                    release_tag=candidate.release_tag,
+                    variant_id=candidate.variant_id,
+                    candidate_index=index,
+                    candidate_count=len(candidates),
+                    outcome=exc.outcome,
+                    detail=detail,
+                )
+                failure_lines.append(f"- {_managed_runtime_candidate_label(candidate)}: {detail}")
+                continue
+            record_managed_runtime_attempt(
                 release_tag=state.release_tag,
                 variant_id=state.variant_id,
-                binary_path=state.binary_path,
-                install_dir=state.install_dir,
+                outcome="installed_ok",
+                detail="runtime validated",
             )
+            _report_progress(progress_callback, "runtime_ready", "Runtime Ready", f"{state.release_tag} {state.variant_id}", 1.0)
             return state
-        finally:
-            if stage_dir.exists():
-                _safe_rmtree(stage_dir, within=paths.runtime_dir)
+
+        raise RuntimeError(
+            _format_managed_runtime_candidate_failures(
+                requested_variant=requested_variant,
+                failure_lines=failure_lines,
+            )
+        )
     except Exception as exc:
         append_runtime_diagnostic_event(
             "managed_runtime_install_error",
@@ -620,64 +1051,57 @@ def validate_llama_server_binary(
     missing_prerequisites = missing_managed_runtime_prerequisites()
     if missing_prerequisites:
         raise RuntimeError(format_missing_managed_runtime_prerequisites(missing_prerequisites))
-    probes = (
-        ("--version",),
-        ("--help",),
+    probe_args = ("--version",)
+    append_runtime_diagnostic_event(
+        "managed_runtime_validation_probe_start",
+        binary_path=normalized_binary,
+        probe_args=probe_args,
     )
-    failures: list[str] = []
-    for probe_args in probes:
-        append_runtime_diagnostic_event(
-            "managed_runtime_validation_probe_start",
-            binary_path=normalized_binary,
-            probe_args=probe_args,
+    with sanitized_external_subprocess_runtime() as sanitized_env:
+        process = subprocess.Popen(
+            [str(normalized_binary), *probe_args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=sanitized_env,
+            **hidden_windows_subprocess_kwargs(),
         )
-        with sanitized_external_subprocess_runtime() as sanitized_env:
-            process = subprocess.Popen(
-                [str(normalized_binary), *probe_args],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=sanitized_env,
-                **hidden_windows_subprocess_kwargs(),
-            )
-            completed = _wait_for_validation_process(
-                process,
-                timeout=timeout,
-                cancel_event=cancel_event,
-            )
-        if completed.returncode == 0:
-            append_runtime_diagnostic_event(
-                "managed_runtime_validation_probe_complete",
-                binary_path=normalized_binary,
-                probe_args=probe_args,
-                returncode=completed.returncode,
-            )
-            return
-        failures.append(
-            _format_binary_probe_failure(
-                probe_args=probe_args,
-                returncode=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
+        completed = _wait_for_validation_process(
+            process,
+            timeout=timeout,
+            cancel_event=cancel_event,
         )
+    if completed.returncode == 0:
         append_runtime_diagnostic_event(
-            "managed_runtime_validation_probe_failed",
+            "managed_runtime_validation_probe_complete",
             binary_path=normalized_binary,
             probe_args=probe_args,
             returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
         )
+        return
+    failure = _format_binary_probe_failure(
+        probe_args=probe_args,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
+    append_runtime_diagnostic_event(
+        "managed_runtime_validation_probe_failed",
+        binary_path=normalized_binary,
+        probe_args=probe_args,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
     append_runtime_diagnostic_event(
         "managed_runtime_validation_failed",
         binary_path=normalized_binary,
-        failures=failures,
+        failures=[failure],
     )
     raise RuntimeError(
         "managed llama.cpp runtime failed startup validation.\n"
         f"Binary: {normalized_binary}\n"
-        + "\n".join(failures)
+        f"{failure}"
     )
 
 

@@ -18,7 +18,6 @@ def test_auto_runtime_variant_candidates_prioritize_cuda_then_vulkan_then_cpu(mo
     )
 
     assert bootstrap_windows.auto_runtime_variant_candidates() == (
-        "x64/cuda13",
         "x64/cuda12",
         "x64/vulkan",
         "x64/cpu",
@@ -46,26 +45,58 @@ def test_resolve_runtime_variant_skips_missing_auto_assets(monkeypatch) -> None:
     monkeypatch.setattr(
         bootstrap_windows,
         "auto_runtime_variant_candidates",
-        lambda: ("x64/cuda13", "x64/cuda12", "x64/vulkan", "x64/cpu"),
+        lambda: ("x64/cuda12", "x64/vulkan", "x64/cpu"),
     )
 
     assert bootstrap_windows.resolve_runtime_variant(catalog, requested_variant="auto") == "x64/vulkan"
 
 
-def test_resolve_runtime_variant_accepts_manual_arm64_cpu_asset() -> None:
-    catalog = bootstrap_windows.LlamaCppReleaseCatalog(
-        tag_name="b8855",
-        assets=(
-            bootstrap_windows.LlamaCppReleaseAsset(
-                name="llama-b8855-bin-win-cpu-arm64.zip",
-                download_url="https://example.invalid/cpu-arm64.zip",
-                size_bytes=1,
-                sha256_digest="2" * 64,
-            ),
+def test_select_allowlisted_runtime_candidates_rejects_unallowlisted_manual_variant() -> None:
+    with pytest.raises(RuntimeError, match="unsupported managed llama.cpp runtime variant"):
+        bootstrap_windows.select_allowlisted_runtime_candidates(requested_variant="arm64/cpu")
+
+
+def test_select_allowlisted_runtime_candidates_prioritize_never_tried_tags_then_lower_attempt_counts() -> None:
+    attempt_history = {
+        ("x64/cpu", "b8887"): bootstrap_windows.ManagedRuntimeAttemptRecord(
+            release_tag="b8887",
+            variant_id="x64/cpu",
+            attempt_count=2,
         ),
+        ("x64/cpu", "b8886"): bootstrap_windows.ManagedRuntimeAttemptRecord(
+            release_tag="b8886",
+            variant_id="x64/cpu",
+            attempt_count=1,
+        ),
+    }
+
+    candidates = bootstrap_windows.select_allowlisted_runtime_candidates(
+        requested_variant="x64/cpu",
+        attempt_history=attempt_history,
     )
 
-    assert bootstrap_windows.resolve_runtime_variant(catalog, requested_variant="arm64/cpu") == "arm64/cpu"
+    assert candidates[:3] == (
+        bootstrap_windows.ManagedRuntimeCandidate("b8885", "x64/cpu"),
+        bootstrap_windows.ManagedRuntimeCandidate("b8833", "x64/cpu"),
+        bootstrap_windows.ManagedRuntimeCandidate("b8832", "x64/cpu"),
+    )
+
+
+def test_select_allowlisted_runtime_candidates_keep_cpu_slot_for_auto(monkeypatch) -> None:
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "auto_runtime_variant_candidates",
+        lambda: ("x64/cuda12", "x64/vulkan", "x64/cpu"),
+    )
+
+    candidates = bootstrap_windows.select_allowlisted_runtime_candidates(requested_variant="auto")
+
+    assert candidates == (
+        bootstrap_windows.ManagedRuntimeCandidate("b8892", "x64/cuda12"),
+        bootstrap_windows.ManagedRuntimeCandidate("b8892", "x64/vulkan"),
+        bootstrap_windows.ManagedRuntimeCandidate("b8885", "x64/cuda12"),
+        bootstrap_windows.ManagedRuntimeCandidate("b8887", "x64/cpu"),
+    )
 
 
 def test_resolve_gui_runtime_binding_prefers_managed_state(monkeypatch, tmp_path: Path) -> None:
@@ -178,14 +209,10 @@ def test_validate_llama_server_binary_reports_failed_probes(monkeypatch, tmp_pat
         message = str(exc)
         assert "managed llama.cpp runtime failed startup validation." in message
         assert "Probe --version failed with exit=3221225477." in message
-        assert "Probe --help failed with exit=3221225477." in message
     else:
         raise AssertionError("expected startup validation failure")
 
-    assert [command for command, _ in seen] == [
-        [str(binary.resolve()), "--version"],
-        [str(binary.resolve()), "--help"],
-    ]
+    assert [command for command, _ in seen] == [[str(binary.resolve()), "--version"]]
     assert all(
         kwargs["creationflags"] & getattr(bootstrap_windows.subprocess, "CREATE_NO_WINDOW", 0)
         for _, kwargs in seen
@@ -215,7 +242,7 @@ def test_validate_llama_server_binary_reports_missing_prerequisite(monkeypatch, 
         bootstrap_windows.validate_llama_server_binary(binary)
 
 
-def test_install_managed_runtime_revalidates_existing_variant_dir_before_reuse(
+def test_install_managed_runtime_does_not_reprobe_same_candidate_after_failed_existing_variant_validation(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -233,61 +260,56 @@ def test_install_managed_runtime_revalidates_existing_variant_dir_before_reuse(
     binary.write_text("", encoding="utf-8")
     catalog = bootstrap_windows.LlamaCppReleaseCatalog(
         tag_name="b8855",
-        assets=(),
+        assets=(
+            bootstrap_windows.LlamaCppReleaseAsset(
+                name="llama-b8855-bin-win-vulkan-x64.zip",
+                download_url="https://example.invalid/vulkan.zip",
+                size_bytes=1,
+                sha256_digest="0" * 64,
+            ),
+        ),
     )
     validations: list[Path] = []
-    downloads: list[Path] = []
     removals: list[Path] = []
+    attempts: list[tuple[str, str, str]] = []
 
     monkeypatch.setattr(bootstrap_windows, "gui_managed_paths", lambda: paths)
     monkeypatch.setattr(bootstrap_windows, "ensure_managed_runtime_prerequisites", lambda **kwargs: ())
     monkeypatch.setattr(bootstrap_windows, "load_managed_runtime_state", lambda: None)
-    monkeypatch.setattr(bootstrap_windows, "fetch_latest_llama_cpp_release", lambda **kwargs: catalog)
+    monkeypatch.setattr(bootstrap_windows, "load_managed_runtime_attempt_history", lambda: {})
     monkeypatch.setattr(
         bootstrap_windows,
-        "resolve_runtime_variant",
-        lambda *args, **kwargs: "x64/vulkan",
+        "select_allowlisted_runtime_candidates",
+        lambda **kwargs: (bootstrap_windows.ManagedRuntimeCandidate("b8855", "x64/vulkan"),),
     )
-    monkeypatch.setattr(bootstrap_windows, "select_release_assets", lambda *args, **kwargs: ())
+    monkeypatch.setattr(bootstrap_windows, "fetch_llama_cpp_release_by_tag", lambda *args, **kwargs: catalog)
 
-    locate_results = [binary, binary]
-
-    def _fake_locate(_install_dir: Path) -> Path | None:
-        if locate_results:
-            return locate_results.pop(0)
-        return binary
-
-    def _fake_validate(path: Path) -> None:
-        validations.append(path)
-        raise RuntimeError("broken runtime")
-
-    monkeypatch.setattr(bootstrap_windows, "_locate_llama_server_binary", _fake_locate)
+    monkeypatch.setattr(bootstrap_windows, "_locate_llama_server_binary", lambda _install_dir: binary)
     monkeypatch.setattr(
         bootstrap_windows,
         "validate_llama_server_binary",
-        lambda path, cancel_event=None: _fake_validate(path),
+        lambda path, cancel_event=None: validations.append(path) or (_ for _ in ()).throw(RuntimeError("broken runtime")),
     )
-    monkeypatch.setattr(
-        bootstrap_windows,
-        "_download_release_assets",
-        lambda **kwargs: downloads.append(kwargs["stage_dir"]) or (),
-    )
-    monkeypatch.setattr(bootstrap_windows, "_extract_release_archives", lambda **kwargs: None)
     monkeypatch.setattr(
         bootstrap_windows,
         "_safe_rmtree",
         lambda path, *, within: removals.append(path),
     )
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "record_managed_runtime_attempt",
+        lambda **kwargs: attempts.append((kwargs["release_tag"], kwargs["variant_id"], kwargs["outcome"])),
+    )
 
-    with pytest.raises(RuntimeError, match="broken runtime"):
+    with pytest.raises(RuntimeError, match="failed after trying approved candidates"):
         bootstrap_windows.install_managed_llama_cpp_runtime(
             requested_variant="x64/vulkan",
             fetch_bytes=lambda url: b"",
         )
 
-    assert validations == [binary, binary]
-    assert downloads
+    assert validations == [binary]
     assert variant_dir in removals
+    assert attempts == [("b8855", "x64/vulkan", "probe_failed")]
 
 
 def test_install_managed_runtime_does_not_reuse_existing_state_for_different_requested_variant(
@@ -331,8 +353,15 @@ def test_install_managed_runtime_does_not_reuse_existing_state_for_different_req
     monkeypatch.setattr(bootstrap_windows, "gui_managed_paths", lambda: paths)
     monkeypatch.setattr(bootstrap_windows, "ensure_managed_runtime_prerequisites", lambda **kwargs: ())
     monkeypatch.setattr(bootstrap_windows, "load_managed_runtime_state", lambda: existing_state)
+    monkeypatch.setattr(bootstrap_windows, "load_managed_runtime_attempt_history", lambda: {})
     monkeypatch.setattr(bootstrap_windows, "write_managed_runtime_state", writes.append)
-    monkeypatch.setattr(bootstrap_windows, "fetch_latest_llama_cpp_release", lambda **kwargs: catalog)
+    monkeypatch.setattr(bootstrap_windows, "record_managed_runtime_attempt", lambda **kwargs: None)
+    monkeypatch.setattr(
+        bootstrap_windows,
+        "select_allowlisted_runtime_candidates",
+        lambda **kwargs: (bootstrap_windows.ManagedRuntimeCandidate("b8855", "x64/cpu"),),
+    )
+    monkeypatch.setattr(bootstrap_windows, "fetch_llama_cpp_release_by_tag", lambda *args, **kwargs: catalog)
     monkeypatch.setattr(
         bootstrap_windows,
         "validate_llama_server_binary",
@@ -389,6 +418,37 @@ def test_record_managed_runtime_validation_updates_state(monkeypatch, tmp_path: 
     assert writes
     assert writes[0].last_validation_ok is False
     assert writes[0].last_validation_detail == "runtime test failed"
+
+
+def test_record_managed_runtime_attempt_persists_history(monkeypatch, tmp_path: Path) -> None:
+    paths = bootstrap_windows.GuiManagedPaths(
+        root=tmp_path / "managed",
+        models_dir=tmp_path / "managed" / "models",
+        runtime_dir=tmp_path / "managed" / "runtime" / "llama.cpp",
+        derived_mmproj_dir=tmp_path / "managed" / "derived" / "mmproj",
+        state_dir=tmp_path / "managed" / "state",
+        runtime_state_path=tmp_path / "managed" / "state" / bootstrap_windows.GUI_RUNTIME_STATE_FILENAME,
+    )
+    monkeypatch.setattr(bootstrap_windows, "gui_managed_paths", lambda: paths)
+
+    bootstrap_windows.record_managed_runtime_attempt(
+        release_tag="b8887",
+        variant_id="x64/cpu",
+        outcome="probe_failed",
+        detail="blocked",
+    )
+    bootstrap_windows.record_managed_runtime_attempt(
+        release_tag="b8887",
+        variant_id="x64/cpu",
+        outcome="installed_ok",
+        detail="validated",
+    )
+
+    history = bootstrap_windows.load_managed_runtime_attempt_history()
+
+    assert history[("x64/cpu", "b8887")].attempt_count == 2
+    assert history[("x64/cpu", "b8887")].last_outcome == "installed_ok"
+    assert history[("x64/cpu", "b8887")].last_detail == "validated"
 
 
 def test_fetch_latest_llama_cpp_release_parses_asset_sha256_digest() -> None:

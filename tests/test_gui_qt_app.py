@@ -166,7 +166,9 @@ def test_tasting_window_keeps_run_and_setup_as_separate_actions() -> None:
         assert window.setup_label.text() == "Setup"
         assert window.test_label.text() == "Test"
         assert window.runtime_variant_combo.currentText() == "Auto"
-        assert window.runtime_variant_combo.findData("arm64/cpu") >= 0
+        assert window.runtime_variant_combo.findData("arm64/cpu") < 0
+        assert window.runtime_variant_combo.findData("x64/cuda12") >= 0
+        assert window.runtime_variant_combo.findData("x64/vulkan") >= 0
     finally:
         window.close()
 
