@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.7] - 2026-04-23
+- Improves Windows desktop setup by trying approved local runtime fallbacks, reducing repeated blocked launches, and showing clearer failure details when setup cannot finish.
+
 ## [0.4.6] - 2026-04-23
 - Prevents Windows setup from reusing broken leftover files and verifies downloaded runtime files before use.
 - Uses the output path entered by the user in the desktop app instead of falling back to the last suggested save path.

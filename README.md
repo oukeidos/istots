@@ -15,14 +15,31 @@ subtitles, it can also remove furigana before OCR. Furigana are small kana
 reading guides printed next to kanji, and they often become noise in OCR
 output.
 
-## Windows App
+## Windows App (Experimental)
 
 ![IStoTS Windows app screenshot](docs/images/screenshot.png)
 
-If you want the easiest path on Windows, use the packaged desktop app from the
-[GitHub Releases](https://github.com/oukeidos/istots/releases) page. This path
-is for simple local use: install the app, run the one-time setup, test the
-runtime once, and then convert subtitle files.
+If you want the simplest path on Windows, use the packaged desktop app from
+the [GitHub Releases](https://github.com/oukeidos/istots/releases) page. This
+Windows app path is still experimental.
+
+The reason is not the GUI layout or the conversion workflow by themselves. The
+problem is Windows app reputation and execution control screening on the two
+binaries this path depends on: the packaged `istots` app and the separately
+downloaded `llama.cpp` runtime.
+`Microsoft Defender SmartScreen` can warn on a newly downloaded installer or
+app with low file reputation, and `Smart App Control` on some Windows 11
+systems can block a downloaded `llama.cpp` runtime from starting at all. That
+means the GUI can still fail during `Set Up` even when the app logic is doing
+what it was designed to do.
+
+The current fix is practical rather than fundamental. IStoTS now uses an
+approved allowlist of Windows `llama.cpp` builds instead of blindly taking the
+latest upstream release, limits repeated startup probes, remembers past failed
+candidates on the same machine, and shows the exact fallback attempts when
+`Set Up` fails. This improves the odds, but it does not guarantee success on
+every Windows host. If you need the most predictable path, use the CLI from
+source.
 
 ### Download and Install
 
@@ -47,6 +64,13 @@ official Windows `llama.cpp` runtime used by the app, the PaddleOCR-VL GGUF
 model, the base mmproj file, and the derived fast mmproj file. These files are
 kept under `%LOCALAPPDATA%\istots\managed\`.
 
+To reduce failures from Windows blocking a just-downloaded runtime, `Set Up`
+does not simply trust the latest upstream `llama.cpp` Windows release anymore.
+It now tries a small approved fallback list for the selected runtime target
+(`auto`, `x64/cpu`, `x64/vulkan`, or `x64/cuda12`). If one approved candidate
+is blocked or unusable, the app moves to the next approved candidate within a
+limited retry budget.
+
 During this step, some behavior is expected:
 
 - Windows may ask to install Microsoft Visual C++ Redistributable. Allow it if
@@ -56,6 +80,9 @@ During this step, some behavior is expected:
 - Near the end, the app validates the runtime by starting `llama-server` and
   checking that it responds. This can look quiet for a short time even when it
   is working normally.
+- If `Set Up` fails after exhausting the approved runtime fallbacks, the dialog
+  now shows a short summary plus expandable full details for each approved
+  candidate that was tried.
 
 ### Run Test
 
@@ -74,33 +101,44 @@ After the app is ready:
 3. Enable `Mask Furigana` if you want it for Japanese subtitles.
 4. Click `Run`.
 
-The current Windows app is meant for easy setup and quick single-file
-conversion. If you want the full feature set, use the CLI from source.
+The Windows app is meant for easy setup and quick single-file conversion, but
+it remains experimental. If you want the full feature set, or the most
+predictable runtime path, use the CLI from source.
 
 ### Known Issues / Troubleshooting
 
 #### `Set Up` fails while preparing `llama.cpp`
 
-During `Set Up`, IStoTS downloads a separate Windows `llama.cpp` runtime and
-starts it once to confirm that it works. On some systems, Windows security
-features such as `Microsoft Defender Antivirus`, `Microsoft Defender
-SmartScreen`, or `Smart App Control` can delay, quarantine, or block a newly
-downloaded executable while it is being checked. When that happens, `Set Up`
-can fail near the end even though the download itself finished.
+This usually means Windows blocked, quarantined, or otherwise refused to start
+the downloaded managed `llama.cpp` runtime during validation. That is the main
+reason the Windows GUI is still marked experimental.
 
-There is no guaranteed in-app fix while Windows is still screening that file.
+When the approved fallback list is exhausted, `Set Up` shows a failure dialog
+with:
+
+- a short summary of the approved candidates that were tried
+- expandable full details for each candidate
+
+That dialog is meant to be shared, not hidden. It is now the most useful clue
+when you need to decide what to try next or when you need to report a failure.
+
 The most practical options are:
 
-1. Click `Set Up` again. A retry is meaningful: IStoTS uses a fresh temporary
-   download directory for the runtime, and if an installed runtime fails
-   validation it removes that runtime directory before downloading and
-   extracting a new copy.
-2. If Windows Security shows that the runtime was blocked or quarantined, open
+1. Click `Set Up` again. A retry is still meaningful because IStoTS records
+   previous approved candidate attempts and will prefer candidates that have
+   not been tried yet, or have been tried fewer times, on that machine.
+2. If the failure summary keeps showing the same runtime family failing first,
+   switch the setup target from `Auto` to another available target
+   (`x64/cpu`, `x64/vulkan`, or `x64/cuda12`) and run `Set Up` again.
+3. If Windows Security shows that the runtime was blocked or quarantined, open
    `Windows Security` > `Protection history`, review the event, and only if
    you trust the file and source allow it, then run `Set Up` again. In blocked
    or quarantined cases, Windows may require a new download after you allow
    the file.
-3. If retries keep failing, uninstall IStoTS, choose `Yes` when the
+4. When reporting the problem, include both the short summary and the full
+   details from the `Set Up` dialog. That information is now more useful than
+   a generic "`Set Up` failed" report.
+5. If retries keep failing, uninstall IStoTS, choose `Yes` when the
    uninstaller asks whether to remove downloaded managed runtime and model
    assets under `%LOCALAPPDATA%\istots\managed\`, then install the latest
    release again and rerun `Set Up`.
@@ -121,21 +159,21 @@ If removal or launch is blocked, try the least invasive fixes first:
    to write files, allow the blocked app through `Windows Security` > `Virus &
    threat protection` > `Ransomware protection` > `Allow an app through
    Controlled folder access`.
-4. If uninstall is stuck on Windows 11, first go to `Settings` > `Apps` >
-   `Installed apps`, try the built-in uninstall path there, and follow any
-   Windows troubleshooting steps that are offered automatically. On Windows
-   10, Microsoft's `Program Install and Uninstall` troubleshooter is the
-   documented fallback for blocked removal.
+4. If uninstall is stuck, first go to `Settings` > `Apps` > `Installed apps`
+   and try the built-in uninstall path there. If Windows still shows an
+   uninstall error, Microsoft's documented fallback on Windows 10 is the
+   `Program Install and Uninstall` troubleshooter.
 5. On Windows 11, if `Smart App Control` is the feature doing the blocking,
    Microsoft does not provide a per-app allow rule. In that case the built-in
    workaround is to turn `Smart App Control` off, complete the install or
    uninstall, and then turn it back on if it is still available on that
    device.
 6. As a last resort, if you fully trust the release file and only need to
-   remove the app, you can temporarily turn off `Microsoft Defender
-   Antivirus` real-time protection or add a narrow exclusion. Microsoft
-   documents exclusions as safer than turning off the entire antivirus
-   feature. Turn protection back on immediately after the uninstall.
+   remove the app, prefer adding a narrow `Microsoft Defender Antivirus`
+   exclusion. If that still does not let removal finish, you can temporarily
+   turn off real-time protection, complete the uninstall, and turn protection
+   back on immediately. Microsoft documents exclusions as safer than turning
+   off the entire antivirus feature.
 
 ## CLI From Source
 
@@ -168,16 +206,6 @@ With the repository checked out, install the Python dependencies:
 
 ```bash
 uv sync
-```
-
-### Optional GUI From Source
-
-If you want to try the desktop GUI from source instead of using the packaged
-Windows app, install the GUI extra and launch it with:
-
-```bash
-uv sync --extra gui
-uv run istots-gui
 ```
 
 ### Prepare the Default Runtime
